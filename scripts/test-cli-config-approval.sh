@@ -50,6 +50,7 @@ queue="$HOME/.hyperhub/config.approval.bin"
 [[ $(stat -c %a "$queue") == 600 ]]
 python3 - "$plan" <<'PY'
 import json
+import re
 import pathlib
 import sys
 plan = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -62,6 +63,10 @@ assert len(requests) == 3
 assert len({request["uuid"] for request in requests}) == 3
 assert [request["action"] for request in requests] == ["修改", "新增", "新增"]
 assert [request["section"] for request in requests] == ["网关 / 基础", "环境变量", "网关 / 路由"]
+assert requests[0]["config_item_uuid"] is None
+assert re.fullmatch(r"[0-9a-f-]{36}", requests[1]["config_item_uuid"])
+assert re.fullmatch(r"[0-9a-f-]{36}", requests[2]["config_item_uuid"])
+assert requests[1]["config_item_uuid"] != requests[2]["config_item_uuid"]
 assert requests[1]["details"] == ["变量值=已脱敏"]
 assert any("行为=拒绝" in detail for detail in requests[2]["details"])
 assert any("example.com" in detail for detail in requests[2]["details"])
@@ -108,6 +113,7 @@ import pty
 import select
 import signal
 import sys
+import time
 
 hyperhub, password, mode, transcript, secret, editor = sys.argv[1:]
 pid, fd = pty.fork()
@@ -136,9 +142,11 @@ while True:
     output.extend(chunk)
     text = output.decode("utf-8", errors="replace")
     if not password_sent and "HyperHub password:" in text:
+        time.sleep(0.05)
         os.write(fd, password.encode() + b"\n")
         password_sent = True
     if not secret_sent and "Enter value (masked):" in text:
+        time.sleep(0.05)
         os.write(fd, secret.encode() + b"\n")
         secret_sent = True
     prompt_count = text.count("选择 [a]批准") + text.count("当前配置项无效；选择")
@@ -164,8 +172,10 @@ while True:
 
 _, status = os.waitpid(pid, 0)
 pathlib.Path(transcript).write_bytes(bytes(output))
-if password.encode() in output or (secret != "unused" and secret.encode() in output):
-    raise SystemExit("approve transcript leaked hidden input")
+if password.encode() in output:
+    raise SystemExit("approve transcript leaked the configuration password")
+if secret != "unused" and secret.encode() in output:
+    raise SystemExit("approve transcript leaked the sensitive placeholder value")
 if secret != "unused" and (b"*" * len(secret.encode())) not in output:
     raise SystemExit("sensitive input did not display masked feedback")
 if not password_sent:
@@ -193,9 +203,9 @@ import re
 import sys
 planned = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-uuids = re.findall(r'"uuid": "([0-9a-f-]{36})"', text)
-assert uuids == [request["uuid"] for request in planned["requests"]]
+uuids = [request["uuid"] for request in planned["requests"]]
 assert len(set(uuids)) == 3
+assert all(f'"uuid": "{uuid}"' in text for uuid in uuids)
 assert '"action": "修改"' in text
 assert text.count('"action": "新增"') == 2
 assert '"section": "网关 / 基础"' in text
@@ -224,14 +234,15 @@ grep -q '\[3/3\] 配置审批项' "$resume_transcript"
 ! grep -q '\[2/3\] 配置审批项' "$resume_transcript"
 grep -q '"edited": true' "$resume_transcript"
 grep -q '"status": "completed"' "$resume_transcript"
-python3 - "$first_transcript" "$resume_transcript" <<'PY'
+python3 - "$plan" "$resume_transcript" <<'PY'
+import json
 import pathlib
-import re
 import sys
-first = re.findall(r'"uuid": "([0-9a-f-]{36})"', pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-resumed = re.findall(r'"uuid": "([0-9a-f-]{36})"', pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
-assert resumed
-assert set(resumed) == {first[-1]}
+planned = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+uuids = [request["uuid"] for request in planned["requests"]]
+assert f'"uuid": "{uuids[-1]}"' in text
+assert all(f'"uuid": "{uuid}"' not in text for uuid in uuids[:-1])
 PY
 [[ ! -e $queue ]] || { echo 'completed approval queue was not removed' >&2; exit 1; }
 
@@ -239,16 +250,19 @@ shown="$temporary/show.json"
 "$hyperhub" show > "$shown"
 cmp "$shown" "$HOME/.hyperhub/config.redacted.json"
 [[ $(stat -c %a "$HOME/.hyperhub/config.redacted.json") == 600 ]]
-python3 - "$shown" <<'PY'
+python3 - "$shown" "$plan" <<'PY'
 import json
 import pathlib
 import sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+plan = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 assert "real-github-api-key" not in text
 shown = json.loads(text)
 assert shown["debug"] is False
 assert shown["environment"][-1]["value"]["value"] == "<redacted>"
+assert shown["environment"][-1]["uuid"] == plan["requests"][1]["config_item_uuid"]
 route = shown["routes"][-1]
+assert route["uuid"] == plan["requests"][2]["config_item_uuid"]
 assert route["id"] == "llm-deny-example"
 assert route["priority"] == 120
 PY
