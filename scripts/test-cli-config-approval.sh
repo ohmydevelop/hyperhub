@@ -57,6 +57,14 @@ assert plan["status"] == "approval_required"
 assert plan["request_count"] == 3
 assert plan["changes"]
 assert len(plan["approval_token"]) == 64
+requests = plan["requests"]
+assert len(requests) == 3
+assert len({request["uuid"] for request in requests}) == 3
+assert [request["action"] for request in requests] == ["修改", "新增", "新增"]
+assert [request["section"] for request in requests] == ["网关 / 基础", "环境变量", "网关 / 路由"]
+assert requests[1]["details"] == ["变量值=已脱敏"]
+assert any("行为=拒绝" in detail for detail in requests[2]["details"])
+assert any("example.com" in detail for detail in requests[2]["details"])
 PY
 
 pending="$temporary/pending.json"
@@ -130,10 +138,10 @@ while True:
     if not password_sent and "HyperHub password:" in text:
         os.write(fd, password.encode() + b"\n")
         password_sent = True
-    if not secret_sent and "Enter value (hidden):" in text:
+    if not secret_sent and "Enter value (masked):" in text:
         os.write(fd, secret.encode() + b"\n")
         secret_sent = True
-    prompt_count = text.count("Choose [a]pprove") + text.count("Request is invalid; choose")
+    prompt_count = text.count("选择 [a]批准") + text.count("当前配置项无效；选择")
     while decisions_sent < prompt_count:
         decisions_sent += 1
         if mode == "interrupt":
@@ -158,6 +166,8 @@ _, status = os.waitpid(pid, 0)
 pathlib.Path(transcript).write_bytes(bytes(output))
 if password.encode() in output or (secret != "unused" and secret.encode() in output):
     raise SystemExit("approve transcript leaked hidden input")
+if secret != "unused" and (b"*" * len(secret.encode())) not in output:
+    raise SystemExit("sensitive input did not display masked feedback")
 if not password_sent:
     raise SystemExit("approve did not prompt for the configuration password")
 if mode == "interrupt":
@@ -171,11 +181,27 @@ PY
 
 first_transcript="$temporary/approve-interrupted.transcript"
 drive_approve interrupt "$first_transcript" 'real-github-api-key'
-grep -q '\[1/3\] configuration request' "$first_transcript"
-grep -q '\[1/3\] rejected' "$first_transcript"
-grep -q '\[2/3\] configuration request' "$first_transcript"
-grep -q '\[2/3\] approved' "$first_transcript"
-grep -q '\[3/3\] configuration request' "$first_transcript"
+grep -q '\[1/3\] 配置审批项' "$first_transcript"
+grep -q '\[1/3\] 已拒绝' "$first_transcript"
+grep -q '\[2/3\] 配置审批项' "$first_transcript"
+grep -q '\[2/3\] 已批准' "$first_transcript"
+grep -q '\[3/3\] 配置审批项' "$first_transcript"
+python3 - "$plan" "$first_transcript" <<'PY'
+import json
+import pathlib
+import re
+import sys
+planned = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+uuids = re.findall(r'"uuid": "([0-9a-f-]{36})"', text)
+assert uuids == [request["uuid"] for request in planned["requests"]]
+assert len(set(uuids)) == 3
+assert '"action": "修改"' in text
+assert text.count('"action": "新增"') == 2
+assert '"section": "网关 / 基础"' in text
+assert '"section": "环境变量"' in text
+assert '"section": "网关 / 路由"' in text
+PY
 [[ -f $queue ]] || { echo 'interruption removed the pending approval queue' >&2; exit 1; }
 
 partial="$temporary/partial-show.json"
@@ -193,11 +219,20 @@ PY
 
 resume_transcript="$temporary/approve-resumed.transcript"
 drive_approve resume "$resume_transcript" unused "$review_editor"
-grep -q '\[3/3\] configuration request' "$resume_transcript"
-! grep -q '\[1/3\] configuration request' "$resume_transcript"
-! grep -q '\[2/3\] configuration request' "$resume_transcript"
+grep -q '\[3/3\] 配置审批项' "$resume_transcript"
+! grep -q '\[1/3\] 配置审批项' "$resume_transcript"
+! grep -q '\[2/3\] 配置审批项' "$resume_transcript"
 grep -q '"edited": true' "$resume_transcript"
 grep -q '"status": "completed"' "$resume_transcript"
+python3 - "$first_transcript" "$resume_transcript" <<'PY'
+import pathlib
+import re
+import sys
+first = re.findall(r'"uuid": "([0-9a-f-]{36})"', pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+resumed = re.findall(r'"uuid": "([0-9a-f-]{36})"', pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+assert resumed
+assert set(resumed) == {first[-1]}
+PY
 [[ ! -e $queue ]] || { echo 'completed approval queue was not removed' >&2; exit 1; }
 
 shown="$temporary/show.json"
@@ -259,7 +294,7 @@ run_live_update_test() {
   "$hyperhub" config patch "$live_patch" --password-file "$password_file" > "$temporary/live-plan.json"
   live_transcript="$temporary/live-approve.transcript"
   drive_approve apply "$live_transcript"
-  grep -q '\[1/1\] approved (live_update=true)' "$live_transcript"
+  grep -q '\[1/1\] 已批准（live_update=true）' "$live_transcript"
 
   kill "$serve_pid" 2>/dev/null || true
   wait "$serve_pid" 2>/dev/null || true
