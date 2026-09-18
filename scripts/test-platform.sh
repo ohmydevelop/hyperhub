@@ -50,6 +50,8 @@ export HYPERHUB_FRIDA_CORE_ROOT=${native_devkits[1]}
 native_include=$(cc -print-file-name=include)
 export BINDGEN_EXTRA_CLANG_ARGS="-I$HYPERHUB_FRIDA_CORE_ROOT -isystem $native_include"
 cargo build --release -p hyperhub --locked --target x86_64-unknown-linux-gnu
+"$root/scripts/test-cli-config-approval.sh" \
+  "$root/target/x86_64-unknown-linux-gnu/release/hyperhub"
 "$root/scripts/benchmark-linux-backends.sh" \
   --skip-build \
   --hyperhub "$root/target/x86_64-unknown-linux-gnu/release/hyperhub" \
