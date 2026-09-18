@@ -5,7 +5,7 @@ use hyperhub_core::session::{config_update_proof, ControlRequest, ControlRespons
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -17,7 +17,12 @@ pub(crate) enum Command {
     Patch {
         patch: PathBuf,
         password_file: Option<PathBuf>,
-        approval: Option<String>,
+    },
+    Approve {
+        patch: PathBuf,
+        password_file: Option<PathBuf>,
+        token: String,
+        editor: Option<PathBuf>,
     },
 }
 
@@ -55,7 +60,6 @@ fn parse_patch(args: &[OsString]) -> Result<Command, String> {
         .clone()
         .into();
     let mut password_file = None;
-    let mut approval = None;
     let mut index = 1;
     while index < args.len() {
         let option = args[index].to_string_lossy();
@@ -66,7 +70,6 @@ fn parse_patch(args: &[OsString]) -> Result<Command, String> {
             .clone();
         match option.as_ref() {
             "--password-file" => password_file = Some(value.into()),
-            "--approve" => approval = Some(value.to_string_lossy().into_owned()),
             _ => return Err(format!("unknown config patch option '{option}'")),
         }
         index += 1;
@@ -74,7 +77,39 @@ fn parse_patch(args: &[OsString]) -> Result<Command, String> {
     Ok(Command::Patch {
         patch,
         password_file,
-        approval,
+    })
+}
+
+pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
+    let patch = args
+        .first()
+        .ok_or("approve requires a JSON patch file")?
+        .clone()
+        .into();
+    let mut password_file = None;
+    let mut token = None;
+    let mut editor = None;
+    let mut index = 1;
+    while index < args.len() {
+        let option = args[index].to_string_lossy();
+        index += 1;
+        let value = args
+            .get(index)
+            .ok_or_else(|| format!("{option} requires a value"))?
+            .clone();
+        match option.as_ref() {
+            "--password-file" => password_file = Some(value.into()),
+            "--token" => token = Some(value.to_string_lossy().into_owned()),
+            "--editor" => editor = Some(value.into()),
+            _ => return Err(format!("unknown approve option '{option}'")),
+        }
+        index += 1;
+    }
+    Ok(Command::Approve {
+        patch,
+        password_file,
+        token: token.ok_or("approve requires --token <approval-token>")?,
+        editor,
     })
 }
 
@@ -92,8 +127,13 @@ pub(crate) fn run(command: Command) -> Result<i32, String> {
         Command::Patch {
             patch,
             password_file,
-            approval,
-        } => patch_config(&patch, password_file.as_deref(), approval.as_deref()),
+        } => patch_config(&patch, password_file.as_deref()),
+        Command::Approve {
+            patch,
+            password_file,
+            token,
+            editor,
+        } => approve_config(&patch, password_file.as_deref(), &token, editor.as_deref()),
     }
 }
 
@@ -121,60 +161,115 @@ fn show(password_file: Option<&Path>) -> Result<i32, String> {
     Ok(0)
 }
 
-fn patch_config(
-    patch_path: &Path,
-    password_file: Option<&Path>,
-    approval: Option<&str>,
-) -> Result<i32, String> {
+fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, String> {
     let path = default_config_path().map_err(|error| error.to_string())?;
     let active = load_active(&path, password_file)?;
-    let patch_bytes = read_patch(patch_path)?;
-    let patch: Value = serde_json::from_slice(&patch_bytes)
-        .map_err(|error| format!("invalid JSON patch: {error}"))?;
+    let patch = parse_patch_file(patch_path)?;
     let prepared = prepare_patch(&path, &active.config, &patch)?;
-    let live = crate::serve_is_running();
+    print_json(&json!({
+        "schema_version": 1,
+        "status": "approval_required",
+        "approval_token": prepared.approval_token,
+        "initialized": active.initialized,
+        "serve_running": crate::serve_is_running(),
+        "config_path": path,
+        "changes": prepared.changes,
+    }))?;
+    Ok(0)
+}
 
-    let Some(approval) = approval else {
-        print_json(&json!({
-            "schema_version": 1,
-            "status": "approval_required",
-            "approval_token": prepared.approval_token,
-            "initialized": active.initialized,
-            "serve_running": live,
-            "config_path": path,
-            "changes": prepared.changes,
-        }))?;
-        return Ok(0);
-    };
-    if approval != prepared.approval_token {
-        return Err("approval token does not match the current configuration and patch".into());
+fn approve_config(
+    patch_path: &Path,
+    password_file: Option<&Path>,
+    proposed_token: &str,
+    editor: Option<&Path>,
+) -> Result<i32, String> {
+    if patch_path == Path::new("-") {
+        return Err("approve requires a patch file so it can be reviewed in an editor".into());
     }
-    if prepared.changes.is_empty() {
-        print_json(&json!({
-            "schema_version": 1,
-            "status": "unchanged",
-            "approval_token": prepared.approval_token,
-            "config_path": path,
-        }))?;
-        return Ok(0);
+    let path = default_config_path().map_err(|error| error.to_string())?;
+    let active = load_active(&path, password_file)?;
+    let proposed_patch = parse_patch_file(patch_path)?;
+    let proposed = prepare_patch(&path, &active.config, &proposed_patch)?;
+    if proposed_token != proposed.approval_token {
+        return Err(
+            "approval token does not match the current configuration and proposed patch".into(),
+        );
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err("approve requires an interactive terminal for human review".into());
     }
 
+    let review_path = create_review_copy(patch_path)?;
+    let result = (|| {
+        open_editor(&review_path, editor)?;
+        let mut reviewed_patch = parse_patch_file(&review_path)?;
+        let placeholders = collect_placeholders(&reviewed_patch)?;
+        for placeholder in placeholders {
+            let value = crate::password::prompt_secret(&format!(
+                "Value for approval placeholder '{placeholder}': "
+            ))?;
+            if value.is_empty() {
+                return Err(format!(
+                    "approval placeholder '{placeholder}' cannot be empty"
+                ));
+            }
+            replace_placeholder(&mut reviewed_patch, &placeholder, &value);
+        }
+        let prepared = prepare_patch(&path, &active.config, &reviewed_patch)?;
+        if prepared.changes.is_empty() {
+            return Err("reviewed patch does not change the configuration".into());
+        }
+        let confirmation = &prepared.approval_token[..12];
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "status": "human_review",
+                "proposal_token": proposed.approval_token,
+                "review_token": prepared.approval_token,
+                "changes": prepared.changes,
+            }))
+            .map_err(|error| error.to_string())?
+        );
+        eprint!("Type APPLY {confirmation} to confirm: ");
+        std::io::stderr()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| format!("cannot read approval confirmation: {error}"))?;
+        if answer.trim_end() != format!("APPLY {confirmation}") {
+            return Err("configuration approval was cancelled".into());
+        }
+        apply_prepared(&path, &active, prepared)
+    })();
+    let _ = std::fs::remove_file(&review_path);
+    result
+}
+
+fn apply_prepared(
+    path: &Path,
+    active: &ActiveConfig,
+    prepared: PreparedPatch,
+) -> Result<i32, String> {
     config_store::save_encrypted_with_descriptor(
-        &path,
+        path,
         &prepared.config,
         active.password.as_bytes(),
         &active.descriptor,
     )
     .map_err(|error| error.to_string())?;
     let _ = config_store::reconcile_root_certificates(
-        &path,
+        path,
         prepared
             .config
             .root_certificates
             .iter()
             .map(|certificate| certificate.fingerprint.as_str()),
     );
-    let live_update = if live {
+    let live_update = if crate::serve_is_running() {
         push_live_update(
             &prepared.config,
             active.password.as_bytes(),
@@ -187,7 +282,7 @@ fn patch_config(
     print_json(&json!({
         "schema_version": 1,
         "status": "applied",
-        "approval_token": prepared.approval_token,
+        "review_token": prepared.approval_token,
         "config_path": path,
         "live_update": live_update,
         "changes": prepared.changes,
@@ -220,7 +315,7 @@ fn load_active(path: &Path, password_file: Option<&Path>) -> Result<ActiveConfig
     }
 }
 
-fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
+fn read_patch_bytes(path: &Path) -> Result<Vec<u8>, String> {
     if path == Path::new("-") {
         let mut bytes = Vec::new();
         std::io::stdin()
@@ -230,6 +325,120 @@ fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
     } else {
         std::fs::read(path)
             .map_err(|error| format!("cannot read JSON patch {}: {error}", path.display()))
+    }
+}
+
+fn parse_patch_file(path: &Path) -> Result<Value, String> {
+    let bytes = read_patch_bytes(path)?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("invalid JSON patch: {error}"))
+}
+
+fn create_review_copy(source: &Path) -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir();
+    let path = directory.join(format!(
+        "hyperhub-approve-{}-{:016x}.json",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let bytes = std::fs::read(source)
+        .map_err(|error| format!("cannot read JSON patch {}: {error}", source.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| format!("cannot create approval review file: {error}"))?;
+    file.write_all(&bytes)
+        .map_err(|error| format!("cannot write approval review file: {error}"))?;
+    Ok(path)
+}
+
+fn open_editor(review_path: &Path, explicit: Option<&Path>) -> Result<(), String> {
+    let editor = explicit
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HYPERHUB_EDITOR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "notepad.exe" } else { "vi" }));
+    let status = std::process::Command::new(&editor)
+        .arg(review_path)
+        .status()
+        .map_err(|error| format!("cannot start approval editor {}: {error}", editor.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("approval editor exited with {status}"))
+    }
+}
+
+fn collect_placeholders(value: &Value) -> Result<Vec<String>, String> {
+    let mut placeholders = Vec::new();
+    collect_placeholders_inner(value, &mut placeholders)?;
+    placeholders.sort();
+    placeholders.dedup();
+    Ok(placeholders)
+}
+
+fn collect_placeholders_inner(value: &Value, output: &mut Vec<String>) -> Result<(), String> {
+    match value {
+        Value::String(value) => {
+            if let Some(name) = parse_placeholder(value)? {
+                output.push(name.to_owned());
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_placeholders_inner(value, output)?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_placeholders_inner(value, output)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_placeholder(value: &str) -> Result<Option<&str>, String> {
+    if !value.starts_with("${APPROVE:") {
+        return Ok(None);
+    }
+    let Some(name) = value
+        .strip_prefix("${APPROVE:")
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return Err(format!("invalid approval placeholder '{value}'"));
+    };
+    if name.is_empty()
+        || !name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err(format!("invalid approval placeholder name '{name}'"));
+    }
+    Ok(Some(name))
+}
+
+fn replace_placeholder(value: &mut Value, name: &str, replacement: &str) {
+    match value {
+        Value::String(value) if value == &format!("${{APPROVE:{name}}}") => {
+            *value = replacement.to_owned();
+        }
+        Value::Array(values) => {
+            for value in values {
+                replace_placeholder(value, name, replacement);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                replace_placeholder(value, name, replacement);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -573,6 +782,25 @@ mod tests {
         .unwrap();
         assert_ne!(first.approval_token, second.approval_token);
         assert_eq!(first.changes.len(), 1);
+    }
+
+    #[test]
+    fn approval_placeholders_are_collected_and_replaced() {
+        let mut patch = json!([
+            {"op": "add", "path": "/one", "value": "${APPROVE:api-key}"},
+            {"op": "add", "path": "/two", "value": "${APPROVE:api-key}"}
+        ]);
+        assert_eq!(collect_placeholders(&patch).unwrap(), ["api-key"]);
+        replace_placeholder(&mut patch, "api-key", "real-secret");
+        assert_eq!(collect_placeholders(&patch).unwrap(), Vec::<String>::new());
+        assert_eq!(patch[0]["value"], "real-secret");
+        assert_eq!(patch[1]["value"], "real-secret");
+    }
+
+    #[test]
+    fn malformed_approval_placeholder_is_rejected() {
+        let error = collect_placeholders(&json!("${APPROVE:bad name}")).unwrap_err();
+        assert!(error.contains("invalid approval placeholder"));
     }
 
     #[test]

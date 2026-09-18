@@ -134,6 +134,10 @@ pub fn acquire_with_environment(
 
 /// 在隐藏输入提示前后保存并强制恢复控制台模式，避免 rpassword 在
 /// Windows Terminal/ConPTY 下遗留残缺输入状态。
+pub(crate) fn prompt_secret(message: &str) -> Result<Zeroizing<String>, String> {
+    prompt_hidden(message)
+}
+
 fn prompt_hidden(message: &str) -> Result<Zeroizing<String>, String> {
     let guard = ConsoleModeGuard::capture();
     let result = rpassword::prompt_password(message)
