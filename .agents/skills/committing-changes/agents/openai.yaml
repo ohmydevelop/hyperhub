@@ -1,0 +1,4 @@
+interface:
+  display_name: "HyperHub 中文提交规范"
+  short_description: "生成、拆分并检查符合项目约定的中文 Commit 信息"
+  default_prompt: "使用 $committing-changes 为当前变更规划并生成中文 Commit。"

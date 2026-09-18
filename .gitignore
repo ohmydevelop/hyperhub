@@ -1,0 +1,15 @@
+/target/
+/dist/
+/.cache/
+/.deps/
+/.hyperhub-ca/
+/audit/
+/--plain
+/toml
+.env
+**/*.user
+**/*.suo
+/.passwd
+/.repos/
+__pycache__/
+*.pyc
