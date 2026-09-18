@@ -1,0 +1,95 @@
+mode = "enforce"
+
+[listener]
+socks_listen = "127.0.0.1:18444"
+control = "\\\\.\\pipe\\hyperhub-control"
+pending_session_ttl_secs = 60
+
+[audit]
+connections = true
+
+# Agent 出站防火墙默认关闭；未配置 default 时未命中及异常均 pass。
+[firewall]
+enabled = false
+
+# [firewall.default]
+# action = "deny"
+#
+# [[firewall.rules]]
+# id = "block-example"
+# priority = 100
+# action = "deny"
+# [[firewall.rules.endpoints]]
+# target = "example.com"
+# port = 443
+
+[default_route]
+enabled = true
+deny = false
+plugins = []
+
+[[plugins]]
+id = "github-api-pat"
+kind = "credential"
+protocols = ["http"]
+http_scheme = "bearer"
+secret = { value = "replace-with-github-api-token" }
+
+[[plugins]]
+id = "github-git-pat"
+kind = "credential"
+protocols = ["http"]
+http_scheme = "basic"
+username = "x-access-token"
+password = { value = "replace-with-github-git-token" }
+
+[[plugins]]
+id = "metadata-only"
+kind = "audit"
+protocols = ["http", "ws", "git", "ssh"]
+capture_body = false
+body_limit = 1048576
+git_transcript = false
+ssh_transcript = false
+websocket_capture = "off"
+transcript_client_upload = true
+transcript_server_response = true
+
+[[plugins]]
+id = "openai-websocket-messages"
+kind = "audit"
+protocols = ["ws"]
+capture_body = false
+body_limit = 1048576
+git_transcript = false
+ssh_transcript = false
+websocket_capture = "messages"
+transcript_client_upload = true
+transcript_server_response = true
+
+[[routes]]
+id = "github-api-https"
+priority = 300
+plugins = ["github-api-pat", "metadata-only"]
+[[routes.endpoints]]
+target = "api.github.com"
+port = 443
+
+[[routes]]
+id = "github-https"
+priority = 200
+plugins = ["github-git-pat", "metadata-only"]
+[[routes.endpoints]]
+target = "github.com"
+port = 443
+
+[[routes]]
+id = "openai-https"
+priority = 250
+plugins = ["openai-websocket-messages"]
+[[routes.endpoints]]
+target = "openai.com"
+port = 443
+[[routes.endpoints]]
+target = "chatgpt.com"
+port = 443
