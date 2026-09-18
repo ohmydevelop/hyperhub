@@ -217,62 +217,156 @@ pub unsafe extern "C" fn connect(fd: c_int, address: *const sockaddr, length: so
         return original(fd, address, length);
     }
     let mut proxy: sockaddr_storage = std::mem::zeroed();
-    if plan.proxy_family == 2 {
+    let result = if plan.proxy_family == 2 {
         let p = &mut *(&mut proxy as *mut _ as *mut sockaddr_in);
         p.sin_family = AF_INET as u16;
         p.sin_port = plan.proxy_port.to_be();
         p.sin_addr.s_addr = u32::from_ne_bytes(plan.proxy_address[..4].try_into().unwrap());
-        if original(
+        original(
             fd,
             &proxy as *const _ as *const sockaddr,
             size_of::<sockaddr_in>() as socklen_t,
-        ) < 0
-        {
-            return -1;
-        }
+        )
     } else {
         let p = &mut *(&mut proxy as *mut _ as *mut sockaddr_in6);
         p.sin6_family = AF_INET6 as u16;
         p.sin6_port = plan.proxy_port.to_be();
         p.sin6_addr.s6_addr = plan.proxy_address;
-        if original(
+        original(
             fd,
             &proxy as *const _ as *const sockaddr,
             size_of::<sockaddr_in6>() as socklen_t,
-        ) < 0
-        {
+        )
+    };
+    if result < 0 {
+        let error = *libc::__errno_location();
+        if matches!(
+            error,
+            libc::EINPROGRESS | libc::EWOULDBLOCK | libc::EALREADY
+        ) {
             return -1;
         }
+        let _ = crate::hh_agent_close_socket(fd as u64);
+        *libc::__errno_location() = error;
+        return -1;
     }
+    if ensure_handshake_blocking(fd) {
+        0
+    } else {
+        let _ = crate::hh_agent_close_socket(fd as u64);
+        *libc::__errno_location() = libc::ECONNRESET;
+        -1
+    }
+}
+
+unsafe fn ensure_handshake(fd: c_int) -> bool {
+    let state = crate::hh_agent_handshake_complete(fd as u64);
+    if state == 1 || state < 0 {
+        return true;
+    }
+    let flags = libc::fcntl(fd, libc::F_GETFL);
+    if flags < 0 {
+        return false;
+    }
+    let was_nonblocking = flags & libc::O_NONBLOCK != 0;
+    if was_nonblocking && libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
+        return false;
+    }
+    let ok = exchange_handshake(fd);
+    let restored = !was_nonblocking || libc::fcntl(fd, libc::F_SETFL, flags) == 0;
+    ok && restored && crate::hh_agent_set_handshake_complete(fd as u64) == crate::HH_OK
+}
+
+unsafe fn ensure_handshake_blocking(fd: c_int) -> bool {
+    let state = crate::hh_agent_handshake_complete(fd as u64);
+    if state == 1 || state < 0 {
+        return true;
+    }
+    exchange_handshake(fd) && crate::hh_agent_set_handshake_complete(fd as u64) == crate::HH_OK
+}
+
+unsafe fn exchange_handshake(fd: c_int) -> bool {
     for phase in 0..3 {
-        let mut out = [0u8; 512];
-        let mut written = 0usize;
+        let mut request = [0u8; 512];
+        let mut request_length = 0usize;
         if crate::hh_agent_build_handshake(
             fd as u64,
             phase,
-            out.as_mut_ptr(),
-            out.len(),
-            &mut written,
+            request.as_mut_ptr(),
+            request.len(),
+            &mut request_length,
         ) != crate::HH_OK
+            || !send_all(fd, &request[..request_length])
         {
-            return -1;
+            return false;
         }
-        if send_fn()(fd, out.as_ptr() as *const c_void, written, 0) < 0 {
-            return -1;
+        if phase < 2 {
+            let mut reply = [0u8; 2];
+            if !recv_all(fd, &mut reply)
+                || crate::hh_agent_validate_handshake_reply(phase, reply.as_ptr(), reply.len())
+                    != crate::HH_OK
+            {
+                return false;
+            }
+            continue;
         }
-        let mut input = [0u8; 512];
-        let n = recv_fn()(fd, input.as_mut_ptr() as *mut c_void, input.len(), 0);
-        if n < 0 {
-            return -1;
+        let mut head = [0u8; 4];
+        if !recv_all(fd, &mut head) || head[0] != 5 || head[1] != 0 {
+            return false;
         }
-        if crate::hh_agent_validate_handshake_reply(phase, input.as_ptr(), n as usize)
+        let tail_length = match head[3] {
+            1 => 6,
+            4 => 18,
+            3 => {
+                let mut domain_length = [0u8; 1];
+                if !recv_all(fd, &mut domain_length) {
+                    return false;
+                }
+                domain_length[0] as usize + 2
+            }
+            _ => return false,
+        };
+        let mut tail = [0u8; 258];
+        if tail_length > tail.len() || !recv_all(fd, &mut tail[..tail_length]) {
+            return false;
+        }
+        let validation = [head[0], head[1], head[2], head[3], 0];
+        if crate::hh_agent_validate_handshake_reply(phase, validation.as_ptr(), validation.len())
             != crate::HH_OK
         {
-            return -1;
+            return false;
         }
     }
-    crate::hh_agent_set_handshake_complete(fd as u64);
-    0
+    true
+}
+
+unsafe fn send_all(fd: c_int, mut data: &[u8]) -> bool {
+    while !data.is_empty() {
+        let sent = send_fn()(fd, data.as_ptr() as *const c_void, data.len(), 0);
+        if sent > 0 {
+            data = &data[sent as usize..];
+        } else if sent < 0 && *libc::__errno_location() == libc::EINTR {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn recv_all(fd: c_int, mut data: &mut [u8]) -> bool {
+    while !data.is_empty() {
+        let received = recv_fn()(fd, data.as_mut_ptr() as *mut c_void, data.len(), 0);
+        if received > 0 {
+            let (_, remaining) = data.split_at_mut(received as usize);
+            data = remaining;
+        } else if received < 0 && *libc::__errno_location() == libc::EINTR {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 pub unsafe extern "C" fn send(
@@ -286,6 +380,10 @@ pub unsafe extern "C" fn send(
     let Some(_guard) = HookGuard::enter() else {
         return original(fd, buffer, length, flags);
     };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
     let result = original(fd, buffer, length, flags);
     let _ = crate::hh_agent_note_io(fd as u64, result as i64);
     result
@@ -301,6 +399,10 @@ pub unsafe extern "C" fn recv(
     let Some(_guard) = HookGuard::enter() else {
         return original(fd, buffer, length, flags);
     };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
     let result = original(fd, buffer, length, flags);
     let _ = crate::hh_agent_note_io(fd as u64, result as i64);
     result
@@ -593,6 +695,10 @@ pub unsafe extern "C" fn read(fd: c_int, b: *mut c_void, n: usize) -> isize {
     let Some(_guard) = HookGuard::enter() else {
         return original(fd, b, n);
     };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
     if let Ok(p) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
         if !crate::file_allows(&p.to_string_lossy(), crate::FileSandboxOperation::Read) {
             *libc::__errno_location() = libc::EACCES;
@@ -607,6 +713,10 @@ pub unsafe extern "C" fn write(fd: c_int, b: *const c_void, n: usize) -> isize {
     let Some(_guard) = HookGuard::enter() else {
         return original(fd, b, n);
     };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
     if let Ok(p) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
         if !crate::file_allows(&p.to_string_lossy(), crate::FileSandboxOperation::Write) {
             *libc::__errno_location() = libc::EACCES;
