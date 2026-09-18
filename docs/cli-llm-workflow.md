@@ -10,11 +10,13 @@ Skill 位于：
 
 ## CLI 配置与人工审计接口
 
-读取脱敏配置：
+读取完整、脱敏的 JSON 配置：
 
 ```sh
-hyperhub config show --password-file ./password
+hyperhub show --password-file ./password
 ```
+
+`hyperhub config show` 是兼容别名。输出中的 `sensitive_values_redacted` 固定为 `true`，`redacted_paths` 会列出所有被替换为 `<redacted>` 的 inline secret 路径。
 
 LLM 使用 JSON Patch 描述意图。需要真实凭证的位置使用审批占位符：
 

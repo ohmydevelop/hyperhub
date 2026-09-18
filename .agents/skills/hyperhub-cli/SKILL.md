@@ -13,10 +13,10 @@ HyperHub 的 LLM 驱动入口是本地 CLI 与 Shell。
 2. 读取当前配置：
 
    ```sh
-   hyperhub config show --password-file /path/to/password
+   hyperhub show --password-file /path/to/password
    ```
 
-   输出中的 inline secret 会显示为 `<redacted>`。
+   输出是完整 JSON 配置；所有 inline secret 会显示为 `<redacted>`，`redacted_paths` 列出被脱敏的位置。`hyperhub config show` 是兼容别名。
 3. 生成 RFC 6902 风格 JSON Patch。仅使用 `add`、`replace`、`remove`、`test`；数组追加使用 `/-`。需要人工输入的 key、token 或密码必须使用占位符，例如：
 
    ```json
@@ -48,7 +48,7 @@ HyperHub 的 LLM 驱动入口是本地 CLI 与 Shell。
 
    ```sh
    hyperhub validate --password-file /path/to/password
-   hyperhub config show --password-file /path/to/password
+   hyperhub show --password-file /path/to/password
    hyperhub status --json
    ```
 

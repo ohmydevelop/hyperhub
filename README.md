@@ -106,10 +106,10 @@ Windows 使用 `hyperhub.exe` 替换 `hyperhub`。具体参数可通过 `hyperhu
 
 ## LLM 通过 CLI 配置
 
-仓库提供 `$hyperhub-cli` Skill。LLM 先读取脱敏配置并生成 JSON Patch 计划，CLI 返回一次性审批 token；只有用户明确确认后才应用：
+仓库提供 `$hyperhub-cli` Skill。LLM 先通过 `hyperhub show` 读取完整的脱敏 JSON 配置并生成 JSON Patch 计划，CLI 返回一次性审批 token；只有用户明确确认后才应用：
 
 ```bash
-hyperhub config show --password-file ./password
+hyperhub show --password-file ./password
 hyperhub config patch patch.json --password-file ./password
 hyperhub approve patch.json --password-file ./password --token <token>
 ```
