@@ -19,8 +19,15 @@ PY
 }
 trap cleanup EXIT INT TERM
 
+preexisting_serve=0
+if "$hyperhub" status --json 2>/dev/null | grep -q '"state".*"running"'; then
+  preexisting_serve=1
+fi
+
 export HOME="$temporary/home"
-mkdir -p "$HOME"
+export XDG_RUNTIME_DIR="$temporary/runtime"
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
+chmod 0700 "$XDG_RUNTIME_DIR"
 password_file="$temporary/password"
 printf 'llm-test-password\n' > "$password_file"
 chmod 0600 "$password_file"
@@ -151,7 +158,10 @@ transcript="$temporary/approve.transcript"
 run_approve "$patch_file" "$approval" "$review_editor" 'real-github-api-key' apply "$transcript"
 
 shown="$temporary/show.json"
-"$hyperhub" config show --password-file "$password_file" > "$shown"
+"$hyperhub" show --password-file "$password_file" > "$shown"
+config_shown="$temporary/config-show.json"
+"$hyperhub" config show --password-file "$password_file" > "$config_shown"
+cmp "$shown" "$config_shown"
 python3 - "$shown" <<'PY'
 import json
 import pathlib
@@ -160,6 +170,8 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 assert "real-github-api-key" not in text
 shown = json.loads(text)
 assert shown["initialized"] is True
+assert shown["sensitive_values_redacted"] is True
+assert "/environment/3/value/value" in shown["redacted_paths"]
 assert shown["config"]["debug"] is True
 assert shown["config"]["environment"][-1]["value"]["value"] == "<redacted>"
 route = shown["config"]["routes"][-1]
@@ -168,46 +180,55 @@ assert route["priority"] == 120
 PY
 "$hyperhub" validate --password-file "$password_file" >/dev/null
 
-"$hyperhub" serve --password-file "$password_file" \
-  >"$temporary/serve.stdout" 2>"$temporary/serve.stderr" &
-serve_pid=$!
-for ((attempt = 0; attempt < 100; attempt++)); do
-  if "$hyperhub" status --json 2>/dev/null | grep -q '"state".*"running"'; then
-    break
-  fi
-  kill -0 "$serve_pid" 2>/dev/null || {
-    cat "$temporary/serve.stderr" >&2
-    echo 'Serve exited during config approval test' >&2
-    exit 1
-  }
-  sleep 0.05
-done
-"$hyperhub" status --json | grep -q '"state".*"running"'
+live_transcript=skipped
+run_live_update_test() {
+  "$hyperhub" serve --password-file "$password_file" \
+    >"$temporary/serve.stdout" 2>"$temporary/serve.stderr" &
+  serve_pid=$!
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if "$hyperhub" status --json 2>/dev/null | grep -q '"state".*"running"'; then
+      break
+    fi
+    kill -0 "$serve_pid" 2>/dev/null || {
+      cat "$temporary/serve.stderr" >&2
+      echo 'Serve exited during config approval test' >&2
+      exit 1
+    }
+    sleep 0.05
+  done
+  "$hyperhub" status --json | grep -q '"state".*"running"'
 
-live_patch="$temporary/live-patch.json"
-printf '[{"op":"replace","path":"/debug","value":false}]\n' > "$live_patch"
-chmod 0600 "$live_patch"
-live_plan="$temporary/live-plan.json"
-"$hyperhub" config patch "$live_patch" --password-file "$password_file" > "$live_plan"
-live_approval=$(python3 - "$live_plan" <<'PY'
+  live_patch="$temporary/live-patch.json"
+  printf '[{"op":"replace","path":"/debug","value":false}]\n' > "$live_patch"
+  chmod 0600 "$live_patch"
+  live_plan="$temporary/live-plan.json"
+  "$hyperhub" config patch "$live_patch" --password-file "$password_file" > "$live_plan"
+  live_approval=$(python3 - "$live_plan" <<'PYCODE'
 import json
 import pathlib
 import sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["approval_token"])
-PY
+PYCODE
 )
-noop_editor="$temporary/noop-editor"
-cat > "$noop_editor" <<'EOF_EDITOR'
+  noop_editor="$temporary/noop-editor"
+  cat > "$noop_editor" <<'EOF_EDITOR'
 #!/bin/sh
 exit 0
 EOF_EDITOR
-chmod 0700 "$noop_editor"
-live_transcript="$temporary/live-approve.transcript"
-run_approve "$live_patch" "$live_approval" "$noop_editor" unused apply "$live_transcript"
-grep -q '"live_update": true' "$live_transcript"
+  chmod 0700 "$noop_editor"
+  live_transcript="$temporary/live-approve.transcript"
+  run_approve "$live_patch" "$live_approval" "$noop_editor" unused apply "$live_transcript"
+  grep -q '"live_update": true' "$live_transcript"
 
-kill "$serve_pid" 2>/dev/null || true
-wait "$serve_pid" 2>/dev/null || true
-serve_pid=
+  kill "$serve_pid" 2>/dev/null || true
+  wait "$serve_pid" 2>/dev/null || true
+  serve_pid=
+}
+
+if ((preexisting_serve)); then
+  printf 'skipping isolated live-update check because another Serve is already running for this user\n'
+else
+  run_live_update_test
+fi
 printf 'CLI human approval integration passed; plan=%s review=%s live=%s\n' \
   "$plan" "$transcript" "$live_transcript"
