@@ -44,10 +44,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Command, String> {
         return Err("config command requires `show` or `patch`".into());
     };
     match action.as_ref() {
-        "show" => {
-            let password_file = parse_password_file("config show", &args[1..])?;
-            Ok(Command::Show { password_file })
-        }
+        "show" => parse_show(&args[1..]),
         "patch" => parse_patch(&args[1..]),
         value => Err(format!("unknown config action '{value}'")),
     }
@@ -78,6 +75,11 @@ fn parse_patch(args: &[OsString]) -> Result<Command, String> {
         patch,
         password_file,
     })
+}
+
+pub(crate) fn parse_show(args: &[OsString]) -> Result<Command, String> {
+    let password_file = parse_password_file("show", args)?;
+    Ok(Command::Show { password_file })
 }
 
 pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
@@ -151,11 +153,13 @@ fn show(password_file: Option<&Path>) -> Result<i32, String> {
         (config, false)
     };
     let mut value = serde_json::to_value(config).map_err(|error| error.to_string())?;
-    redact_secrets(&mut value);
+    let redacted_paths = redact_secrets(&mut value);
     print_json(&json!({
         "schema_version": 1,
         "initialized": initialized,
         "config_path": path,
+        "sensitive_values_redacted": true,
+        "redacted_paths": redacted_paths,
         "config": value,
     }))?;
     Ok(0)
@@ -269,15 +273,17 @@ fn apply_prepared(
             .iter()
             .map(|certificate| certificate.fingerprint.as_str()),
     );
-    let live_update = if crate::serve_is_running() {
-        push_live_update(
+    let (live_update, live_update_error) = if crate::serve_is_running() {
+        match push_live_update(
             &prepared.config,
             active.password.as_bytes(),
             &active.descriptor,
-        )?;
-        true
+        ) {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(error)),
+        }
     } else {
-        false
+        (false, None)
     };
     print_json(&json!({
         "schema_version": 1,
@@ -285,6 +291,7 @@ fn apply_prepared(
         "review_token": prepared.approval_token,
         "config_path": path,
         "live_update": live_update,
+        "live_update_error": live_update_error,
         "changes": prepared.changes,
     }))?;
     Ok(0)
@@ -463,8 +470,8 @@ fn prepare_patch(path: &Path, current: &Config, patch: &Value) -> Result<Prepare
 
     let mut before = current_value;
     let mut after = next_value;
-    redact_secrets(&mut before);
-    redact_secrets(&mut after);
+    let _ = redact_secrets(&mut before);
+    let _ = redact_secrets(&mut after);
     let mut changes = Vec::new();
     collect_changes("", &before, &after, &mut changes);
     Ok(PreparedPatch {
@@ -688,20 +695,27 @@ fn escape_pointer(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
 
-fn redact_secrets(value: &mut Value) {
+fn redact_secrets(value: &mut Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    redact_secrets_at("", value, &mut paths);
+    paths
+}
+
+fn redact_secrets_at(path: &str, value: &mut Value, paths: &mut Vec<String>) {
     match value {
         Value::Object(map) => {
             if map.len() == 1 && matches!(map.get("value"), Some(Value::String(_))) {
                 map.insert("value".into(), Value::String("<redacted>".into()));
+                paths.push(format!("{path}/value"));
                 return;
             }
-            for value in map.values_mut() {
-                redact_secrets(value);
+            for (key, value) in map {
+                redact_secrets_at(&format!("{path}/{}", escape_pointer(key)), value, paths);
             }
         }
         Value::Array(values) => {
-            for value in values {
-                redact_secrets(value);
+            for (index, value) in values.iter_mut().enumerate() {
+                redact_secrets_at(&format!("{path}/{index}"), value, paths);
             }
         }
         _ => {}
@@ -804,9 +818,43 @@ mod tests {
     }
 
     #[test]
+    fn every_nested_inline_secret_is_redacted() {
+        let mut value = json!({
+            "environment": [{"value": {"value": "environment-secret"}}],
+            "upstreams": [{
+                "username": {"value": "user-secret"},
+                "password": {"value": "password-secret"},
+                "headers": {"authorization": {"value": "header-secret"}}
+            }],
+            "plugins": [{
+                "secret": {"value": "plugin-secret"},
+                "ssh_accounts": [{
+                    "private_keys": [{"value": {"value": "private-key"}}],
+                    "passwords": [{"value": "ssh-password"}]
+                }]
+            }]
+        });
+        let paths = redact_secrets(&mut value);
+        let encoded = serde_json::to_string(&value).unwrap();
+        for secret in [
+            "environment-secret",
+            "user-secret",
+            "password-secret",
+            "header-secret",
+            "plugin-secret",
+            "private-key",
+            "ssh-password",
+        ] {
+            assert!(!encoded.contains(secret));
+        }
+        assert_eq!(paths.len(), 7);
+    }
+
+    #[test]
     fn inline_secrets_are_redacted() {
         let mut value = json!({"value": {"value": "secret"}});
-        redact_secrets(&mut value);
+        let paths = redact_secrets(&mut value);
         assert_eq!(value["value"]["value"], "<redacted>");
+        assert_eq!(paths, ["/value/value"]);
     }
 }

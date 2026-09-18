@@ -664,6 +664,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         "logs" => parse_logs(&args[1..]).map(Command::Logs),
         "auth" => parse_auth(&args[1..]),
         "config" => parse_config_command(&args[1..]),
+        "show" => config_cli::parse_show(&args[1..]).map(Command::ConfigCli),
         "approve" => config_cli::parse_approve(&args[1..]).map(Command::ConfigCli),
         "import" => parse_import(&args[1..]).map(Command::Serve),
         "export" => parse_export(&args[1..]).map(Command::Serve),
@@ -1117,7 +1118,7 @@ fn print_doctor(target: Option<&Path>) -> Result<i32, String> {
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  hyperhub start [--debug] [--password-file file]\n  hyperhub stop\n  hyperhub restart [--debug] [--password-file file]\n  hyperhub status [--json]\n  hyperhub logs [-f|--follow] [-n|--lines count]\n  hyperhub auth clear\n  hyperhub run [--runtime agent (developer build)] [--password-file file] [--dry-run] [--] target [args...]\n  hyperhub config [--password-file file]\n  hyperhub config show [--password-file file]\n  hyperhub config patch <json-patch|-> [--password-file file]\n  hyperhub approve <json-patch> --token token [--password-file file] [--editor program]\n  hyperhub import <toml|bin> [--password-file file] [--input-password-file file]\n  hyperhub export <toml|bin> [--password-file file] [--export-password-file file] [--plain]\n  hyperhub validate [--password-file file]\n  hyperhub doctor [--target exe]\n  hyperhub serve [--password-file file] [--output file] [--debug]\n\n`run` is required for target programs. `serve` keeps the foreground/debug mode; start/stop/restart manage the background serve process."
+        "usage:\n  hyperhub start [--debug] [--password-file file]\n  hyperhub stop\n  hyperhub restart [--debug] [--password-file file]\n  hyperhub status [--json]\n  hyperhub logs [-f|--follow] [-n|--lines count]\n  hyperhub auth clear\n  hyperhub run [--runtime agent (developer build)] [--password-file file] [--dry-run] [--] target [args...]\n  hyperhub config [--password-file file]\n  hyperhub show [--password-file file]\n  hyperhub config show [--password-file file]\n  hyperhub config patch <json-patch|-> [--password-file file]\n  hyperhub approve <json-patch> --token token [--password-file file] [--editor program]\n  hyperhub import <toml|bin> [--password-file file] [--input-password-file file]\n  hyperhub export <toml|bin> [--password-file file] [--export-password-file file] [--plain]\n  hyperhub validate [--password-file file]\n  hyperhub doctor [--target exe]\n  hyperhub serve [--password-file file] [--output file] [--debug]\n\n`run` is required for target programs. `serve` keeps the foreground/debug mode; start/stop/restart manage the background serve process."
     );
 }
 
@@ -1178,6 +1179,13 @@ mod tests {
         };
         assert_eq!(configure.action, ServeAction::Config);
         assert_eq!(configure.password_file, Some("password.txt".into()));
+
+        let Command::ConfigCli(config_cli::Command::Show { password_file }) =
+            parse_args(vec![os("show"), os("--password-file"), os("password.txt")]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(password_file, Some("password.txt".into()));
 
         let Command::ConfigCli(config_cli::Command::Show { password_file }) = parse_args(vec![
             os("config"),
