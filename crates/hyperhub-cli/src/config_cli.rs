@@ -202,7 +202,7 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
     let password =
         crate::password::acquire(password_file, !path.is_file() && !queue_path.is_file())?;
     let active = load_active_with_password(&path, password)?;
-    let patch = parse_patch_file(patch_path)?;
+    let mut patch = parse_patch_file(patch_path)?;
     collect_placeholders(&patch)?;
     let patch_digest = value_digest(b"hyperhub/config-patch/v1\0", &patch)?;
 
@@ -228,6 +228,7 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
         return Ok(0);
     }
 
+    normalize_config_item_uuids(&active.config, &mut patch)?;
     let prepared = prepare_patch(&path, &active.config, &patch)?;
     if prepared.changes.is_empty() {
         return Err("JSON patch does not change the configuration".into());
@@ -556,6 +557,88 @@ fn validate_queue(queue: &ApprovalQueue) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_config_item_uuids(current: &Config, patch: &mut Value) -> Result<(), String> {
+    let current = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    let operations = patch
+        .as_array_mut()
+        .ok_or("JSON patch must be an array of operations")?;
+    for operation in operations {
+        let Some(object) = operation.as_object_mut() else {
+            continue;
+        };
+        let Some(action) = object.get("op").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(action, "add" | "replace") {
+            continue;
+        }
+        let Some(path) = object
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let tokens = pointer_tokens(&path)?;
+        if !is_config_item_path(&tokens) {
+            continue;
+        }
+        let existing_uuid = if action == "replace" {
+            current
+                .pointer(&path)
+                .and_then(|value| value.get("uuid"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let value = object
+            .get_mut("value")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("configuration item at {path} must be an object"))?;
+        match value.get("uuid").and_then(Value::as_str) {
+            Some(uuid) if hyperhub_core::config::valid_config_uuid(uuid) => {}
+            Some(uuid) => {
+                return Err(format!(
+                    "configuration item at {path} has invalid UUID '{uuid}'"
+                ))
+            }
+            None => {
+                value.insert(
+                    "uuid".into(),
+                    Value::String(
+                        existing_uuid.unwrap_or_else(hyperhub_core::config::new_config_uuid),
+                    ),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_config_item_path(tokens: &[String]) -> bool {
+    matches!(
+        tokens,
+        [root, _]
+            if matches!(
+                root.as_str(),
+                "upstreams"
+                    | "plugins"
+                    | "routes"
+                    | "environment"
+                    | "root_certificates"
+                    | "ssh_host_keys"
+            )
+    ) || matches!(tokens, [root, rules, _] if root == "firewall" && rules == "rules")
+        || matches!(
+            tokens,
+            [root, area, rules, _]
+                if root == "sandbox"
+                    && matches!(area.as_str(), "process" | "file")
+                    && rules == "rules"
+        )
+}
+
 fn build_approval_requests(patch: &Value) -> Result<Vec<ApprovalRequest>, String> {
     let operations = patch
         .as_array()
@@ -628,6 +711,7 @@ fn semantic_request_json(
 ) -> Value {
     json!({
         "uuid": request.uuid,
+        "config_item_uuid": description.item_uuid,
         "progress": {"current": index + 1, "total": total},
         "action": description.action.label(),
         "section": description.section.breadcrumb(),
@@ -1268,6 +1352,34 @@ mod tests {
         assert_eq!(collect_placeholders(&patch).unwrap(), Vec::<String>::new());
         assert_eq!(patch[0]["value"], "real-secret");
         assert_eq!(patch[1]["value"], "real-secret");
+    }
+
+    #[test]
+    fn config_item_uuid_is_injected_and_preserved_for_replacement() {
+        let mut config = Config::default();
+        config.rules.push(hyperhub_core::config::RouteRule {
+            uuid: hyperhub_core::config::new_config_uuid(),
+            id: "existing".into(),
+            enabled: true,
+            priority: 1,
+            endpoints: Vec::new(),
+            deny: false,
+            rewrite_host: None,
+            rewrite_port: None,
+            upstream: None,
+            plugins: Vec::new(),
+            legacy: Default::default(),
+        });
+        let existing = config.rules[0].uuid.clone();
+        let mut patch = json!([
+            {"op": "add", "path": "/routes/-", "value": {"id": "new"}},
+            {"op": "replace", "path": "/routes/0", "value": {"id": "existing-renamed"}}
+        ]);
+        normalize_config_item_uuids(&config, &mut patch).unwrap();
+        let added = patch[0]["value"]["uuid"].as_str().unwrap();
+        assert!(hyperhub_core::config::valid_config_uuid(added));
+        assert_ne!(added, existing);
+        assert_eq!(patch[1]["value"]["uuid"], existing);
     }
 
     #[test]

@@ -2926,6 +2926,7 @@ fn apply_input(app: &mut App, modal: InputModal) -> Result<(), String> {
             let cleared = value.trim() == "-";
             let cleared_status = cleared.then(|| format!("✓ 环境变量 {name} 已清空"));
             let variable = EnvironmentVariable {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 name,
                 value: SecretValue::Inline {
                     value: if cleared {
@@ -2967,6 +2968,7 @@ fn apply_input(app: &mut App, modal: InputModal) -> Result<(), String> {
                     return Ok(());
                 }
                 app.config.ssh_host_keys.push(SshHostKey {
+                    uuid: hyperhub_core::config::new_config_uuid(),
                     host: entry_host,
                     key_type,
                     key_blob,
@@ -3008,6 +3010,7 @@ fn apply_input(app: &mut App, modal: InputModal) -> Result<(), String> {
                     continue;
                 }
                 app.config.root_certificates.push(RootCertificate {
+                    uuid: hyperhub_core::config::new_config_uuid(),
                     fingerprint: item.fingerprint,
                     enabled: true,
                 });
@@ -3621,6 +3624,7 @@ fn add_selected(app: &mut App) {
                 app.config.upstreams.iter().map(|item| item.id.as_str()),
             );
             app.config.upstreams.push(Upstream {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 id,
                 kind: UpstreamKind::Socks5,
                 address: "127.0.0.1:1080".into(),
@@ -3642,6 +3646,7 @@ fn add_selected(app: &mut App) {
                     .map(|plugin| plugin.id.as_str()),
             );
             app.config.plugins.push(PluginConfig {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 id,
                 kind: PluginKind::Credential,
                 protocols: vec![PluginProtocol::Http],
@@ -3663,6 +3668,7 @@ fn add_selected(app: &mut App) {
                     .map(|plugin| plugin.id.as_str()),
             );
             app.config.plugins.push(PluginConfig {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 id,
                 kind: PluginKind::Audit,
                 protocols: vec![PluginProtocol::Http, PluginProtocol::Ws],
@@ -3683,6 +3689,7 @@ fn add_selected(app: &mut App) {
                     .map(|item| item.id.as_str()),
             );
             app.config.firewall.rules.push(FirewallRule {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 id,
                 enabled: false,
                 priority: 0,
@@ -3707,6 +3714,7 @@ fn add_selected(app: &mut App) {
                     .map(|x| x.id.as_str()),
             );
             app.config.sandbox.process.rules.push(ProcessSandboxRule {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 id,
                 enabled: false,
                 priority: 0,
@@ -3726,6 +3734,7 @@ fn add_selected(app: &mut App) {
                 app.config.sandbox.file.rules.iter().map(|x| x.id.as_str()),
             );
             app.config.sandbox.file.rules.push(FileSandboxRule {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 id,
                 enabled: false,
                 priority: 0,
@@ -3746,6 +3755,7 @@ fn add_selected(app: &mut App) {
                 app.config.rules.iter().map(|item| item.id.as_str()),
             );
             app.config.rules.push(RouteRule {
+                uuid: hyperhub_core::config::new_config_uuid(),
                 id,
                 enabled: true,
                 priority: 0,
@@ -5113,8 +5123,8 @@ fn selection_hint(app: &App) -> Option<String> {
             if app.field < app.config.upstreams.len() {
                 let item = &app.config.upstreams[app.field];
                 Some(format!(
-                    "代理 {}：{:?} {}，超时 {} ms",
-                    item.id, item.kind, item.address, item.timeout_ms
+                    "代理 {}（UUID={}）：{:?} {}，超时 {} ms",
+                    item.id, item.uuid, item.kind, item.address, item.timeout_ms
                 ))
             } else {
                 Some("暂无代理，按 a 新增".to_string())
@@ -5130,11 +5140,15 @@ fn selection_hint(app: &App) -> Option<String> {
                         + usize::from(plugin.secret.is_some())
                         + usize::from(plugin.password.is_some())
                         + usize::from(plugin.username.is_some());
-                    Some(format!("HTTP 凭证 {}：{} 个 Secret", plugin.id, count))
+                    Some(format!(
+                        "HTTP 凭证 {}（UUID={}）：{} 个 Secret",
+                        plugin.id, plugin.uuid, count
+                    ))
                 } else {
                     Some(format!(
-                        "SSH 凭证 {}：{} 个账号",
+                        "SSH 凭证 {}（UUID={}）：{} 个账号",
                         plugin.id,
+                        plugin.uuid,
                         plugin.ssh_accounts.len()
                     ))
                 }
@@ -5163,8 +5177,9 @@ fn selection_hint(app: &App) -> Option<String> {
                         .collect::<Vec<_>>()
                         .join(",");
                     Some(format!(
-                        "审计插件 {}：事件={protocols}，内容转录={}",
+                        "审计插件 {}（UUID={}）：事件={protocols}，内容转录={}",
                         plugin.id,
+                        plugin.uuid,
                         audit_transcript_summary(plugin)
                     ))
                 } else {
@@ -5186,8 +5201,9 @@ fn selection_hint(app: &App) -> Option<String> {
                     let rule = &app.config.rules[field];
                     let action = route_behavior_label(rule.deny, rule.upstream.is_some());
                     Some(format!(
-                        "路由 {}：优先级={}，{action}，目标={}",
+                        "路由 {}（UUID={}）：优先级={}，{action}，目标={}",
                         rule.id,
+                        rule.uuid,
                         rule.priority,
                         route_targets_summary(rule)
                     ))
@@ -5220,8 +5236,9 @@ fn selection_hint(app: &App) -> Option<String> {
                 let index = app.field - 3;
                 if let Some(rule) = app.config.firewall.rules.get(index) {
                     Some(format!(
-                        "网络规则 {}：优先级={}，{}，绑定={} 条",
+                        "网络规则 {}（UUID={}）：优先级={}，{}，绑定={} 条",
                         rule.id,
+                        rule.uuid,
                         rule.priority,
                         firewall_action_label(rule.action),
                         rule.endpoints.len()
@@ -5256,7 +5273,14 @@ fn selection_hint(app: &App) -> Option<String> {
                     .process
                     .rules
                     .get(app.field - 3)
-                    .map(|r| format!("子进程规则 {}：{}", r.id, sandbox_action_label(r.action)))
+                    .map(|r| {
+                        format!(
+                            "子进程规则 {}（UUID={}）：{}",
+                            r.id,
+                            r.uuid,
+                            sandbox_action_label(r.action)
+                        )
+                    })
                     .or_else(|| Some("暂无规则，按 a 新增".into()))
             }
         }
@@ -5279,7 +5303,14 @@ fn selection_hint(app: &App) -> Option<String> {
                     .file
                     .rules
                     .get(app.field - 3)
-                    .map(|r| format!("文件规则 {}：{}", r.id, sandbox_action_label(r.action)))
+                    .map(|r| {
+                        format!(
+                            "文件规则 {}（UUID={}）：{}",
+                            r.id,
+                            r.uuid,
+                            sandbox_action_label(r.action)
+                        )
+                    })
                     .or_else(|| Some("暂无规则，按 a 新增".into()))
             }
         }
@@ -5314,7 +5345,8 @@ fn selection_hint(app: &App) -> Option<String> {
                     .map(|entry| entry.name.as_str())
                     .unwrap_or("证书");
                 Some(format!(
-                    "根证书 {name}：{}",
+                    "根证书 {name}（UUID={}）：{}",
+                    item.uuid,
                     if item.enabled { "启用" } else { "停用" }
                 ))
             } else {
@@ -5322,8 +5354,9 @@ fn selection_hint(app: &App) -> Option<String> {
                 if key_index < app.config.ssh_host_keys.len() {
                     let key = &app.config.ssh_host_keys[key_index];
                     Some(format!(
-                        "SSH 主机密钥 {}：{} {}",
+                        "SSH 主机密钥 {}（UUID={}）：{} {}",
                         key.host,
+                        key.uuid,
                         key.key_type,
                         if key.enabled { "启用" } else { "停用" }
                     ))
@@ -5337,8 +5370,9 @@ fn selection_hint(app: &App) -> Option<String> {
                 let variable = &app.config.environment[app.field];
                 let preview = environment_value_preview(variable);
                 Some(format!(
-                    "环境变量 {}：{}",
+                    "环境变量 {}（UUID={}）：{}",
                     variable.name,
+                    variable.uuid,
                     if preview.is_empty() {
                         "空".to_string()
                     } else {
@@ -6078,6 +6112,7 @@ mod tests {
         let mut app = test_app();
         app.live = true;
         app.config.upstreams.push(Upstream {
+            uuid: hyperhub_core::config::new_config_uuid(),
             id: "proxy".into(),
             kind: UpstreamKind::Socks5,
             address: "127.0.0.1:1080".into(),
@@ -6382,6 +6417,7 @@ mod tests {
     fn firewall_rule_editor_updates_targets_and_ports() {
         let mut app = test_app();
         app.config.firewall.rules.push(FirewallRule {
+            uuid: hyperhub_core::config::new_config_uuid(),
             id: "firewall-1".into(),
             enabled: false,
             priority: 0,
@@ -6615,6 +6651,7 @@ mod tests {
     fn route_references_are_selected_from_configured_objects_with_preview() {
         let mut app = test_app();
         app.config.upstreams.push(Upstream {
+            uuid: hyperhub_core::config::new_config_uuid(),
             id: "office-proxy".into(),
             kind: UpstreamKind::HttpConnect,
             address: "127.0.0.1:7890".into(),
@@ -7301,6 +7338,7 @@ mod tests {
         assert_eq!(mask_middle("ghp_1234567890abcdef"), "ghp_••••••cdef");
 
         let variable = EnvironmentVariable {
+            uuid: hyperhub_core::config::new_config_uuid(),
             name: "GITLAB_HOST".into(),
             value: SecretValue::Inline {
                 value: String::new(),
@@ -7319,6 +7357,7 @@ mod tests {
         let mut app = test_app();
         app.category = CATEGORY_ENVIRONMENT;
         app.config.environment.push(EnvironmentVariable {
+            uuid: hyperhub_core::config::new_config_uuid(),
             name: "GITLAB_HOST".into(),
             value: SecretValue::Inline {
                 value: "gitlab.example.com".into(),
@@ -7516,6 +7555,7 @@ mod tests {
         let fingerprint =
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
         app.config.root_certificates.push(RootCertificate {
+            uuid: hyperhub_core::config::new_config_uuid(),
             fingerprint: fingerprint.clone(),
             enabled: true,
         });
@@ -7552,6 +7592,7 @@ mod tests {
         let fingerprint =
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
         app.config.root_certificates.push(RootCertificate {
+            uuid: hyperhub_core::config::new_config_uuid(),
             fingerprint: fingerprint.clone(),
             enabled: true,
         });

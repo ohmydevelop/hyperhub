@@ -78,6 +78,7 @@ pub(crate) struct ConfigChangeDescription {
     pub(crate) section: ConfigSection,
     pub(crate) item_kind: String,
     pub(crate) item_name: Option<String>,
+    pub(crate) item_uuid: Option<String>,
     pub(crate) field: Option<String>,
     pub(crate) details: Vec<String>,
     pub(crate) summary: String,
@@ -129,6 +130,7 @@ pub(crate) fn describe_request(
         section: context.section,
         item_kind: context.item_kind,
         item_name: context.item_name,
+        item_uuid: context.item_uuid,
         field: context.field,
         details: context.details,
         summary,
@@ -180,16 +182,7 @@ pub(crate) fn new_uuid() -> String {
 }
 
 pub(crate) fn valid_uuid(value: &str) -> bool {
-    if value.len() != 36 {
-        return false;
-    }
-    value.char_indices().all(|(index, character)| {
-        if matches!(index, 8 | 13 | 18 | 23) {
-            character == '-'
-        } else {
-            character.is_ascii_hexdigit()
-        }
-    })
+    hyperhub_core::config::valid_config_uuid(value)
 }
 
 pub(crate) fn unique_valid_uuids<'a>(mut values: impl Iterator<Item = &'a str>) -> bool {
@@ -201,6 +194,7 @@ struct ItemContext {
     section: ConfigSection,
     item_kind: String,
     item_name: Option<String>,
+    item_uuid: Option<String>,
     field: Option<String>,
     details: Vec<String>,
     whole_item: bool,
@@ -316,6 +310,7 @@ fn item_context(current: &Value, mutation: &Value, tokens: &[String]) -> ItemCon
             section: ConfigSection::Gateway,
             item_kind: "完整配置".into(),
             item_name: None,
+            item_uuid: None,
             field: None,
             details: Vec::new(),
             whole_item: false,
@@ -371,6 +366,10 @@ fn context_from_item(
         .and_then(|item| item.get(identity_field))
         .and_then(Value::as_str)
         .map(short_identity);
+    let item_uuid = item
+        .and_then(|item| item.get("uuid"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let details = item
         .map(|item| item_details(section, item))
         .unwrap_or_default();
@@ -378,6 +377,7 @@ fn context_from_item(
         section,
         item_kind: label.into(),
         item_name,
+        item_uuid,
         field: field_label(rest),
         details,
         whole_item: rest.is_empty(),
@@ -399,6 +399,7 @@ fn singleton_context(root: &str, rest: &[String]) -> ItemContext {
         section,
         item_kind: item_kind.into(),
         item_name: None,
+        item_uuid: None,
         field: field_label(&field_tokens),
         details: Vec::new(),
         whole_item: false,
@@ -645,20 +646,24 @@ mod tests {
     fn describes_add_modify_and_delete_with_tui_vocabulary() {
         let current = json!({
             "debug": false,
-            "plugins": [{"id": "existing", "kind": "credential", "secret": {"value": "x"}}],
-            "routes": [{"id": "old-route", "priority": 10}]
+            "plugins": [{"uuid": "11111111-1111-4111-8111-111111111111", "id": "existing", "kind": "credential", "secret": {"value": "x"}}],
+            "routes": [{"uuid": "22222222-2222-4222-8222-222222222222", "id": "old-route", "priority": 10}]
         });
         let added = describe_request(
             &current,
             &[json!({
                 "op": "add",
                 "path": "/plugins/-",
-                "value": {"id": "devboard", "kind": "credential"}
+                "value": {"uuid": "33333333-3333-4333-8333-333333333333", "id": "devboard", "kind": "credential"}
             })],
         )
         .unwrap();
         assert_eq!(added.action, ConfigChangeAction::Add);
         assert_eq!(added.section.breadcrumb(), "网关 / 凭证");
+        assert_eq!(
+            added.item_uuid.as_deref(),
+            Some("33333333-3333-4333-8333-333333333333")
+        );
         assert_eq!(added.summary, "新增 网关 / 凭证「devboard」");
 
         let modified = describe_request(

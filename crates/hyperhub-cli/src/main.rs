@@ -325,6 +325,7 @@ fn default_environment() -> Vec<EnvironmentVariable> {
     ["GITLAB_HOST", "GITLAB_TOKEN", "GH_TOKEN"]
         .into_iter()
         .map(|name| EnvironmentVariable {
+            uuid: hyperhub_core::config::new_config_uuid(),
             name: name.into(),
             value: SecretValue::Inline {
                 value: String::new(),
