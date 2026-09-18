@@ -1132,29 +1132,29 @@ fn usage() -> &'static str {
 usage:
   hyperhub <command> [options]
 
-main commands:
+configuration:
   hyperhub config [--password-file file]
-  hyperhub start [--debug] [--password-file file]
-  hyperhub run [--password-file file] [--dry-run] [--] target [args...]
-  hyperhub status [--json]
-  hyperhub stop
-
-configuration approval:
   hyperhub show
   hyperhub config patch <json-patch|-> [--password-file file]
   hyperhub approve [--password-file file] [--editor program]
-
-service operations:
-  hyperhub restart [--debug] [--password-file file]
-  hyperhub logs [-f|--follow] [-n|--lines count]
-  hyperhub auth clear
-
-maintenance:
   hyperhub import <file> [--password-file file] [--input-password-file file]
   hyperhub export <file> [--password-file file] [--export-password-file file] [--plain]
   hyperhub validate [--password-file file]
-  hyperhub doctor [--target exe]
-  hyperhub serve [--debug] [--output file] [--password-file file]"
+
+server management:
+  hyperhub start [--debug] [--password-file file]
+  hyperhub stop
+  hyperhub restart [--debug] [--password-file file]
+  hyperhub status [--json]
+  hyperhub logs [-f|--follow] [-n|--lines count]
+  hyperhub auth clear
+  hyperhub serve [--debug] [--output file] [--password-file file]
+
+target execution:
+  hyperhub run [--password-file file] [--dry-run] [--] target [args...]
+
+diagnostics:
+  hyperhub doctor [--target exe]"
 }
 
 fn print_usage() {
@@ -1171,11 +1171,42 @@ mod tests {
     #[test]
     fn help_lists_only_canonical_user_commands() {
         let help = usage();
-        assert!(help.contains("main commands:"));
-        assert!(help.contains("configuration approval:"));
-        assert!(help.contains("service operations:"));
-        assert!(help.contains("maintenance:"));
+        assert!(help.contains("configuration:"));
+        assert!(help.contains("server management:"));
+        assert!(help.contains("target execution:"));
+        assert!(help.contains("diagnostics:"));
         assert!(help.contains("hyperhub show"));
+        let configuration = help.find("configuration:").unwrap();
+        let server = help.find("server management:").unwrap();
+        let execution = help.find("target execution:").unwrap();
+        let diagnostics = help.find("diagnostics:").unwrap();
+        assert!(configuration < server && server < execution && execution < diagnostics);
+        for command in [
+            "config",
+            "show",
+            "config patch",
+            "approve",
+            "import",
+            "export",
+            "validate",
+        ] {
+            let line = format!("  hyperhub {command}");
+            let position = help.find(&line).unwrap();
+            assert!(position > configuration && position < server);
+        }
+        for command in [
+            "start",
+            "stop",
+            "restart",
+            "status",
+            "logs",
+            "auth clear",
+            "serve",
+        ] {
+            let line = format!("  hyperhub {command}");
+            let position = help.find(&line).unwrap();
+            assert!(position > server && position < execution);
+        }
         assert!(!help.contains("hyperhub config show"));
         assert!(!help.contains("--runtime"));
         assert!(!help.contains("--password-stdin"));
