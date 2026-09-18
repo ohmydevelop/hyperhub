@@ -158,10 +158,12 @@ transcript="$temporary/approve.transcript"
 run_approve "$patch_file" "$approval" "$review_editor" 'real-github-api-key' apply "$transcript"
 
 shown="$temporary/show.json"
-"$hyperhub" show --password-file "$password_file" > "$shown"
+"$hyperhub" show > "$shown"
 config_shown="$temporary/config-show.json"
-"$hyperhub" config show --password-file "$password_file" > "$config_shown"
+"$hyperhub" config show > "$config_shown"
 cmp "$shown" "$config_shown"
+cmp "$shown" "$HOME/.hyperhub/config.redacted.json"
+[[ $(stat -c %a "$HOME/.hyperhub/config.redacted.json") == 600 ]]
 python3 - "$shown" <<'PY'
 import json
 import pathlib
@@ -169,16 +171,25 @@ import sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 assert "real-github-api-key" not in text
 shown = json.loads(text)
-assert shown["initialized"] is True
-assert shown["sensitive_values_redacted"] is True
-assert "/environment/3/value/value" in shown["redacted_paths"]
-assert shown["config"]["debug"] is True
-assert shown["config"]["environment"][-1]["value"]["value"] == "<redacted>"
-route = shown["config"]["routes"][-1]
+assert shown["debug"] is True
+assert shown["environment"][-1]["value"]["value"] == "<redacted>"
+route = shown["routes"][-1]
 assert route["id"] == "llm-deny-example"
 assert route["priority"] == 120
 PY
 "$hyperhub" validate --password-file "$password_file" >/dev/null
+
+redacted_view="$HOME/.hyperhub/config.redacted.json"
+rm "$redacted_view"
+if "$hyperhub" show >/dev/null 2>"$temporary/missing-view.stderr"; then
+  echo 'show unexpectedly decrypted an existing config without its redacted view' >&2
+  exit 1
+fi
+grep -q 'run `hyperhub validate' "$temporary/missing-view.stderr"
+"$hyperhub" validate --password-file "$password_file" >/dev/null
+migrated_show="$temporary/migrated-show.json"
+"$hyperhub" show > "$migrated_show"
+cmp "$migrated_show" "$redacted_view"
 
 live_transcript=skipped
 run_live_update_test() {
