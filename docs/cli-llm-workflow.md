@@ -1,6 +1,6 @@
 # CLI + Skill 的 LLM 驱动工作流
 
-LLM 通过仓库 Skill 调用普通 CLI；Shell 负责组合能力，HyperHub CLI 负责配置语义、加密存储、运行时热更新和审批 token 校验。
+LLM 通过仓库 Skill 调用普通 CLI；Shell 负责组合能力，HyperHub CLI 负责配置语义、加密存储、运行时热更新和可恢复的人工审批队列。
 
 Skill 位于：
 
@@ -8,9 +8,7 @@ Skill 位于：
 .agents/skills/hyperhub-cli/SKILL.md
 ```
 
-## CLI 配置与人工审计接口
-
-读取完整、脱敏的 JSON 配置：
+## 1. 读取脱敏配置
 
 ```sh
 hyperhub show
@@ -18,9 +16,13 @@ hyperhub show
 
 输出直接是完整配置 JSON，不增加包装字段；它与导出配置使用同一份 `Config` 数据，唯一变化是所有 inline secret 的真实值被替换为 `<redacted>`。读取不需要密码。
 
-加密配置每次保存时都会原子写入权限为当前用户独占的 `config.redacted.json`。从旧版本升级且该文件尚不存在时，先执行一次 `hyperhub validate --password-file ./password` 生成脱敏视图，之后 `show` 不再需要密码。
+加密配置每次保存时都会原子写入权限为当前用户独占的 `config.redacted.json`。从旧版本升级且该文件尚不存在时，先执行一次 `hyperhub validate --password-file ./password` 生成脱敏视图。
 
-LLM 使用 JSON Patch 描述意图。需要真实凭证的位置使用审批占位符：
+## 2. 提交配置请求
+
+LLM 使用 JSON Patch 描述意图。支持 `add`、`replace`、`remove`、`test`，数组追加使用 `/-`。每个修改操作对应一条人工审批请求，应当包含完整对象并可独立通过配置校验。
+
+需要真实凭证的位置使用审批占位符：
 
 ```json
 [
@@ -35,78 +37,70 @@ LLM 使用 JSON Patch 描述意图。需要真实凭证的位置使用审批占�
 ]
 ```
 
-LLM 只运行规划命令：
+LLM 只运行提交命令：
 
 ```sh
 hyperhub config patch patch.json --password-file ./password
 ```
 
-规划命令不会写入配置，返回：
+该命令会完成全量配置校验并返回：
 
 - `status = approval_required`；
-- 与当前配置、原始 patch 和计划结果绑定的 `approval_token`；
-- 已脱敏的 `changes`；
+- 审计用 `approval_token`；
+- 请求数量 `request_count`；
+- 已脱敏的整体 `changes`；
 - Serve 是否正在运行。
 
-之后由人工在真实终端运行：
+活动配置不会在此阶段改变。请求会写入 `config.approval.bin` 加密队列；文件使用与配置分离的加密密钥域和当前用户独占权限。相同 patch 可以安全重试并返回当前进度，不同 patch 不会覆盖未完成队列。
+
+## 3. 人工逐条审批
+
+人工在真实终端运行：
 
 ```sh
-hyperhub approve patch.json \
-  --password-file ./password \
-  --token <approval_token>
+hyperhub approve
 ```
 
-`approve` 会把 patch 复制到权限受限的临时文件，并使用 `$HYPERHUB_EDITOR` 指定的编辑器打开；未设置时 POSIX 默认使用 `vi`，Windows 默认使用 `notepad.exe`。也可以显式指定单个编辑器程序：
+也可从权限受限的文件读取密码，并指定编辑器：
 
 ```sh
-hyperhub approve patch.json --token <token> \
-  --password-file ./password --editor /path/to/editor-wrapper
+hyperhub approve --password-file ./password --editor /path/to/editor
 ```
 
-人工可以在编辑器里调整目标、端口、优先级或删除不接受的操作。保存并退出后，CLI 对每个 `${APPROVE:name}` 使用隐藏输入读取真实值；真实值只存在于内存，不写回 LLM 生成的 patch 或 review 临时文件。
-
-最后 CLI 显示二次编辑后的脱敏 diff，并要求输入动态的：
+执行后首先输入 HyperHub 密码，然后逐条显示：
 
 ```text
-APPLY <12位确认码>
+[2/5] configuration request
 ```
 
-只有完全匹配才保存配置。原始配置或原始 patch 发生变化会使 proposal token 失效；二次编辑、人工填写的 key 和最终配置则由新的确认码绑定。
+每条请求都展示脱敏变更和当前 `n/m` 进度，可选择：
 
-支持的 patch 操作：
+- `a / approve`：批准该请求；
+- `e / edit`：只编辑当前请求，保存后重新展示脱敏结果；
+- `r / reject`：拒绝该请求并继续下一条；
+- `q / quit`：保留进度并退出。
 
-- `add`；
-- `replace`；
-- `remove`；
-- `test`。
+批准含 `${APPROVE:name}` 的请求时，CLI 会逐项使用隐藏输入读取真实值。真实值不会写回 LLM patch、终端输出或脱敏视图。
 
-路径使用 JSON Pointer；向数组末尾追加使用 `/-`。CLI 在规划和审批后都会反序列化并校验完整配置，因此无效 route、重复 ID、无效正则、错误引用或非 loopback listener 不会被保存。
+每次批准或拒绝后都会原子保存队列进度。Ctrl+C、终端关闭或进程异常退出后，再次运行 `hyperhub approve` 会从第一条未处理请求继续，已处理请求不会重复出现。队列还记录加密的 in-flight 状态，可区分配置保存前后发生的中断并完成恢复。
 
-## 初始化与密码
+批准请求会立即写入加密配置；拒绝请求不会修改配置。Serve 正在运行时，每条批准请求都会尝试热更新。全部请求处理后删除审批队列并输出汇总。
 
-配置不存在时，`config patch` 以默认配置为基线。第一次应用时创建加密配置；密码通过权限受限的文件或 `HYPERHUB_CONFIG_PASSWORD` 提供。例如：
+`test` 操作不单独显示，它与后续修改请求绑定为前置条件；拒绝该修改时一并跳过。
+
+## 4. 初始化与密码
+
+配置不存在时，`config patch` 以默认配置为基线并创建加密审批队列，首次批准请求时才创建活动配置。密码通过权限受限的文件或 `HYPERHUB_CONFIG_PASSWORD` 提供。例如：
 
 ```sh
-printf 'replace-with-a-long-password\n' > password
+printf 'replace-with-a-long-password
+' > password
 chmod 0600 password
 ```
 
-密码文件只用于 CLI，不得提交。`show` 永不输出 inline secret；计划和应用结果中的变更也会脱敏。
+密码文件只用于 CLI，不得提交。`show`、计划结果、逐条审批显示和应用结果均不得泄漏 inline secret。
 
-## 热更新
-
-Serve 正在运行时，CLI 保存配置后用当前加密配置派生的证明调用现有控制面执行热更新。应用结果：
-
-```json
-{
-  "status": "applied",
-  "live_update": true
-}
-```
-
-Serve 未运行时 `live_update` 为 `false`，下次启动读取新配置。
-
-## 自动测试
+## 5. 自动测试
 
 ```sh
 ./scripts/test-cli-config-approval.sh ./target/release/hyperhub
@@ -114,11 +108,12 @@ Serve 未运行时 `live_update` 为 `false`，下次启动读取新配置。
 
 测试使用临时 HOME 和任意测试密码，覆盖：
 
-1. 未批准的计划不创建配置；
-2. 错误 token 不能修改配置；
-3. `approve` 会打开二次编辑器，并保留人工修改后的配置；
-4. `${APPROVE:name}` 由人工隐藏输入真实 key；
-5. review、应用结果和 `show` 均不泄漏 inline secret；
-6. 正确 proposal token 和最终 `APPLY <code>` 可以初始化配置；
-7. 保存后的配置可以通过 `validate`；
-8. Serve 运行时 approve 能完成热更新。
+1. 提交请求不会提前创建活动配置；
+2. 审批队列加密保存且不同 patch 不能覆盖；
+3. 逐条展示 `n/m` 进度；
+4. 单条请求可以拒绝、编辑或批准；
+5. `${APPROVE:name}` 通过隐藏输入填写且不会泄漏；
+6. 中断后只继续未处理请求；
+7. 已批准请求立即持久化，完成后删除队列；
+8. 保存后的配置可通过 `validate`；
+9. Serve 运行时批准请求可以热更新。

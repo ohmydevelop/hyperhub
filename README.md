@@ -106,15 +106,17 @@ Windows 使用 `hyperhub.exe` 替换 `hyperhub`。具体参数可通过 `hyperhu
 
 ## LLM 通过 CLI 配置
 
-仓库提供 `$hyperhub-cli` Skill。LLM 先通过 `hyperhub show` 读取完整的脱敏 JSON 配置并生成 JSON Patch 计划，CLI 返回一次性审批 token；只有用户明确确认后才应用：
+仓库提供 `$hyperhub-cli` Skill。LLM 先通过 `hyperhub show` 读取完整的脱敏 JSON 配置并提交 JSON Patch；CLI 将请求写入加密审批队列，但不会在规划阶段修改活动配置：
 
 ```bash
 hyperhub show
 hyperhub config patch patch.json --password-file ./password
-hyperhub approve patch.json --password-file ./password --token <token>
+
+# 人工在真实终端执行，并按提示输入 HyperHub 密码
+hyperhub approve
 ```
 
-`hyperhub show` 不需要密码，输出与导出配置 1:1 对应的 JSON，唯一差异是敏感值显示为 `<redacted>`。计划阶段不会写入配置。`approve` 会打开 patch 供人工二次编辑，隐藏输入真实 key，展示最终脱敏 diff，并要求动态确认码；错误或过期 token 不能进入审批。Serve 运行时配置会热更新。完整流程见 [`docs/cli-llm-workflow.md`](docs/cli-llm-workflow.md)。
+`hyperhub show` 不需要密码，输出与导出配置 1:1 对应的 JSON，唯一差异是敏感值显示为 `<redacted>`。`approve` 按 `n/m` 逐条显示配置请求，允许批准、编辑、拒绝或暂退；需要真实 key 时使用隐藏输入引导。每次决定都会持久化，进程意外中断后再次执行 `hyperhub approve` 会从第一条未处理请求继续。已批准请求立即加密保存，并在 Serve 运行时热更新。完整流程见 [`docs/cli-llm-workflow.md`](docs/cli-llm-workflow.md)。
 
 ## 自动构建与发布
 
