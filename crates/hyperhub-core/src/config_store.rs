@@ -16,6 +16,7 @@ const MAGIC: &[u8; 8] = b"HHCFGBIN";
 const VERSION: u16 = 1;
 const FLAG_ENCRYPTED: u8 = 1;
 const HEADER_LEN: usize = 120;
+const APPROVAL_STATE_LABEL: &[u8] = b"hyperhub/approval-state-aead/v1";
 const DEFAULT_MEMORY_KIB: u32 = 64 * 1024;
 const DEFAULT_ITERATIONS: u32 = 3;
 const DEFAULT_LANES: u32 = 1;
@@ -56,6 +57,11 @@ pub struct UnlockedConfig {
     pub config: Config,
     pub descriptor: KdfDescriptor,
     pub session_auth_key: Zeroizing<Vec<u8>>,
+}
+
+pub struct UnlockedApprovalState {
+    pub bytes: Zeroizing<Vec<u8>>,
+    pub descriptor: KdfDescriptor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +141,37 @@ pub fn load_encrypted(path: &Path, password: &[u8]) -> Result<UnlockedConfig, St
         config,
         descriptor: header.descriptor,
         session_auth_key,
+    })
+}
+
+/// Persist the resumable human-approval queue with a key domain separated from
+/// the active configuration. The queue may temporarily contain secrets entered
+/// during an in-flight approval, so it must never be stored as plain JSON.
+pub fn save_approval_state(
+    path: &Path,
+    bytes: &[u8],
+    password: &[u8],
+    descriptor: &KdfDescriptor,
+) -> Result<(), StoreError> {
+    let encrypted = encrypt_payload(bytes, password, descriptor, APPROVAL_STATE_LABEL)?;
+    atomic_write(path, &encrypted)
+}
+
+pub fn load_approval_state(
+    path: &Path,
+    password: &[u8],
+) -> Result<UnlockedApprovalState, StoreError> {
+    let bytes = read(path)?;
+    let header = parse_header(&bytes)?;
+    if !header.encrypted {
+        return Err(StoreError::Format(
+            "the approval state must be encrypted".into(),
+        ));
+    }
+    let plaintext = decrypt_payload_with_label(&bytes, password, APPROVAL_STATE_LABEL)?;
+    Ok(UnlockedApprovalState {
+        bytes: plaintext,
+        descriptor: header.descriptor,
     })
 }
 
@@ -927,5 +964,31 @@ mod tests {
         fs::remove_file(&config_path).unwrap();
         fs::remove_file(redacted_config_path(&config_path)).unwrap();
         fs::remove_dir_all(root_certificates_dir(&config_path)).ok();
+    }
+
+    #[test]
+    fn approval_state_round_trips_with_separate_key_domain() {
+        let path = temp_path("approval-state");
+        let descriptor = new_descriptor();
+        let payload = br#"{"cursor":2,"secret":"temporary-value"}"#;
+        save_approval_state(&path, payload, b"correct horse battery staple", &descriptor).unwrap();
+        let stored = std::fs::read(&path).unwrap();
+        assert!(!stored
+            .windows(b"temporary-value".len())
+            .any(|window| window == b"temporary-value"));
+
+        let unlocked = load_approval_state(&path, b"correct horse battery staple").unwrap();
+        assert_eq!(unlocked.bytes.as_slice(), payload);
+        assert_eq!(unlocked.descriptor, descriptor);
+        assert!(matches!(
+            load_approval_state(&path, b"wrong password"),
+            Err(StoreError::Authentication)
+        ));
+        assert!(matches!(
+            load_encrypted(&path, b"correct horse battery staple"),
+            Err(StoreError::Authentication)
+        ));
+
+        std::fs::remove_file(path).unwrap();
     }
 }
