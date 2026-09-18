@@ -132,15 +132,25 @@ pub fn acquire_with_environment(
     Ok(first)
 }
 
-/// 在隐藏输入提示前后保存并强制恢复控制台模式，避免 rpassword 在
+/// 在隐藏或掩码输入提示前后保存并强制恢复控制台模式，避免 rpassword 在
 /// Windows Terminal/ConPTY 下遗留残缺输入状态。
 pub(crate) fn prompt_secret(message: &str) -> Result<Zeroizing<String>, String> {
-    prompt_hidden(message)
+    prompt_with_feedback(message, true)
 }
 
 fn prompt_hidden(message: &str) -> Result<Zeroizing<String>, String> {
+    prompt_with_feedback(message, false)
+}
+
+fn prompt_with_feedback(message: &str, masked: bool) -> Result<Zeroizing<String>, String> {
     let guard = ConsoleModeGuard::capture();
-    let result = rpassword::prompt_password(message)
+    let builder = rpassword::ConfigBuilder::new();
+    let config = if masked {
+        builder.password_feedback_mask('*').build()
+    } else {
+        builder.password_feedback_hide().build()
+    };
+    let result = rpassword::prompt_password_with_config(message, config)
         .map_err(|error| format!("cannot read password: {error}"));
     if !guard.restore() {
         eprintln!("hyperhub: warning: failed to restore console mode after password prompt");
