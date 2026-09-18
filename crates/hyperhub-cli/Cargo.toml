@@ -1,0 +1,51 @@
+[package]
+name = "hyperhub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hyperhub"
+path = "src/main.rs"
+
+[features]
+default = ["external-runtime"]
+external-runtime = []
+embedded-agent = []
+
+[dependencies]
+crossterm = "0.28"
+ipnet = "2"
+hyperhub-core = { path = "../hyperhub-core" }
+rand = "0.10"
+regex = "1"
+ratatui = "0.29"
+rpassword = "7"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+zeroize = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+frida-sys = { version = "0.17.2", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_DataExchange",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+  "Win32_System_Console",
+] }
+
+[build-dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+rcgen = "0.14"
