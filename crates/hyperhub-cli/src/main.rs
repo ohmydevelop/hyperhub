@@ -127,8 +127,7 @@ fn main() {
     let command = match parse_args(args) {
         Ok(command) => command,
         Err(error) => {
-            eprintln!("hyperhub: {error}\n");
-            print_usage();
+            eprintln!("hyperhub: {error}\n\n{}", usage());
             std::process::exit(2);
         }
     };
@@ -805,9 +804,15 @@ fn parse_serve(args: &[OsString]) -> Result<ServeConfig, String> {
 fn parse_config_command(args: &[OsString]) -> Result<Command, String> {
     if args
         .first()
-        .is_some_and(|value| matches!(value.to_string_lossy().as_ref(), "show" | "patch"))
+        .is_some_and(|value| value.to_string_lossy() == "patch")
     {
         return config_cli::parse(args).map(Command::ConfigCli);
+    }
+    if args
+        .first()
+        .is_some_and(|value| value.to_string_lossy() == "show")
+    {
+        return Err("`config show` was removed; use `hyperhub show`".into());
     }
     let password_file = parse_single_password_file("config", args)?;
     Ok(Command::Serve(ServeConfig {
@@ -1119,10 +1124,39 @@ fn print_doctor(target: Option<&Path>) -> Result<i32, String> {
     Ok(0)
 }
 
+fn usage() -> &'static str {
+    "HyperHub process network control
+
+usage:
+  hyperhub <command> [options]
+
+main commands:
+  hyperhub config [--password-file file]
+  hyperhub start [--debug] [--password-file file]
+  hyperhub run [--password-file file] [--dry-run] [--] target [args...]
+  hyperhub status [--json]
+  hyperhub stop
+
+configuration approval:
+  hyperhub show
+  hyperhub config patch <json-patch|-> [--password-file file]
+  hyperhub approve <json-patch> --token token [--password-file file] [--editor program]
+
+service operations:
+  hyperhub restart [--debug] [--password-file file]
+  hyperhub logs [-f|--follow] [-n|--lines count]
+  hyperhub auth clear
+
+maintenance:
+  hyperhub import <file> [--password-file file] [--input-password-file file]
+  hyperhub export <file> [--password-file file] [--export-password-file file] [--plain]
+  hyperhub validate [--password-file file]
+  hyperhub doctor [--target exe]
+  hyperhub serve [--debug] [--output file] [--password-file file]"
+}
+
 fn print_usage() {
-    eprintln!(
-        "usage:\n  hyperhub start [--debug] [--password-file file]\n  hyperhub stop\n  hyperhub restart [--debug] [--password-file file]\n  hyperhub status [--json]\n  hyperhub logs [-f|--follow] [-n|--lines count]\n  hyperhub auth clear\n  hyperhub run [--runtime agent (developer build)] [--password-file file] [--dry-run] [--] target [args...]\n  hyperhub config [--password-file file]\n  hyperhub show\n  hyperhub config show\n  hyperhub config patch <json-patch|-> [--password-file file]\n  hyperhub approve <json-patch> --token token [--password-file file] [--editor program]\n  hyperhub import <toml|bin> [--password-file file] [--input-password-file file]\n  hyperhub export <toml|bin> [--password-file file] [--export-password-file file] [--plain]\n  hyperhub validate [--password-file file]\n  hyperhub doctor [--target exe]\n  hyperhub serve [--password-file file] [--output file] [--debug]\n\n`run` is required for target programs. `serve` keeps the foreground/debug mode; start/stop/restart manage the background serve process."
-    );
+    println!("{}", usage());
 }
 
 #[cfg(test)]
@@ -1130,6 +1164,19 @@ mod tests {
     use super::*;
     fn os(value: &str) -> OsString {
         value.into()
+    }
+
+    #[test]
+    fn help_lists_only_canonical_user_commands() {
+        let help = usage();
+        assert!(help.contains("main commands:"));
+        assert!(help.contains("configuration approval:"));
+        assert!(help.contains("service operations:"));
+        assert!(help.contains("maintenance:"));
+        assert!(help.contains("hyperhub show"));
+        assert!(!help.contains("hyperhub config show"));
+        assert!(!help.contains("--runtime"));
+        assert!(!help.contains("--password-stdin"));
     }
     #[test]
     fn parses_commands() {
@@ -1187,10 +1234,8 @@ mod tests {
             parse_args(vec![os("show")]).unwrap(),
             Command::ConfigCli(config_cli::Command::Show)
         ));
-        assert!(matches!(
-            parse_args(vec![os("config"), os("show")]).unwrap(),
-            Command::ConfigCli(config_cli::Command::Show)
-        ));
+        let removed_alias = parse_args(vec![os("config"), os("show")]).unwrap_err();
+        assert!(removed_alias.contains("use `hyperhub show`"));
         assert!(parse_args(vec![os("show"), os("--password-file"), os("password.txt")]).is_err());
 
         let Command::ConfigCli(config_cli::Command::Patch {

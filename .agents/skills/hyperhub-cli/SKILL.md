@@ -16,7 +16,7 @@ HyperHub 的 LLM 驱动入口是本地 CLI 与 Shell。
    hyperhub show
    ```
 
-   输出与配置导出的数据结构 1:1 对应，仅将所有 inline secret 的真实值替换为 `<redacted>`。读取脱敏视图不需要密码；`hyperhub config show` 是兼容别名。
+   输出与配置导出的数据结构 1:1 对应，仅将所有 inline secret 的真实值替换为 `<redacted>`。读取脱敏视图不需要密码。
 3. 生成 RFC 6902 风格 JSON Patch。仅使用 `add`、`replace`、`remove`、`test`；数组追加使用 `/-`。需要人工输入的 key、token 或密码必须使用占位符，例如：
 
    ```json

@@ -159,9 +159,11 @@ run_approve "$patch_file" "$approval" "$review_editor" 'real-github-api-key' app
 
 shown="$temporary/show.json"
 "$hyperhub" show > "$shown"
-config_shown="$temporary/config-show.json"
-"$hyperhub" config show > "$config_shown"
-cmp "$shown" "$config_shown"
+if "$hyperhub" config show >"$temporary/config-show.stdout" 2>"$temporary/config-show.stderr"; then
+  echo 'removed config show alias unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -q 'use `hyperhub show`' "$temporary/config-show.stderr"
 cmp "$shown" "$HOME/.hyperhub/config.redacted.json"
 [[ $(stat -c %a "$HOME/.hyperhub/config.redacted.json") == 600 ]]
 python3 - "$shown" <<'PY'

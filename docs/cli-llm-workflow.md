@@ -16,7 +16,7 @@ Skill 位于：
 hyperhub show
 ```
 
-`hyperhub config show` 是兼容别名。输出直接是完整配置 JSON，不增加包装字段；它与导出配置使用同一份 `Config` 数据，唯一变化是所有 inline secret 的真实值被替换为 `<redacted>`。读取不需要密码。
+输出直接是完整配置 JSON，不增加包装字段；它与导出配置使用同一份 `Config` 数据，唯一变化是所有 inline secret 的真实值被替换为 `<redacted>`。读取不需要密码。
 
 加密配置每次保存时都会原子写入权限为当前用户独占的 `config.redacted.json`。从旧版本升级且该文件尚不存在时，先执行一次 `hyperhub validate --password-file ./password` 生成脱敏视图，之后 `show` 不再需要密码。
 
@@ -91,7 +91,7 @@ printf 'replace-with-a-long-password\n' > password
 chmod 0600 password
 ```
 
-密码文件只用于 CLI，不得提交。`config show` 永不输出 inline secret；计划和应用结果中的变更也会脱敏。
+密码文件只用于 CLI，不得提交。`show` 永不输出 inline secret；计划和应用结果中的变更也会脱敏。
 
 ## 热更新
 
@@ -118,7 +118,7 @@ Serve 未运行时 `live_update` 为 `false`，下次启动读取新配置。
 2. 错误 token 不能修改配置；
 3. `approve` 会打开二次编辑器，并保留人工修改后的配置；
 4. `${APPROVE:name}` 由人工隐藏输入真实 key；
-5. review、应用结果和 `config show` 均不泄漏 inline secret；
+5. review、应用结果和 `show` 均不泄漏 inline secret；
 6. 正确 proposal token 和最终 `APPLY <code>` 可以初始化配置；
 7. 保存后的配置可以通过 `validate`；
 8. Serve 运行时 approve 能完成热更新。

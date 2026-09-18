@@ -41,10 +41,9 @@ struct PreparedPatch {
 
 pub(crate) fn parse(args: &[OsString]) -> Result<Command, String> {
     let Some(action) = args.first().map(|value| value.to_string_lossy()) else {
-        return Err("config command requires `show` or `patch`".into());
+        return Err("config command requires `patch`".into());
     };
     match action.as_ref() {
-        "show" => parse_show(&args[1..]),
         "patch" => parse_patch(&args[1..]),
         value => Err(format!("unknown config action '{value}'")),
     }
