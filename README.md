@@ -116,7 +116,7 @@ hyperhub config patch patch.json --password-file ./password
 hyperhub approve
 ```
 
-`hyperhub show` 不需要密码，输出与导出配置 1:1 对应的 JSON，唯一差异是敏感值显示为 `<redacted>`。`approve` 为每条待审配置项分配 UUID，按 `n/m` 显示“新增 / 修改 / 删除”、与 Config TUI 一致的分类路径和脱敏变更，并允许批准、编辑、拒绝或暂退；需要真实 key 时使用星号掩码输入引导。每次决定都会持久化，进程意外中断后再次执行 `hyperhub approve` 会从第一条未处理请求继续。已批准请求立即加密保存，并在 Serve 运行时热更新。完整流程见 [`docs/cli-llm-workflow.md`](docs/cli-llm-workflow.md)。
+`hyperhub show` 不需要密码，输出与导出配置 1:1 对应的 JSON，唯一差异是敏感值显示为 `<redacted>`。代理、凭证、审计插件、路由、环境变量、证书及沙盒规则等可独立配置对象都持久化 UUID；旧配置按对象类型和业务 ID 生成稳定迁移 UUID。`approve` 另为每条待审请求分配 UUID，按 `n/m` 显示“新增 / 修改 / 删除”、配置对象 UUID、与 Config TUI 一致的分类路径和脱敏变更，并允许批准、编辑、拒绝或暂退；需要真实 key 时使用星号掩码输入引导。每次决定都会持久化，进程意外中断后再次执行 `hyperhub approve` 会从第一条未处理请求继续。已批准请求立即加密保存，并在 Serve 运行时热更新。完整流程见 [`docs/cli-llm-workflow.md`](docs/cli-llm-workflow.md)。
 
 ## 自动构建与发布
 

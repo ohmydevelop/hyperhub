@@ -17,7 +17,7 @@ HyperHub 的 LLM 驱动入口是本地 CLI 与 Shell。
    ```
 
    输出与配置导出的数据结构 1:1 对应，仅将所有 inline secret 的真实值替换为 `<redacted>`。读取脱敏视图不需要密码。
-3. 生成 RFC 6902 风格 JSON Patch。仅使用 `add`、`replace`、`remove`、`test`；数组追加使用 `/-`。每个修改操作应当构成可以独立校验的完整配置请求。需要人工输入的 key、token 或密码必须使用占位符，例如：
+3. 生成 RFC 6902 风格 JSON Patch。仅使用 `add`、`replace`、`remove`、`test`；数组追加使用 `/-`。每个修改操作应当构成可以独立校验的完整配置请求。现有配置对象的 `uuid` 是稳定身份，不得修改或复用；新增对象可省略 `uuid`，CLI 会生成。需要人工输入的 key、token 或密码必须使用占位符，例如：
 
    ```json
    {"value":{"value":"${APPROVE:github-api-key}"}}
@@ -39,7 +39,7 @@ HyperHub 的 LLM 驱动入口是本地 CLI 与 Shell。
 
    LLM 不得代替用户运行此命令、输入密码或作出审批决定。人工流程会：
    - 输入 HyperHub 密码；
-   - 为每条配置审批项显示稳定 UUID、`n/m` 进度以及“新增 / 修改 / 删除”；
+   - 同时显示审批请求 UUID 与配置对象 UUID、`n/m` 进度以及“新增 / 修改 / 删除”；
    - 使用与 Config TUI 一致的“网关 / 凭证”“网关 / 路由”“沙盒 / 网络”等分类路径和字段名称；
    - 允许批准、编辑、拒绝或暂退；
    - 在批准需要凭证的请求时以星号掩码输入 `${APPROVE:name}` 的真实值；
