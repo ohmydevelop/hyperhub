@@ -104,6 +104,18 @@ hyperhub stop
 
 Windows 使用 `hyperhub.exe` 替换 `hyperhub`。具体参数可通过 `hyperhub --help` 查看。
 
+## LLM 通过 CLI 配置
+
+仓库提供 `$hyperhub-cli` Skill。LLM 先读取脱敏配置并生成 JSON Patch 计划，CLI 返回一次性审批 token；只有用户明确确认后才应用：
+
+```bash
+hyperhub config show --password-file ./password
+hyperhub config patch patch.json --password-file ./password
+hyperhub config patch patch.json --password-file ./password --approve <token>
+```
+
+计划阶段不会写入配置，错误或过期 token 不能应用。Serve 运行时配置会热更新。完整流程见 [`docs/cli-llm-workflow.md`](docs/cli-llm-workflow.md)。
+
 ## 自动构建与发布
 
 向公开仓库推送符合 `vX.Y.Z` 格式的 Git tag 后，GitHub Actions 会自动构建 Windows x64、Linux x86_64 和 Linux aarch64 版本，打包生成校验清单，并创建对应的 GitHub Release。第一版使用：

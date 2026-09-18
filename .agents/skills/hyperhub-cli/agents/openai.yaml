@@ -1,0 +1,4 @@
+interface:
+  display_name: "HyperHub CLI 配置"
+  short_description: "通过 CLI 规划、审批并应用 HyperHub 配置"
+  default_prompt: "使用 $hyperhub-cli 检查当前 HyperHub 配置，先生成变更计划，在我明确批准后再应用并验证。"
