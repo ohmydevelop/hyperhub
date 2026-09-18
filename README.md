@@ -111,10 +111,10 @@ Windows 使用 `hyperhub.exe` 替换 `hyperhub`。具体参数可通过 `hyperhu
 ```bash
 hyperhub config show --password-file ./password
 hyperhub config patch patch.json --password-file ./password
-hyperhub config patch patch.json --password-file ./password --approve <token>
+hyperhub approve patch.json --password-file ./password --token <token>
 ```
 
-计划阶段不会写入配置，错误或过期 token 不能应用。Serve 运行时配置会热更新。完整流程见 [`docs/cli-llm-workflow.md`](docs/cli-llm-workflow.md)。
+计划阶段不会写入配置。`approve` 会打开 patch 供人工二次编辑，隐藏输入真实 key，展示最终脱敏 diff，并要求动态确认码；错误或过期 token 不能进入审批。Serve 运行时配置会热更新。完整流程见 [`docs/cli-llm-workflow.md`](docs/cli-llm-workflow.md)。
 
 ## 自动构建与发布
 

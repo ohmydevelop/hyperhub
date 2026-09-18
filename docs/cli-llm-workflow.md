@@ -8,7 +8,7 @@ Skill 位于：
 .agents/skills/hyperhub-cli/SKILL.md
 ```
 
-## 非交互配置接口
+## CLI 配置与人工审计接口
 
 读取脱敏配置：
 
@@ -16,7 +16,22 @@ Skill 位于：
 hyperhub config show --password-file ./password
 ```
 
-规划 JSON Patch：
+LLM 使用 JSON Patch 描述意图。需要真实凭证的位置使用审批占位符：
+
+```json
+[
+  {
+    "op": "add",
+    "path": "/environment/-",
+    "value": {
+      "name": "GH_TOKEN",
+      "value": { "value": "${APPROVE:github-token}" }
+    }
+  }
+]
+```
+
+LLM 只运行规划命令：
 
 ```sh
 hyperhub config patch patch.json --password-file ./password
@@ -25,19 +40,34 @@ hyperhub config patch patch.json --password-file ./password
 规划命令不会写入配置，返回：
 
 - `status = approval_required`；
-- 与当前配置、patch 和计算结果绑定的 `approval_token`；
+- 与当前配置、原始 patch 和计划结果绑定的 `approval_token`；
 - 已脱敏的 `changes`；
 - Serve 是否正在运行。
 
-人工确认后应用同一个 patch：
+之后由人工在真实终端运行：
 
 ```sh
-hyperhub config patch patch.json \
+hyperhub approve patch.json \
   --password-file ./password \
-  --approve <approval_token>
+  --token <approval_token>
 ```
 
-若当前配置、patch 内容或结果发生变化，旧 token 会失效，必须重新规划和确认。该机制避免 LLM 在没有本次人工批准时直接修改配置。
+`approve` 会把 patch 复制到权限受限的临时文件，并使用 `$HYPERHUB_EDITOR` 指定的编辑器打开；未设置时 POSIX 默认使用 `vi`，Windows 默认使用 `notepad.exe`。也可以显式指定单个编辑器程序：
+
+```sh
+hyperhub approve patch.json --token <token> \
+  --password-file ./password --editor /path/to/editor-wrapper
+```
+
+人工可以在编辑器里调整目标、端口、优先级或删除不接受的操作。保存并退出后，CLI 对每个 `${APPROVE:name}` 使用隐藏输入读取真实值；真实值只存在于内存，不写回 LLM 生成的 patch 或 review 临时文件。
+
+最后 CLI 显示二次编辑后的脱敏 diff，并要求输入动态的：
+
+```text
+APPLY <12位确认码>
+```
+
+只有完全匹配才保存配置。原始配置或原始 patch 发生变化会使 proposal token 失效；二次编辑、人工填写的 key 和最终配置则由新的确认码绑定。
 
 支持的 patch 操作：
 
@@ -46,7 +76,7 @@ hyperhub config patch patch.json \
 - `remove`；
 - `test`。
 
-路径使用 JSON Pointer；向数组末尾追加使用 `/-`。CLI 在计划阶段反序列化并校验完整配置，因此无效 route、重复 ID、无效正则、错误引用或非 loopback listener 不会进入审批阶段。
+路径使用 JSON Pointer；向数组末尾追加使用 `/-`。CLI 在规划和审批后都会反序列化并校验完整配置，因此无效 route、重复 ID、无效正则、错误引用或非 loopback listener 不会被保存。
 
 ## 初始化与密码
 
@@ -82,7 +112,9 @@ Serve 未运行时 `live_update` 为 `false`，下次启动读取新配置。
 
 1. 未批准的计划不创建配置；
 2. 错误 token 不能修改配置；
-3. 正确 token 可以初始化并添加 route/environment；
-4. `config show` 不泄漏 inline secret；
-5. 保存后的配置可以通过 `validate`；
-6. Serve 运行时 patch 能完成热更新。
+3. `approve` 会打开二次编辑器，并保留人工修改后的配置；
+4. `${APPROVE:name}` 由人工隐藏输入真实 key；
+5. review、应用结果和 `config show` 均不泄漏 inline secret；
+6. 正确 proposal token 和最终 `APPLY <code>` 可以初始化配置；
+7. 保存后的配置可以通过 `validate`；
+8. Serve 运行时 approve 能完成热更新。

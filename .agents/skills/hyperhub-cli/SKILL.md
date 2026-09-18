@@ -17,24 +17,34 @@ HyperHub 的 LLM 驱动入口是本地 CLI 与 Shell。
    ```
 
    输出中的 inline secret 会显示为 `<redacted>`。
-3. 生成 RFC 6902 风格 JSON Patch。仅使用 `add`、`replace`、`remove`、`test`；数组追加使用 `/-`。包含 secret 的临时 patch 文件必须设为 `0600`。
+3. 生成 RFC 6902 风格 JSON Patch。仅使用 `add`、`replace`、`remove`、`test`；数组追加使用 `/-`。需要人工输入的 key、token 或密码必须使用占位符，例如：
+
+   ```json
+   {"value":{"value":"${APPROVE:github-api-key}"}}
+   ```
+
+   不要向用户索取真实 key，也不要把真实 key 写入 patch。
 4. 只生成计划，不修改配置：
 
    ```sh
    hyperhub config patch patch.json --password-file /path/to/password
    ```
 
-   向用户展示返回的 `changes`，并请求明确批准。不得把普通任务授权、历史批准或模型判断当作本次批准。
-5. 用户批准后，原样使用计划返回的 token：
+   向用户展示返回的脱敏 `changes` 和 `approval_token`。然后停止自动操作，提示用户在本地终端执行人工审计：
 
    ```sh
-   hyperhub config patch patch.json \
+   hyperhub approve patch.json \
      --password-file /path/to/password \
-     --approve <approval_token>
+     --token <approval_token>
    ```
 
-   Token 绑定当前配置、patch 和结果。配置变化或 token 不匹配时重新生成计划并再次请求批准，不要绕过。
-6. 验证：
+5. `approve` 会执行以下人工步骤：
+   - 在权限受限的临时副本中打开 patch，允许二次编辑；
+   - 对 `${APPROVE:name}` 占位符进行隐藏输入，真实值不会写回 patch；
+   - 显示最终脱敏 diff；
+   - 要求输入动态的 `APPLY <code>` 后才保存；
+   - Serve 运行时自动热更新。
+6. 用户完成 approve 后再验证：
 
    ```sh
    hyperhub validate --password-file /path/to/password
@@ -42,7 +52,7 @@ HyperHub 的 LLM 驱动入口是本地 CLI 与 Shell。
    hyperhub status --json
    ```
 
-运行中的 Serve 会自动热更新；CLI 返回的 `live_update` 必须为 `true`。未运行时为 `false`，配置在下次启动生效。
+`approval_token` 绑定计划时的当前配置与原始 patch。配置或原始 patch 变化后必须重新规划。人工二次编辑后的最终结果由 `APPLY <code>` 再次绑定确认。
 
 ## 常用操作
 
@@ -59,7 +69,7 @@ hyperhub run --password-file /path/to/password -- program args...
 ## 安全约束
 
 - 不使用 `export --plain` 获取配置，也不在回复、日志或 Commit 中输出 secret。
-- 计划阶段不得修改配置；只有用户明确批准后才能传递 `--approve`。
+- 计划阶段不得修改配置；LLM 不得代替用户运行交互式 `approve` 或输入 `APPLY <code>`。
 - 不手工编辑加密的 `config.bin`。
 - 不使用未知字段或跳过 CLI 语义校验；若 patch 被拒绝，修正 patch 后重新计划。
 - 操作结束后删除含 secret 的临时文件；不得提交密码文件、patch secret 或生成的配置。
