@@ -28,8 +28,9 @@ export HOME="$temporary/home"
 export XDG_RUNTIME_DIR="$temporary/runtime"
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
 chmod 0700 "$XDG_RUNTIME_DIR"
+password='llm-test-password'
 password_file="$temporary/password"
-printf 'llm-test-password\n' > "$password_file"
+printf '%s\n' "$password" > "$password_file"
 chmod 0600 "$password_file"
 patch_file="$temporary/initial-patch.json"
 cat > "$patch_file" <<'JSON'
@@ -44,23 +45,38 @@ chmod 0600 "$patch_file"
 plan="$temporary/plan.json"
 "$hyperhub" config patch "$patch_file" --password-file "$password_file" > "$plan"
 [[ ! -e $HOME/.hyperhub/config.bin ]] || { echo 'planning unexpectedly modified config' >&2; exit 1; }
-approval=$(python3 - "$plan" <<'PY'
+queue="$HOME/.hyperhub/config.approval.bin"
+[[ -f $queue ]] || { echo 'planning did not persist the approval queue' >&2; exit 1; }
+[[ $(stat -c %a "$queue") == 600 ]]
+python3 - "$plan" <<'PY'
 import json
 import pathlib
 import sys
 plan = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert plan["status"] == "approval_required"
+assert plan["request_count"] == 3
 assert plan["changes"]
-print(plan["approval_token"])
+assert len(plan["approval_token"]) == 64
 PY
-)
 
-if "$hyperhub" approve "$patch_file" \
-  --password-file "$password_file" --token invalid-token >/dev/null 2>&1; then
-  echo 'invalid approval token unexpectedly applied config' >&2
+pending="$temporary/pending.json"
+"$hyperhub" config patch "$patch_file" --password-file "$password_file" > "$pending"
+python3 - "$pending" <<'PY'
+import json
+import pathlib
+import sys
+pending = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert pending["status"] == "approval_pending"
+assert pending["completed"] == 0
+assert pending["remaining"] == 3
+PY
+other_patch="$temporary/other-patch.json"
+printf '[{"op":"replace","path":"/debug","value":false}]\n' > "$other_patch"
+chmod 0600 "$other_patch"
+if "$hyperhub" config patch "$other_patch" --password-file "$password_file" >/dev/null 2>&1; then
+  echo 'a different patch unexpectedly replaced the pending approval queue' >&2
   exit 1
 fi
-[[ ! -e $HOME/.hyperhub/config.bin ]] || { echo 'invalid approval modified config' >&2; exit 1; }
 
 review_editor="$temporary/review-editor"
 cat > "$review_editor" <<'EOF_EDITOR'
@@ -69,52 +85,39 @@ import json
 import pathlib
 import sys
 path = pathlib.Path(sys.argv[1])
-patch = json.loads(path.read_text(encoding="utf-8"))
-for operation in patch:
-    value = operation.get("value")
-    if isinstance(value, dict) and value.get("id") == "llm-deny-example":
-        value["priority"] = 120
-path.write_text(json.dumps(patch, indent=2) + "\n", encoding="utf-8")
+operation = json.loads(path.read_text(encoding="utf-8"))
+operation["value"]["priority"] = 120
+path.write_text(json.dumps(operation, indent=2) + "\n", encoding="utf-8")
 EOF_EDITOR
 chmod 0700 "$review_editor"
 
-run_approve() {
-  local patch=$1 token=$2 editor=$3 secret=$4 decision=$5 transcript=$6
-  python3 - "$hyperhub" "$patch" "$password_file" "$token" "$editor" "$secret" "$decision" "$transcript" <<'PY'
+drive_approve() {
+  local mode=$1 transcript=$2 secret=${3:-unused} editor=${4:-}
+  python3 - "$hyperhub" "$password" "$mode" "$transcript" "$secret" "$editor" <<'PY'
 import os
 import pathlib
 import pty
-import re
 import select
+import signal
 import sys
 
-hyperhub, patch, password, token, editor, secret, decision, transcript = sys.argv[1:]
+hyperhub, password, mode, transcript, secret, editor = sys.argv[1:]
 pid, fd = pty.fork()
 if pid == 0:
-    environment = os.environ.copy()
-    os.execve(
-        hyperhub,
-        [
-            hyperhub,
-            "approve",
-            patch,
-            "--password-file",
-            password,
-            "--token",
-            token,
-            "--editor",
-            editor,
-        ],
-        environment,
-    )
+    argv = [hyperhub, "approve"]
+    if editor:
+        argv.extend(["--editor", editor])
+    os.execve(hyperhub, argv, os.environ.copy())
 
 output = bytearray()
-sent_secret = False
-sent_confirmation = False
+password_sent = False
+secret_sent = False
+decisions_sent = 0
+killed = False
 while True:
     ready, _, _ = select.select([fd], [], [], 30)
     if not ready:
-        os.kill(pid, 9)
+        os.kill(pid, signal.SIGKILL)
         raise SystemExit("timed out waiting for approve interaction")
     try:
         chunk = os.read(fd, 4096)
@@ -124,46 +127,81 @@ while True:
         break
     output.extend(chunk)
     text = output.decode("utf-8", errors="replace")
-    if not sent_secret and "Value for approval placeholder" in text:
+    if not password_sent and "HyperHub password:" in text:
+        os.write(fd, password.encode() + b"\n")
+        password_sent = True
+    if not secret_sent and "Enter value (hidden):" in text:
         os.write(fd, secret.encode() + b"\n")
-        sent_secret = True
-    if not sent_confirmation:
-        match = re.search(r"Type APPLY ([0-9a-f]{12}) to confirm:", text)
-        if match:
-            answer = f"APPLY {match.group(1)}" if decision == "apply" else "CANCEL"
-            os.write(fd, f"{answer}\n".encode())
-            sent_confirmation = True
+        secret_sent = True
+    prompt_count = text.count("Choose [a]pprove") + text.count("Request is invalid; choose")
+    while decisions_sent < prompt_count:
+        decisions_sent += 1
+        if mode == "interrupt":
+            if decisions_sent == 1:
+                os.write(fd, b"r\n")
+            elif decisions_sent == 2:
+                os.write(fd, b"a\n")
+            elif decisions_sent == 3:
+                os.kill(pid, signal.SIGKILL)
+                killed = True
+                break
+        elif mode == "resume":
+            os.write(fd, b"e\n" if decisions_sent == 1 else b"a\n")
+        elif mode == "apply":
+            os.write(fd, b"a\n")
+        else:
+            raise SystemExit(f"unknown mode {mode}")
+    if killed:
+        break
 
 _, status = os.waitpid(pid, 0)
 pathlib.Path(transcript).write_bytes(bytes(output))
-exit_code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 255
-if decision == "apply" and exit_code != 0:
+if password.encode() in output or (secret != "unused" and secret.encode() in output):
+    raise SystemExit("approve transcript leaked hidden input")
+if not password_sent:
+    raise SystemExit("approve did not prompt for the configuration password")
+if mode == "interrupt":
+    if not killed:
+        raise SystemExit("approve was expected to be interrupted")
+elif not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
     sys.stderr.buffer.write(output)
     raise SystemExit("approve command failed")
-if decision == "cancel" and exit_code == 0:
-    raise SystemExit("cancelled approval unexpectedly succeeded")
-if decision == "cancel" and b"configuration approval was cancelled" not in output:
-    sys.stderr.buffer.write(output)
-    raise SystemExit("cancelled approval did not report cancellation")
-if secret.encode() in output:
-    raise SystemExit("approve output leaked the manually entered secret")
 PY
 }
 
-cancelled_transcript="$temporary/cancelled-approve.transcript"
-run_approve "$patch_file" "$approval" "$review_editor" 'cancelled-secret' cancel "$cancelled_transcript"
-[[ ! -e $HOME/.hyperhub/config.bin ]] || { echo 'cancelled approval modified config' >&2; exit 1; }
+first_transcript="$temporary/approve-interrupted.transcript"
+drive_approve interrupt "$first_transcript" 'real-github-api-key'
+grep -q '\[1/3\] configuration request' "$first_transcript"
+grep -q '\[1/3\] rejected' "$first_transcript"
+grep -q '\[2/3\] configuration request' "$first_transcript"
+grep -q '\[2/3\] approved' "$first_transcript"
+grep -q '\[3/3\] configuration request' "$first_transcript"
+[[ -f $queue ]] || { echo 'interruption removed the pending approval queue' >&2; exit 1; }
 
-transcript="$temporary/approve.transcript"
-run_approve "$patch_file" "$approval" "$review_editor" 'real-github-api-key' apply "$transcript"
+partial="$temporary/partial-show.json"
+"$hyperhub" show > "$partial"
+python3 - "$partial" <<'PY'
+import json
+import pathlib
+import sys
+shown = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert shown["debug"] is False
+assert shown["environment"][-1]["name"] == "LLM_TEST_SECRET"
+assert shown["environment"][-1]["value"]["value"] == "<redacted>"
+assert not shown["routes"]
+PY
+
+resume_transcript="$temporary/approve-resumed.transcript"
+drive_approve resume "$resume_transcript" unused "$review_editor"
+grep -q '\[3/3\] configuration request' "$resume_transcript"
+! grep -q '\[1/3\] configuration request' "$resume_transcript"
+! grep -q '\[2/3\] configuration request' "$resume_transcript"
+grep -q '"edited": true' "$resume_transcript"
+grep -q '"status": "completed"' "$resume_transcript"
+[[ ! -e $queue ]] || { echo 'completed approval queue was not removed' >&2; exit 1; }
 
 shown="$temporary/show.json"
 "$hyperhub" show > "$shown"
-if "$hyperhub" config show >"$temporary/config-show.stdout" 2>"$temporary/config-show.stderr"; then
-  echo 'removed config show alias unexpectedly succeeded' >&2
-  exit 1
-fi
-grep -q 'use `hyperhub show`' "$temporary/config-show.stderr"
 cmp "$shown" "$HOME/.hyperhub/config.redacted.json"
 [[ $(stat -c %a "$HOME/.hyperhub/config.redacted.json") == 600 ]]
 python3 - "$shown" <<'PY'
@@ -173,13 +211,17 @@ import sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 assert "real-github-api-key" not in text
 shown = json.loads(text)
-assert shown["debug"] is True
+assert shown["debug"] is False
 assert shown["environment"][-1]["value"]["value"] == "<redacted>"
 route = shown["routes"][-1]
 assert route["id"] == "llm-deny-example"
 assert route["priority"] == 120
 PY
 "$hyperhub" validate --password-file "$password_file" >/dev/null
+if "$hyperhub" approve --password-file "$password_file" >/dev/null 2>&1; then
+  echo 'approve unexpectedly succeeded without pending requests' >&2
+  exit 1
+fi
 
 redacted_view="$HOME/.hyperhub/config.redacted.json"
 rm "$redacted_view"
@@ -212,26 +254,12 @@ run_live_update_test() {
   "$hyperhub" status --json | grep -q '"state".*"running"'
 
   live_patch="$temporary/live-patch.json"
-  printf '[{"op":"replace","path":"/debug","value":false}]\n' > "$live_patch"
+  printf '[{"op":"replace","path":"/debug","value":true}]\n' > "$live_patch"
   chmod 0600 "$live_patch"
-  live_plan="$temporary/live-plan.json"
-  "$hyperhub" config patch "$live_patch" --password-file "$password_file" > "$live_plan"
-  live_approval=$(python3 - "$live_plan" <<'PYCODE'
-import json
-import pathlib
-import sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["approval_token"])
-PYCODE
-)
-  noop_editor="$temporary/noop-editor"
-  cat > "$noop_editor" <<'EOF_EDITOR'
-#!/bin/sh
-exit 0
-EOF_EDITOR
-  chmod 0700 "$noop_editor"
+  "$hyperhub" config patch "$live_patch" --password-file "$password_file" > "$temporary/live-plan.json"
   live_transcript="$temporary/live-approve.transcript"
-  run_approve "$live_patch" "$live_approval" "$noop_editor" unused apply "$live_transcript"
-  grep -q '"live_update": true' "$live_transcript"
+  drive_approve apply "$live_transcript"
+  grep -q '\[1/1\] approved (live_update=true)' "$live_transcript"
 
   kill "$serve_pid" 2>/dev/null || true
   wait "$serve_pid" 2>/dev/null || true
@@ -243,5 +271,5 @@ if ((preexisting_serve)); then
 else
   run_live_update_test
 fi
-printf 'CLI human approval integration passed; plan=%s review=%s live=%s\n' \
-  "$plan" "$transcript" "$live_transcript"
+printf 'CLI sequential approval integration passed; plan=%s interrupted=%s resumed=%s live=%s\n' \
+  "$plan" "$first_transcript" "$resume_transcript" "$live_transcript"
