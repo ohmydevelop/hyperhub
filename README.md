@@ -1,7 +1,7 @@
 # HyperHub
 
-[![CI](https://github.com/flash-dev-ctrl/hyperhub/actions/workflows/ci.yml/badge.svg)](https://github.com/flash-dev-ctrl/hyperhub/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/flash-dev-ctrl/hyperhub?include_prereleases)](https://github.com/flash-dev-ctrl/hyperhub/releases)
+[![CI](https://github.com/ohmydevelop/hyperhub/actions/workflows/ci.yml/badge.svg)](https://github.com/ohmydevelop/hyperhub/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ohmydevelop/hyperhub?include_prereleases)](https://github.com/ohmydevelop/hyperhub/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **面向 AI Agent、自动化工具和开发工作流的进程级网络安全网关。**
@@ -26,16 +26,16 @@ HyperHub 采用 **local-first** 设计：网关、策略、凭证和审计记录
 Linux 可直接使用安装脚本：
 
 ```bash
-curl -fsSL https://github.com/flash-dev-ctrl/hyperhub/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ohmydevelop/hyperhub/releases/latest/download/install.sh | sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://github.com/flash-dev-ctrl/hyperhub/releases/latest/download/install.ps1 | iex
+irm https://github.com/ohmydevelop/hyperhub/releases/latest/download/install.ps1 | iex
 ```
 
-也可以从 [GitHub Releases](https://github.com/flash-dev-ctrl/hyperhub/releases) 下载对应平台的单文件 CLI：
+也可以从 [GitHub Releases](https://github.com/ohmydevelop/hyperhub/releases) 下载对应平台的单文件 CLI：
 
 - Windows x64：`hyperhub.exe`
 - Linux x86_64：`hyperhub`

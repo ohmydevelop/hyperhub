@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$repo = if ($env:HYPERHUB_REPO) { $env:HYPERHUB_REPO } else { "flash-dev-ctrl/hyperhub" }
+$repo = if ($env:HYPERHUB_REPO) { $env:HYPERHUB_REPO } else { "ohmydevelop/hyperhub" }
 $version = if ($env:HYPERHUB_VERSION) { $env:HYPERHUB_VERSION } else { "latest" }
 $installDir = if ($env:HYPERHUB_INSTALL_DIR) { $env:HYPERHUB_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".hyperhub\bin" }
 

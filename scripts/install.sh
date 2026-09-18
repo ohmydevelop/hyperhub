@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="${HYPERHUB_REPO:-flash-dev-ctrl/hyperhub}"
+repo="${HYPERHUB_REPO:-ohmydevelop/hyperhub}"
 version="${HYPERHUB_VERSION:-latest}"
 install_dir="${HYPERHUB_INSTALL_DIR:-$HOME/.local/bin}"
 
