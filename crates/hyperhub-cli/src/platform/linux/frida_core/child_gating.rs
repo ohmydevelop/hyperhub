@@ -23,26 +23,6 @@ impl Context {
         }
     }
 
-    pub(super) fn adopt_fork_child(&mut self, process: Process) -> Result<(), String> {
-        unsafe {
-            let session = attach(self.device.as_ptr(), process)?;
-            let mut error = std::ptr::null_mut();
-            frida_sys::frida_device_resume_sync(
-                self.device.as_ptr(),
-                process.pid() as u32,
-                std::ptr::null_mut(),
-                &mut error,
-            );
-            if error.is_null() {
-                self.child_sessions.push(session);
-                Ok(())
-            } else {
-                unref(session.as_ptr().cast());
-                Err(take_error(error))
-            }
-        }
-    }
-
     pub(super) fn pending_children(&mut self) -> Result<Vec<PendingChild>, String> {
         unsafe {
             let mut error = std::ptr::null_mut();
@@ -92,10 +72,6 @@ impl Context {
 impl FridaCore {
     pub fn enable_child_gating(&self, process: Process) -> Result<(), String> {
         self.request(|reply| Command::EnableChildGating { process, reply })
-    }
-
-    pub fn adopt_fork_child(&self, process: Process) -> Result<(), String> {
-        self.request(|reply| Command::AdoptForkChild { process, reply })
     }
 
     pub fn pending_children(&self) -> Result<Vec<PendingChild>, String> {

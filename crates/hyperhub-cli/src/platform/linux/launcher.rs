@@ -407,14 +407,14 @@ fn monitor_children(
                             child.process,
                         )
                         .and_then(|_| {
-                            frida.adopt_fork_child(child.process).map_err(|error| {
-                                format!("Frida Core fork adoption failed: {error}")
-                            })
+                            frida
+                                .resume(child.process)
+                                .map_err(|error| format!("Frida Core fork resume failed: {error}"))
                         });
                         if let Err(error) = result {
                             handle_child_failure(frida, child, enforce, error);
                         } else {
-                            debug_child_success(child, "adopted");
+                            debug_child_success(child, "resumed");
                         }
                         continue;
                     }
@@ -519,12 +519,22 @@ fn inject_child(
     runtime: &Path,
     integrity: &RuntimeIntegrity,
 ) -> Result<(), String> {
+    inject_child_entrypoint(frida, process, runtime, integrity, "frida_agent_main")
+}
+
+fn inject_child_entrypoint(
+    frida: &FridaCore,
+    process: Process,
+    runtime: &Path,
+    integrity: &RuntimeIntegrity,
+    entrypoint: &str,
+) -> Result<(), String> {
     integrity.verify(runtime)?;
     let pid = process.pid() as u32;
     let ready = AgentReady::new(pid)?;
     let data = ready.data()?;
     let _injected = frida
-        .inject(process, runtime, "frida_agent_main", &data)
+        .inject(process, runtime, entrypoint, &data)
         .map_err(|error| format!("Frida Core injection failed: {error}"))?;
     ready.wait()?;
     frida
@@ -615,8 +625,15 @@ fn terminate_process(pid: u32) {
 
 fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, String> {
     loop {
+        // A blocking waitpid consumes ptrace stops used by Frida child gating.
+        // Reap only once the root process is a zombie; otherwise let Frida's
+        // event loop observe and resume fork/exec transitions.
+        if process_state(pid).is_some_and(|state| !matches!(state, 'Z' | 'X')) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
         let mut status = 0;
-        let waited = unsafe { libc::waitpid(pid as i32, &mut status, 0) };
+        let waited = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
         if waited < 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::EINTR) {
@@ -630,14 +647,16 @@ fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, S
             }
             return Err(error.to_string());
         }
+        if waited == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
         if libc::WIFEXITED(status) {
             return Ok(libc::WEXITSTATUS(status));
         }
         if libc::WIFSIGNALED(status) {
             return Ok(128 + libc::WTERMSIG(status));
         }
-        // Frida may expose ptrace stops through waitpid. Keep waiting for the
-        // real process exit while the child-gating monitor handles resumes.
     }
 }
 
@@ -649,6 +668,11 @@ pub(super) fn process_exists(pid: u32, expected_start_time: Option<u64>) -> bool
         return true;
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn process_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?.1.chars().next()
 }
 
 fn process_start_time(pid: u32) -> Option<u64> {
@@ -684,6 +708,12 @@ mod tests {
         ));
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn process_state_reads_the_current_process_without_reaping_it() {
+        let state = process_state(std::process::id()).unwrap();
+        assert!(!matches!(state, 'Z' | 'X'));
     }
 
     #[test]

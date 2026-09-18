@@ -41,10 +41,6 @@ enum Command {
         process: Process,
         reply: Reply<()>,
     },
-    AdoptForkChild {
-        process: Process,
-        reply: Reply<()>,
-    },
     PendingChildren {
         reply: Reply<Vec<PendingChild>>,
     },
@@ -95,9 +91,6 @@ impl FridaCore {
                             }
                             Command::EnableChildGating { process, reply } => {
                                 let _ = reply.send(context.enable_child_gating(process));
-                            }
-                            Command::AdoptForkChild { process, reply } => {
-                                let _ = reply.send(context.adopt_fork_child(process));
                             }
                             Command::PendingChildren { reply } => {
                                 let _ = reply.send(context.pending_children());
