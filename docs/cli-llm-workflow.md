@@ -13,10 +13,12 @@ Skill 位于：
 读取完整、脱敏的 JSON 配置：
 
 ```sh
-hyperhub show --password-file ./password
+hyperhub show
 ```
 
-`hyperhub config show` 是兼容别名。输出中的 `sensitive_values_redacted` 固定为 `true`，`redacted_paths` 会列出所有被替换为 `<redacted>` 的 inline secret 路径。
+`hyperhub config show` 是兼容别名。输出直接是完整配置 JSON，不增加包装字段；它与导出配置使用同一份 `Config` 数据，唯一变化是所有 inline secret 的真实值被替换为 `<redacted>`。读取不需要密码。
+
+加密配置每次保存时都会原子写入权限为当前用户独占的 `config.redacted.json`。从旧版本升级且该文件尚不存在时，先执行一次 `hyperhub validate --password-file ./password` 生成脱敏视图，之后 `show` 不再需要密码。
 
 LLM 使用 JSON Patch 描述意图。需要真实凭证的位置使用审批占位符：
 
