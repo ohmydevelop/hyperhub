@@ -151,7 +151,9 @@ fn execute(command: Command) -> Result<i32, String> {
         Command::Validate(password_file) => {
             let path = default_config_path().map_err(|error| error.to_string())?;
             let password = password::acquire(password_file.as_deref(), false)?;
-            load_encrypted(&path, password.as_bytes()).map_err(|e| e.to_string())?;
+            let unlocked = load_encrypted(&path, password.as_bytes()).map_err(|e| e.to_string())?;
+            config_store::save_redacted_json(&path, &unlocked.config)
+                .map_err(|error| error.to_string())?;
             println!("configuration is valid: {}", path.display());
             Ok(0)
         }
@@ -237,6 +239,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         password
     };
     let unlocked = load_encrypted(&path, password.as_bytes()).map_err(|error| error.to_string())?;
+    config_store::save_redacted_json(&path, &unlocked.config).map_err(|error| error.to_string())?;
     let debug = run.debug || unlocked.config.debug;
     let config = Arc::new(unlocked.config);
     let mut output = ServeOutput::open(run.output.as_deref())?;
@@ -1118,7 +1121,7 @@ fn print_doctor(target: Option<&Path>) -> Result<i32, String> {
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  hyperhub start [--debug] [--password-file file]\n  hyperhub stop\n  hyperhub restart [--debug] [--password-file file]\n  hyperhub status [--json]\n  hyperhub logs [-f|--follow] [-n|--lines count]\n  hyperhub auth clear\n  hyperhub run [--runtime agent (developer build)] [--password-file file] [--dry-run] [--] target [args...]\n  hyperhub config [--password-file file]\n  hyperhub show [--password-file file]\n  hyperhub config show [--password-file file]\n  hyperhub config patch <json-patch|-> [--password-file file]\n  hyperhub approve <json-patch> --token token [--password-file file] [--editor program]\n  hyperhub import <toml|bin> [--password-file file] [--input-password-file file]\n  hyperhub export <toml|bin> [--password-file file] [--export-password-file file] [--plain]\n  hyperhub validate [--password-file file]\n  hyperhub doctor [--target exe]\n  hyperhub serve [--password-file file] [--output file] [--debug]\n\n`run` is required for target programs. `serve` keeps the foreground/debug mode; start/stop/restart manage the background serve process."
+        "usage:\n  hyperhub start [--debug] [--password-file file]\n  hyperhub stop\n  hyperhub restart [--debug] [--password-file file]\n  hyperhub status [--json]\n  hyperhub logs [-f|--follow] [-n|--lines count]\n  hyperhub auth clear\n  hyperhub run [--runtime agent (developer build)] [--password-file file] [--dry-run] [--] target [args...]\n  hyperhub config [--password-file file]\n  hyperhub show\n  hyperhub config show\n  hyperhub config patch <json-patch|-> [--password-file file]\n  hyperhub approve <json-patch> --token token [--password-file file] [--editor program]\n  hyperhub import <toml|bin> [--password-file file] [--input-password-file file]\n  hyperhub export <toml|bin> [--password-file file] [--export-password-file file] [--plain]\n  hyperhub validate [--password-file file]\n  hyperhub doctor [--target exe]\n  hyperhub serve [--password-file file] [--output file] [--debug]\n\n`run` is required for target programs. `serve` keeps the foreground/debug mode; start/stop/restart manage the background serve process."
     );
 }
 
@@ -1180,23 +1183,15 @@ mod tests {
         assert_eq!(configure.action, ServeAction::Config);
         assert_eq!(configure.password_file, Some("password.txt".into()));
 
-        let Command::ConfigCli(config_cli::Command::Show { password_file }) =
-            parse_args(vec![os("show"), os("--password-file"), os("password.txt")]).unwrap()
-        else {
-            panic!()
-        };
-        assert_eq!(password_file, Some("password.txt".into()));
-
-        let Command::ConfigCli(config_cli::Command::Show { password_file }) = parse_args(vec![
-            os("config"),
-            os("show"),
-            os("--password-file"),
-            os("password.txt"),
-        ])
-        .unwrap() else {
-            panic!()
-        };
-        assert_eq!(password_file, Some("password.txt".into()));
+        assert!(matches!(
+            parse_args(vec![os("show")]).unwrap(),
+            Command::ConfigCli(config_cli::Command::Show)
+        ));
+        assert!(matches!(
+            parse_args(vec![os("config"), os("show")]).unwrap(),
+            Command::ConfigCli(config_cli::Command::Show)
+        ));
+        assert!(parse_args(vec![os("show"), os("--password-file"), os("password.txt")]).is_err());
 
         let Command::ConfigCli(config_cli::Command::Patch {
             patch,
@@ -1338,6 +1333,7 @@ mod tests {
             ["GITLAB_HOST", "GITLAB_TOKEN", "GH_TOKEN"]
         );
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(config_store::redacted_config_path(&path)).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 

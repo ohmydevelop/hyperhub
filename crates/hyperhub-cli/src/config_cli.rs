@@ -1,5 +1,7 @@
 use hyperhub_core::config::Config;
-use hyperhub_core::config_store::{self, default_config_path, load_encrypted, KdfDescriptor};
+use hyperhub_core::config_store::{
+    self, default_config_path, load_encrypted, read_redacted_json, KdfDescriptor, StoreError,
+};
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
 use hyperhub_core::session::{config_update_proof, ControlRequest, ControlResponse};
 use serde_json::{json, Value};
@@ -11,9 +13,7 @@ use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
-    Show {
-        password_file: Option<PathBuf>,
-    },
+    Show,
     Patch {
         patch: PathBuf,
         password_file: Option<PathBuf>,
@@ -78,8 +78,11 @@ fn parse_patch(args: &[OsString]) -> Result<Command, String> {
 }
 
 pub(crate) fn parse_show(args: &[OsString]) -> Result<Command, String> {
-    let password_file = parse_password_file("show", args)?;
-    Ok(Command::Show { password_file })
+    if args.is_empty() {
+        Ok(Command::Show)
+    } else {
+        Err("show accepts no options".into())
+    }
 }
 
 pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
@@ -115,17 +118,9 @@ pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
     })
 }
 
-fn parse_password_file(command: &str, args: &[OsString]) -> Result<Option<PathBuf>, String> {
-    match args {
-        [] => Ok(None),
-        [option, path] if option == "--password-file" => Ok(Some(path.clone().into())),
-        _ => Err(format!("{command} accepts only --password-file <file>")),
-    }
-}
-
 pub(crate) fn run(command: Command) -> Result<i32, String> {
     match command {
-        Command::Show { password_file } => show(password_file.as_deref()),
+        Command::Show => show(),
         Command::Patch {
             patch,
             password_file,
@@ -139,29 +134,27 @@ pub(crate) fn run(command: Command) -> Result<i32, String> {
     }
 }
 
-fn show(password_file: Option<&Path>) -> Result<i32, String> {
+fn show() -> Result<i32, String> {
     let path = default_config_path().map_err(|error| error.to_string())?;
-    let (config, initialized) = if path.is_file() {
-        let password = crate::password::acquire(password_file, false)?;
-        let unlocked =
-            load_encrypted(&path, password.as_bytes()).map_err(|error| error.to_string())?;
-        (unlocked.config, true)
+    let bytes = if path.is_file() {
+        read_redacted_json(&path).map_err(|error| match error {
+            StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                "redacted configuration view is not initialized; run `hyperhub validate --password-file <file>` once to migrate the existing encrypted config".into()
+            }
+            other => other.to_string(),
+        })?
     } else {
         let mut config = Config::default();
         config.apply_managed_audit_paths(&path);
         config.environment = crate::default_environment();
-        (config, false)
+        let mut bytes =
+            serde_json::to_vec_pretty(&config.redacted()).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+        bytes
     };
-    let mut value = serde_json::to_value(config).map_err(|error| error.to_string())?;
-    let redacted_paths = redact_secrets(&mut value);
-    print_json(&json!({
-        "schema_version": 1,
-        "initialized": initialized,
-        "config_path": path,
-        "sensitive_values_redacted": true,
-        "redacted_paths": redacted_paths,
-        "config": value,
-    }))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "redacted configuration JSON is not UTF-8".to_string())?;
+    print!("{text}");
     Ok(0)
 }
 
@@ -468,10 +461,8 @@ fn prepare_patch(path: &Path, current: &Config, patch: &Value) -> Result<Prepare
     hash.update(serde_json::to_vec(&next_value).map_err(|error| error.to_string())?);
     let approval_token = hex(&hash.finalize());
 
-    let mut before = current_value;
-    let mut after = next_value;
-    let _ = redact_secrets(&mut before);
-    let _ = redact_secrets(&mut after);
+    let before = serde_json::to_value(current.redacted()).map_err(|error| error.to_string())?;
+    let after = serde_json::to_value(config.redacted()).map_err(|error| error.to_string())?;
     let mut changes = Vec::new();
     collect_changes("", &before, &after, &mut changes);
     Ok(PreparedPatch {
@@ -695,33 +686,6 @@ fn escape_pointer(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
 
-fn redact_secrets(value: &mut Value) -> Vec<String> {
-    let mut paths = Vec::new();
-    redact_secrets_at("", value, &mut paths);
-    paths
-}
-
-fn redact_secrets_at(path: &str, value: &mut Value, paths: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            if map.len() == 1 && matches!(map.get("value"), Some(Value::String(_))) {
-                map.insert("value".into(), Value::String("<redacted>".into()));
-                paths.push(format!("{path}/value"));
-                return;
-            }
-            for (key, value) in map {
-                redact_secrets_at(&format!("{path}/{}", escape_pointer(key)), value, paths);
-            }
-        }
-        Value::Array(values) => {
-            for (index, value) in values.iter_mut().enumerate() {
-                redact_secrets_at(&format!("{path}/{index}"), value, paths);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn push_live_update(
     config: &Config,
     password: &[u8],
@@ -815,46 +779,5 @@ mod tests {
     fn malformed_approval_placeholder_is_rejected() {
         let error = collect_placeholders(&json!("${APPROVE:bad name}")).unwrap_err();
         assert!(error.contains("invalid approval placeholder"));
-    }
-
-    #[test]
-    fn every_nested_inline_secret_is_redacted() {
-        let mut value = json!({
-            "environment": [{"value": {"value": "environment-secret"}}],
-            "upstreams": [{
-                "username": {"value": "user-secret"},
-                "password": {"value": "password-secret"},
-                "headers": {"authorization": {"value": "header-secret"}}
-            }],
-            "plugins": [{
-                "secret": {"value": "plugin-secret"},
-                "ssh_accounts": [{
-                    "private_keys": [{"value": {"value": "private-key"}}],
-                    "passwords": [{"value": "ssh-password"}]
-                }]
-            }]
-        });
-        let paths = redact_secrets(&mut value);
-        let encoded = serde_json::to_string(&value).unwrap();
-        for secret in [
-            "environment-secret",
-            "user-secret",
-            "password-secret",
-            "header-secret",
-            "plugin-secret",
-            "private-key",
-            "ssh-password",
-        ] {
-            assert!(!encoded.contains(secret));
-        }
-        assert_eq!(paths.len(), 7);
-    }
-
-    #[test]
-    fn inline_secrets_are_redacted() {
-        let mut value = json!({"value": {"value": "secret"}});
-        let paths = redact_secrets(&mut value);
-        assert_eq!(value["value"]["value"], "<redacted>");
-        assert_eq!(paths, ["/value/value"]);
     }
 }
