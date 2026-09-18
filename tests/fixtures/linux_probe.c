@@ -139,18 +139,28 @@ int main(int argc, char **argv) {
 
     exercise_failed_execve();
 
-    pid_t child = 0;
-    char *child_argv[] = {argv[0], (char *)"--leaf", argv[1], argv[2], NULL};
-    if (posix_spawn(&child, argv[0], NULL, NULL, child_argv, environ) != 0)
+    pid_t child = fork();
+    if (child < 0)
         return 3;
+    if (child == 0) {
+        execl(argv[0], argv[0], "--leaf", argv[1], argv[2], NULL);
+        _exit(127);
+    }
     int status = 0;
     if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
         return 4;
 
     child = 0;
-    if (posix_spawnp(&child, argv[0], NULL, NULL, child_argv, environ) != 0)
+    char *child_argv[] = {argv[0], (char *)"--leaf", argv[1], argv[2], NULL};
+    if (posix_spawn(&child, argv[0], NULL, NULL, child_argv, environ) != 0)
         return 5;
     if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
         return 6;
+
+    child = 0;
+    if (posix_spawnp(&child, argv[0], NULL, NULL, child_argv, environ) != 0)
+        return 7;
+    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return 8;
     return 0;
 }
