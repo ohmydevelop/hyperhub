@@ -1140,7 +1140,7 @@ main commands:
 configuration approval:
   hyperhub show
   hyperhub config patch <json-patch|-> [--password-file file]
-  hyperhub approve <json-patch> --token token [--password-file file] [--editor program]
+  hyperhub approve [--password-file file] [--editor program]
 
 service operations:
   hyperhub restart [--debug] [--password-file file]
@@ -1177,6 +1177,7 @@ mod tests {
         assert!(!help.contains("hyperhub config show"));
         assert!(!help.contains("--runtime"));
         assert!(!help.contains("--password-stdin"));
+        assert!(!help.contains("--token"));
     }
     #[test]
     fn parses_commands() {
@@ -1256,15 +1257,10 @@ mod tests {
         assert_eq!(password_file, Some("password.txt".into()));
 
         let Command::ConfigCli(config_cli::Command::Approve {
-            patch,
             password_file,
-            token,
             editor,
         }) = parse_args(vec![
             os("approve"),
-            os("patch.json"),
-            os("--token"),
-            os("approval-token"),
             os("--password-file"),
             os("password.txt"),
             os("--editor"),
@@ -1274,10 +1270,9 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(patch, PathBuf::from("patch.json"));
         assert_eq!(password_file, Some("password.txt".into()));
-        assert_eq!(token, "approval-token");
         assert_eq!(editor, Some(PathBuf::from("review-editor")));
+        assert!(parse_args(vec![os("approve"), os("patch.json")]).is_err());
 
         let Command::Serve(import) = parse_args(vec![
             os("import"),

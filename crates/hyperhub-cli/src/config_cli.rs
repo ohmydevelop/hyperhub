@@ -1,9 +1,11 @@
 use hyperhub_core::config::Config;
 use hyperhub_core::config_store::{
-    self, default_config_path, load_encrypted, read_redacted_json, KdfDescriptor, StoreError,
+    self, default_config_path, load_approval_state, load_encrypted, read_redacted_json,
+    save_approval_state, KdfDescriptor, StoreError,
 };
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
 use hyperhub_core::session::{config_update_proof, ControlRequest, ControlResponse};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -19,9 +21,7 @@ pub(crate) enum Command {
         password_file: Option<PathBuf>,
     },
     Approve {
-        patch: PathBuf,
         password_file: Option<PathBuf>,
-        token: String,
         editor: Option<PathBuf>,
     },
 }
@@ -37,6 +37,51 @@ struct PreparedPatch {
     config: Config,
     approval_token: String,
     changes: Vec<Value>,
+}
+
+const APPROVAL_QUEUE_SCHEMA: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct ApprovalRequest {
+    source_index: usize,
+    operations: Vec<Value>,
+    #[serde(default)]
+    edited: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct InFlightApproval {
+    index: usize,
+    operations: Vec<Value>,
+    result_config_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct ApprovalQueue {
+    schema_version: u32,
+    proposal_token: String,
+    patch_digest: String,
+    expected_config_digest: String,
+    requests: Vec<ApprovalRequest>,
+    cursor: usize,
+    approved: usize,
+    rejected: usize,
+    #[serde(default)]
+    in_flight: Option<InFlightApproval>,
+}
+
+#[derive(Debug)]
+struct ApplyOutcome {
+    live_update: bool,
+    live_update_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalDecision {
+    Approve,
+    Edit,
+    Reject,
+    Quit,
 }
 
 pub(crate) fn parse(args: &[OsString]) -> Result<Command, String> {
@@ -85,15 +130,9 @@ pub(crate) fn parse_show(args: &[OsString]) -> Result<Command, String> {
 }
 
 pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
-    let patch = args
-        .first()
-        .ok_or("approve requires a JSON patch file")?
-        .clone()
-        .into();
     let mut password_file = None;
-    let mut token = None;
     let mut editor = None;
-    let mut index = 1;
+    let mut index = 0;
     while index < args.len() {
         let option = args[index].to_string_lossy();
         index += 1;
@@ -103,16 +142,13 @@ pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
             .clone();
         match option.as_ref() {
             "--password-file" => password_file = Some(value.into()),
-            "--token" => token = Some(value.to_string_lossy().into_owned()),
             "--editor" => editor = Some(value.into()),
             _ => return Err(format!("unknown approve option '{option}'")),
         }
         index += 1;
     }
     Ok(Command::Approve {
-        patch,
         password_file,
-        token: token.ok_or("approve requires --token <approval-token>")?,
         editor,
     })
 }
@@ -125,11 +161,9 @@ pub(crate) fn run(command: Command) -> Result<i32, String> {
             password_file,
         } => patch_config(&patch, password_file.as_deref()),
         Command::Approve {
-            patch,
             password_file,
-            token,
             editor,
-        } => approve_config(&patch, password_file.as_deref(), &token, editor.as_deref()),
+        } => approve_config(password_file.as_deref(), editor.as_deref()),
     }
 }
 
@@ -159,9 +193,54 @@ fn show() -> Result<i32, String> {
 
 fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, String> {
     let path = default_config_path().map_err(|error| error.to_string())?;
-    let active = load_active(&path, password_file)?;
+    let queue_path = approval_queue_path(&path);
+    let password =
+        crate::password::acquire(password_file, !path.is_file() && !queue_path.is_file())?;
+    let active = load_active_with_password(&path, password)?;
     let patch = parse_patch_file(patch_path)?;
+    collect_placeholders(&patch)?;
+    let patch_digest = value_digest(b"hyperhub/config-patch/v1\0", &patch)?;
+
+    if queue_path.is_file() {
+        let (queue, descriptor) = load_queue(&queue_path, active.password.as_bytes())?;
+        ensure_queue_descriptor(&active, &descriptor)?;
+        validate_queue(&queue)?;
+        if queue.patch_digest != patch_digest {
+            return Err(
+                "another configuration approval is pending; run `hyperhub approve` before submitting a different patch"
+                    .into(),
+            );
+        }
+        print_json(&json!({
+            "schema_version": 1,
+            "status": "approval_pending",
+            "approval_token": queue.proposal_token,
+            "config_path": path,
+            "request_count": queue.requests.len(),
+            "completed": queue.cursor,
+            "remaining": queue.requests.len().saturating_sub(queue.cursor),
+        }))?;
+        return Ok(0);
+    }
+
     let prepared = prepare_patch(&path, &active.config, &patch)?;
+    if prepared.changes.is_empty() {
+        return Err("JSON patch does not change the configuration".into());
+    }
+    let requests = build_approval_requests(&patch)?;
+    validate_request_sequence(&path, &active.config, &requests)?;
+    let queue = ApprovalQueue {
+        schema_version: APPROVAL_QUEUE_SCHEMA,
+        proposal_token: prepared.approval_token.clone(),
+        patch_digest,
+        expected_config_digest: config_digest(&active.config)?,
+        requests,
+        cursor: 0,
+        approved: 0,
+        rejected: 0,
+        in_flight: None,
+    };
+    save_queue(&queue_path, &queue, &active)?;
     print_json(&json!({
         "schema_version": 1,
         "status": "approval_required",
@@ -169,87 +248,143 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
         "initialized": active.initialized,
         "serve_running": crate::serve_is_running(),
         "config_path": path,
+        "request_count": queue.requests.len(),
         "changes": prepared.changes,
     }))?;
     Ok(0)
 }
 
-fn approve_config(
-    patch_path: &Path,
-    password_file: Option<&Path>,
-    proposed_token: &str,
-    editor: Option<&Path>,
-) -> Result<i32, String> {
-    if patch_path == Path::new("-") {
-        return Err("approve requires a patch file so it can be reviewed in an editor".into());
-    }
+fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result<i32, String> {
     let path = default_config_path().map_err(|error| error.to_string())?;
-    let active = load_active(&path, password_file)?;
-    let proposed_patch = parse_patch_file(patch_path)?;
-    let proposed = prepare_patch(&path, &active.config, &proposed_patch)?;
-    if proposed_token != proposed.approval_token {
-        return Err(
-            "approval token does not match the current configuration and proposed patch".into(),
-        );
+    let queue_path = approval_queue_path(&path);
+    if !queue_path.is_file() {
+        return Err("there are no pending configuration requests".into());
     }
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err("approve requires an interactive terminal for human review".into());
     }
 
-    let review_path = create_review_copy(patch_path)?;
-    let result = (|| {
-        open_editor(&review_path, editor)?;
-        let mut reviewed_patch = parse_patch_file(&review_path)?;
-        let placeholders = collect_placeholders(&reviewed_patch)?;
-        for placeholder in placeholders {
-            let value = crate::password::prompt_secret(&format!(
-                "Value for approval placeholder '{placeholder}': "
-            ))?;
-            if value.is_empty() {
-                return Err(format!(
-                    "approval placeholder '{placeholder}' cannot be empty"
-                ));
-            }
-            replace_placeholder(&mut reviewed_patch, &placeholder, &value);
-        }
-        let prepared = prepare_patch(&path, &active.config, &reviewed_patch)?;
-        if prepared.changes.is_empty() {
-            return Err("reviewed patch does not change the configuration".into());
-        }
-        let confirmation = &prepared.approval_token[..12];
+    let password = crate::password::acquire(password_file, false)?;
+    let mut active = load_active_with_password(&path, password)?;
+    let (mut queue, queue_descriptor) = load_queue(&queue_path, active.password.as_bytes())?;
+    validate_queue(&queue)?;
+    if active.initialized {
+        ensure_queue_descriptor(&active, &queue_descriptor)?;
+    } else {
+        active.descriptor = queue_descriptor;
+    }
+
+    recover_in_flight(&path, &queue_path, &mut active, &mut queue)?;
+    let current_digest = config_digest(&active.config)?;
+    if queue.expected_config_digest != current_digest {
         eprintln!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "schema_version": 1,
-                "status": "human_review",
-                "proposal_token": proposed.approval_token,
-                "review_token": prepared.approval_token,
-                "changes": prepared.changes,
-            }))
-            .map_err(|error| error.to_string())?
+            "hyperhub: warning: configuration changed while approval was pending; remaining requests will be reviewed against the current configuration"
         );
-        eprint!("Type APPLY {confirmation} to confirm: ");
-        std::io::stderr()
-            .flush()
-            .map_err(|error| error.to_string())?;
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|error| format!("cannot read approval confirmation: {error}"))?;
-        if answer.trim_end() != format!("APPLY {confirmation}") {
-            return Err("configuration approval was cancelled".into());
+        queue.expected_config_digest = current_digest;
+        save_queue(&queue_path, &queue, &active)?;
+    }
+
+    while queue.cursor < queue.requests.len() {
+        let index = queue.cursor;
+        let total = queue.requests.len();
+        let request = queue.requests[index].clone();
+        let patch = Value::Array(request.operations.clone());
+        let preview = prepare_patch(&path, &active.config, &patch);
+        let placeholders = collect_placeholders(&patch)?;
+        display_request(index, total, &request, preview.as_ref(), &placeholders)?;
+        let decision = prompt_decision(preview.is_ok())?;
+        match decision {
+            ApprovalDecision::Quit => {
+                print_json(&json!({
+                    "schema_version": 1,
+                    "status": "approval_pending",
+                    "completed": queue.cursor,
+                    "remaining": total - queue.cursor,
+                    "next": queue.cursor + 1,
+                    "total": total,
+                }))?;
+                return Ok(0);
+            }
+            ApprovalDecision::Edit => {
+                let edited = edit_request(&request, editor)?;
+                queue.requests[index] = edited;
+                save_queue(&queue_path, &queue, &active)?;
+            }
+            ApprovalDecision::Reject => {
+                queue.cursor += 1;
+                queue.rejected += 1;
+                save_queue(&queue_path, &queue, &active)?;
+                eprintln!("[{}/{}] rejected", index + 1, total);
+            }
+            ApprovalDecision::Approve => {
+                let mut approved_operations = request.operations.clone();
+                let placeholders =
+                    collect_placeholders(&Value::Array(approved_operations.clone()))?;
+                for (secret_index, placeholder) in placeholders.iter().enumerate() {
+                    eprintln!(
+                        "Sensitive value {}/{} for request {}/{}: {}",
+                        secret_index + 1,
+                        placeholders.len(),
+                        index + 1,
+                        total,
+                        placeholder
+                    );
+                    let value = crate::password::prompt_secret("Enter value (hidden): ")?;
+                    eprintln!();
+                    if value.is_empty() {
+                        return Err(format!(
+                            "approval placeholder '{placeholder}' cannot be empty; request {}/{} remains pending",
+                            index + 1,
+                            total
+                        ));
+                    }
+                    for operation in &mut approved_operations {
+                        replace_placeholder(operation, placeholder, &value);
+                    }
+                }
+                let approved_patch = Value::Array(approved_operations.clone());
+                let prepared = prepare_patch(&path, &active.config, &approved_patch).map_err(|error| {
+                    format!(
+                        "request {}/{} cannot be approved against the current configuration: {error}",
+                        index + 1,
+                        total
+                    )
+                })?;
+                let result_digest = config_digest(&prepared.config)?;
+                queue.in_flight = Some(InFlightApproval {
+                    index,
+                    operations: approved_operations,
+                    result_config_digest: result_digest.clone(),
+                });
+                save_queue(&queue_path, &queue, &active)?;
+                let outcome = persist_prepared(&path, &mut active, &prepared)?;
+                queue.cursor += 1;
+                queue.approved += 1;
+                queue.expected_config_digest = result_digest;
+                queue.in_flight = None;
+                save_queue(&queue_path, &queue, &active)?;
+                print_apply_progress(index, total, &outcome);
+            }
         }
-        apply_prepared(&path, &active, prepared)
-    })();
-    let _ = std::fs::remove_file(&review_path);
-    result
+    }
+
+    remove_queue(&queue_path)?;
+    print_json(&json!({
+        "schema_version": 1,
+        "status": "completed",
+        "config_path": path,
+        "total": queue.requests.len(),
+        "approved": queue.approved,
+        "rejected": queue.rejected,
+    }))?;
+    Ok(0)
 }
 
-fn apply_prepared(
+fn persist_prepared(
     path: &Path,
-    active: &ActiveConfig,
-    prepared: PreparedPatch,
-) -> Result<i32, String> {
+    active: &mut ActiveConfig,
+    prepared: &PreparedPatch,
+) -> Result<ApplyOutcome, String> {
     config_store::save_encrypted_with_descriptor(
         path,
         &prepared.config,
@@ -277,21 +412,19 @@ fn apply_prepared(
     } else {
         (false, None)
     };
-    print_json(&json!({
-        "schema_version": 1,
-        "status": "applied",
-        "review_token": prepared.approval_token,
-        "config_path": path,
-        "live_update": live_update,
-        "live_update_error": live_update_error,
-        "changes": prepared.changes,
-    }))?;
-    Ok(0)
+    active.config = prepared.config.clone();
+    active.initialized = true;
+    Ok(ApplyOutcome {
+        live_update,
+        live_update_error,
+    })
 }
 
-fn load_active(path: &Path, password_file: Option<&Path>) -> Result<ActiveConfig, String> {
+fn load_active_with_password(
+    path: &Path,
+    password: Zeroizing<String>,
+) -> Result<ActiveConfig, String> {
     let initialized = path.is_file();
-    let password = crate::password::acquire(password_file, !initialized)?;
     if initialized {
         let unlocked =
             load_encrypted(path, password.as_bytes()).map_err(|error| error.to_string())?;
@@ -332,15 +465,292 @@ fn parse_patch_file(path: &Path) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|error| format!("invalid JSON patch: {error}"))
 }
 
-fn create_review_copy(source: &Path) -> Result<PathBuf, String> {
-    let directory = std::env::temp_dir();
-    let path = directory.join(format!(
+fn approval_queue_path(config_path: &Path) -> PathBuf {
+    config_path.with_extension("approval.bin")
+}
+
+fn load_queue(path: &Path, password: &[u8]) -> Result<(ApprovalQueue, KdfDescriptor), String> {
+    let unlocked = load_approval_state(path, password).map_err(|error| error.to_string())?;
+    let queue = serde_json::from_slice(&unlocked.bytes)
+        .map_err(|error| format!("approval state is invalid: {error}"))?;
+    Ok((queue, unlocked.descriptor))
+}
+
+fn save_queue(path: &Path, queue: &ApprovalQueue, active: &ActiveConfig) -> Result<(), String> {
+    let bytes = serde_json::to_vec(queue).map_err(|error| error.to_string())?;
+    save_approval_state(path, &bytes, active.password.as_bytes(), &active.descriptor)
+        .map_err(|error| error.to_string())
+}
+
+fn remove_queue(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot remove completed approval state {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn ensure_queue_descriptor(
+    active: &ActiveConfig,
+    descriptor: &KdfDescriptor,
+) -> Result<(), String> {
+    if active.initialized && &active.descriptor != descriptor {
+        Err("approval state belongs to a different configuration generation".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_queue(queue: &ApprovalQueue) -> Result<(), String> {
+    if queue.schema_version != APPROVAL_QUEUE_SCHEMA {
+        return Err(format!(
+            "unsupported approval state version {}",
+            queue.schema_version
+        ));
+    }
+    if queue.requests.is_empty() {
+        return Err("approval state contains no requests".into());
+    }
+    if queue.cursor > queue.requests.len()
+        || queue.approved + queue.rejected != queue.cursor
+        || queue
+            .in_flight
+            .as_ref()
+            .is_some_and(|in_flight| in_flight.index != queue.cursor)
+    {
+        return Err("approval state progress is inconsistent".into());
+    }
+    Ok(())
+}
+
+fn build_approval_requests(patch: &Value) -> Result<Vec<ApprovalRequest>, String> {
+    let operations = patch
+        .as_array()
+        .ok_or("JSON patch must be an array of operations")?;
+    let mut requests = Vec::new();
+    let mut preconditions = Vec::new();
+    for (source_index, operation) in operations.iter().enumerate() {
+        let action = operation
+            .as_object()
+            .and_then(|object| object.get("op"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!("patch operation {source_index} is missing string field 'op'")
+            })?;
+        if action == "test" {
+            preconditions.push(operation.clone());
+            continue;
+        }
+        if !matches!(action, "add" | "replace" | "remove") {
+            return Err(format!(
+                "unsupported patch operation '{action}'; use add, replace, remove, or test"
+            ));
+        }
+        let mut grouped = std::mem::take(&mut preconditions);
+        grouped.push(operation.clone());
+        requests.push(ApprovalRequest {
+            source_index,
+            operations: grouped,
+            edited: false,
+        });
+    }
+    if requests.is_empty() {
+        return Err("JSON patch contains no configuration requests".into());
+    }
+    if !preconditions.is_empty() {
+        return Err("trailing test operations must precede a configuration request".into());
+    }
+    Ok(requests)
+}
+
+fn validate_request_sequence(
+    path: &Path,
+    current: &Config,
+    requests: &[ApprovalRequest],
+) -> Result<(), String> {
+    let mut config = current.clone();
+    for (index, request) in requests.iter().enumerate() {
+        let prepared = prepare_patch(path, &config, &Value::Array(request.operations.clone()))
+            .map_err(|error| {
+                format!(
+                    "configuration request {}/{} is not independently valid: {error}",
+                    index + 1,
+                    requests.len()
+                )
+            })?;
+        config = prepared.config;
+    }
+    Ok(())
+}
+
+fn recover_in_flight(
+    path: &Path,
+    queue_path: &Path,
+    active: &mut ActiveConfig,
+    queue: &mut ApprovalQueue,
+) -> Result<(), String> {
+    let Some(in_flight) = queue.in_flight.clone() else {
+        return Ok(());
+    };
+    let current_digest = config_digest(&active.config)?;
+    let outcome = if current_digest == queue.expected_config_digest {
+        let prepared = prepare_patch(
+            path,
+            &active.config,
+            &Value::Array(in_flight.operations.clone()),
+        )?;
+        if config_digest(&prepared.config)? != in_flight.result_config_digest {
+            return Err("in-flight approval result no longer matches its recorded state".into());
+        }
+        persist_prepared(path, active, &prepared)?
+    } else if current_digest == in_flight.result_config_digest {
+        let serve_running = crate::serve_is_running();
+        let live_update_error = if serve_running {
+            push_live_update(
+                &active.config,
+                active.password.as_bytes(),
+                &active.descriptor,
+            )
+            .err()
+        } else {
+            None
+        };
+        ApplyOutcome {
+            live_update: serve_running && live_update_error.is_none(),
+            live_update_error,
+        }
+    } else {
+        return Err(
+            "configuration changed during an in-flight approval; refusing ambiguous recovery"
+                .into(),
+        );
+    };
+
+    queue.cursor += 1;
+    queue.approved += 1;
+    queue.expected_config_digest = in_flight.result_config_digest;
+    queue.in_flight = None;
+    save_queue(queue_path, queue, active)?;
+    print_apply_progress(in_flight.index, queue.requests.len(), &outcome);
+    Ok(())
+}
+
+fn display_request(
+    index: usize,
+    total: usize,
+    request: &ApprovalRequest,
+    preview: Result<&PreparedPatch, &String>,
+    placeholders: &[String],
+) -> Result<(), String> {
+    let mutation = request
+        .operations
+        .last()
+        .and_then(Value::as_object)
+        .ok_or("approval request operation is invalid")?;
+    let operation = mutation
+        .get("op")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let path = mutation
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    eprintln!("\n[{}/{}] configuration request", index + 1, total);
+    let mut view = json!({
+        "schema_version": 1,
+        "status": "human_review",
+        "progress": {"current": index + 1, "total": total},
+        "request": {
+            "source_operation": request.source_index + 1,
+            "op": operation,
+            "path": path,
+            "edited": request.edited,
+        },
+        "sensitive_inputs": placeholders,
+    });
+    match preview {
+        Ok(prepared) => view["changes"] = Value::Array(prepared.changes.clone()),
+        Err(error) => view["validation_error"] = Value::String(error.clone()),
+    }
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&view).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn prompt_decision(can_approve: bool) -> Result<ApprovalDecision, String> {
+    loop {
+        if can_approve {
+            eprint!("Choose [a]pprove, [e]dit, [r]eject, or [q]uit: ");
+        } else {
+            eprint!("Request is invalid; choose [e]dit, [r]eject, or [q]uit: ");
+        }
+        std::io::stderr()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        let mut answer = String::new();
+        let count = std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| format!("cannot read approval decision: {error}"))?;
+        if count == 0 {
+            return Ok(ApprovalDecision::Quit);
+        }
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "a" | "approve" if can_approve => return Ok(ApprovalDecision::Approve),
+            "e" | "edit" => return Ok(ApprovalDecision::Edit),
+            "r" | "reject" => return Ok(ApprovalDecision::Reject),
+            "q" | "quit" => return Ok(ApprovalDecision::Quit),
+            _ => eprintln!("Invalid choice."),
+        }
+    }
+}
+
+fn edit_request(
+    request: &ApprovalRequest,
+    explicit: Option<&Path>,
+) -> Result<ApprovalRequest, String> {
+    let mutation = request
+        .operations
+        .last()
+        .cloned()
+        .ok_or("approval request has no mutation")?;
+    let review_path = create_review_file(&mutation)?;
+    let result = (|| {
+        open_editor(&review_path, explicit)?;
+        let edited = parse_patch_file(&review_path)?;
+        let object = edited
+            .as_object()
+            .ok_or("edited configuration request must be a JSON object")?;
+        let action = object
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or("edited configuration request is missing string field 'op'")?;
+        if !matches!(action, "add" | "replace" | "remove") {
+            return Err("edited configuration request must use add, replace, or remove".into());
+        }
+        if object.get("path").and_then(Value::as_str).is_none() {
+            return Err("edited configuration request is missing string field 'path'".into());
+        }
+        collect_placeholders(&edited)?;
+        let mut request = request.clone();
+        *request.operations.last_mut().expect("mutation exists") = edited;
+        request.edited = true;
+        Ok(request)
+    })();
+    let _ = std::fs::remove_file(&review_path);
+    result
+}
+
+fn create_review_file(value: &Value) -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!(
         "hyperhub-approve-{}-{:016x}.json",
         std::process::id(),
         rand::random::<u64>()
     ));
-    let bytes = std::fs::read(source)
-        .map_err(|error| format!("cannot read JSON patch {}: {error}", source.display()))?;
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -351,6 +761,8 @@ fn create_review_copy(source: &Path) -> Result<PathBuf, String> {
     let mut file = options
         .open(&path)
         .map_err(|error| format!("cannot create approval review file: {error}"))?;
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
     file.write_all(&bytes)
         .map_err(|error| format!("cannot write approval review file: {error}"))?;
     Ok(path)
@@ -370,6 +782,32 @@ fn open_editor(review_path: &Path, explicit: Option<&Path>) -> Result<(), String
     } else {
         Err(format!("approval editor exited with {status}"))
     }
+}
+
+fn print_apply_progress(index: usize, total: usize, outcome: &ApplyOutcome) {
+    eprintln!(
+        "[{}/{}] approved (live_update={})",
+        index + 1,
+        total,
+        outcome.live_update
+    );
+    if let Some(error) = &outcome.live_update_error {
+        eprintln!("hyperhub: warning: configuration was saved but live update failed: {error}");
+    }
+}
+
+fn value_digest(label: &[u8], value: &Value) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    hash.update(label);
+    hash.update(serde_json::to_vec(value).map_err(|error| error.to_string())?);
+    Ok(hex(&hash.finalize()))
+}
+
+fn config_digest(config: &Config) -> Result<String, String> {
+    value_digest(
+        b"hyperhub/config-state/v1\0",
+        &serde_json::to_value(config).map_err(|error| error.to_string())?,
+    )
 }
 
 fn collect_placeholders(value: &Value) -> Result<Vec<String>, String> {
@@ -772,6 +1210,46 @@ mod tests {
         assert_eq!(collect_placeholders(&patch).unwrap(), Vec::<String>::new());
         assert_eq!(patch[0]["value"], "real-secret");
         assert_eq!(patch[1]["value"], "real-secret");
+    }
+
+    #[test]
+    fn approval_requests_attach_tests_to_the_next_mutation() {
+        let requests = build_approval_requests(&json!([
+            {"op": "test", "path": "/debug", "value": false},
+            {"op": "replace", "path": "/debug", "value": true},
+            {"op": "add", "path": "/routes/-", "value": {"id": "two"}}
+        ]))
+        .unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].source_index, 1);
+        assert_eq!(requests[0].operations.len(), 2);
+        assert_eq!(requests[1].source_index, 2);
+        assert_eq!(requests[1].operations.len(), 1);
+    }
+
+    #[test]
+    fn approval_queue_requires_consistent_progress() {
+        let request = ApprovalRequest {
+            source_index: 0,
+            operations: vec![json!({"op": "replace", "path": "/debug", "value": true})],
+            edited: false,
+        };
+        let mut queue = ApprovalQueue {
+            schema_version: APPROVAL_QUEUE_SCHEMA,
+            proposal_token: "token".into(),
+            patch_digest: "patch".into(),
+            expected_config_digest: "config".into(),
+            requests: vec![request],
+            cursor: 0,
+            approved: 0,
+            rejected: 0,
+            in_flight: None,
+        };
+        validate_queue(&queue).unwrap();
+        queue.cursor = 1;
+        assert!(validate_queue(&queue).is_err());
+        queue.approved = 1;
+        validate_queue(&queue).unwrap();
     }
 
     #[test]
