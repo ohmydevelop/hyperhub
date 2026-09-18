@@ -20,6 +20,7 @@ compile_error!("embedded-agent and external-runtime are mutually exclusive");
 
 mod agent_runtime;
 mod clipboard;
+mod config_cli;
 mod config_tui;
 mod lifecycle;
 mod password;
@@ -106,6 +107,7 @@ enum Command {
     Status { json: bool },
     Logs(lifecycle::LogsConfig),
     AuthClear,
+    ConfigCli(config_cli::Command),
     Validate(Option<PathBuf>),
     Doctor(Option<PathBuf>),
     Help,
@@ -160,6 +162,7 @@ fn execute(command: Command) -> Result<i32, String> {
         Command::Status { json } => lifecycle::status(json),
         Command::Logs(config) => lifecycle::logs(config),
         Command::AuthClear => clear_password_authorization(),
+        Command::ConfigCli(command) => config_cli::run(command),
         Command::Run(run) => run_target(run),
     }
 }
@@ -660,7 +663,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         "status" => parse_status(&args[1..]),
         "logs" => parse_logs(&args[1..]).map(Command::Logs),
         "auth" => parse_auth(&args[1..]),
-        "config" => parse_config(&args[1..]).map(Command::Serve),
+        "config" => parse_config_command(&args[1..]),
         "import" => parse_import(&args[1..]).map(Command::Serve),
         "export" => parse_export(&args[1..]).map(Command::Serve),
         "validate" => match &args[1..] {
@@ -794,15 +797,21 @@ fn parse_serve(args: &[OsString]) -> Result<ServeConfig, String> {
     })
 }
 
-fn parse_config(args: &[OsString]) -> Result<ServeConfig, String> {
+fn parse_config_command(args: &[OsString]) -> Result<Command, String> {
+    if args
+        .first()
+        .is_some_and(|value| matches!(value.to_string_lossy().as_ref(), "show" | "patch"))
+    {
+        return config_cli::parse(args).map(Command::ConfigCli);
+    }
     let password_file = parse_single_password_file("config", args)?;
-    Ok(ServeConfig {
+    Ok(Command::Serve(ServeConfig {
         output: None,
         debug: false,
         action: ServeAction::Config,
         password_file,
         password_stdin: false,
-    })
+    }))
 }
 
 fn parse_import(args: &[OsString]) -> Result<ServeConfig, String> {
@@ -1107,7 +1116,7 @@ fn print_doctor(target: Option<&Path>) -> Result<i32, String> {
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  hyperhub start [--debug] [--password-file file]\n  hyperhub stop\n  hyperhub restart [--debug] [--password-file file]\n  hyperhub status [--json]\n  hyperhub logs [-f|--follow] [-n|--lines count]\n  hyperhub auth clear\n  hyperhub run [--runtime agent (developer build)] [--password-file file] [--dry-run] [--] target [args...]\n  hyperhub config [--password-file file]\n  hyperhub import <toml|bin> [--password-file file] [--input-password-file file]\n  hyperhub export <toml|bin> [--password-file file] [--export-password-file file] [--plain]\n  hyperhub validate [--password-file file]\n  hyperhub doctor [--target exe]\n  hyperhub serve [--password-file file] [--output file] [--debug]\n\n`run` is required for target programs. `serve` keeps the foreground/debug mode; start/stop/restart manage the background serve process."
+        "usage:\n  hyperhub start [--debug] [--password-file file]\n  hyperhub stop\n  hyperhub restart [--debug] [--password-file file]\n  hyperhub status [--json]\n  hyperhub logs [-f|--follow] [-n|--lines count]\n  hyperhub auth clear\n  hyperhub run [--runtime agent (developer build)] [--password-file file] [--dry-run] [--] target [args...]\n  hyperhub config [--password-file file]\n  hyperhub config show [--password-file file]\n  hyperhub config patch <json-patch|-> [--password-file file] [--approve token]\n  hyperhub import <toml|bin> [--password-file file] [--input-password-file file]\n  hyperhub export <toml|bin> [--password-file file] [--export-password-file file] [--plain]\n  hyperhub validate [--password-file file]\n  hyperhub doctor [--target exe]\n  hyperhub serve [--password-file file] [--output file] [--debug]\n\n`run` is required for target programs. `serve` keeps the foreground/debug mode; start/stop/restart manage the background serve process."
     );
 }
 
@@ -1168,6 +1177,38 @@ mod tests {
         };
         assert_eq!(configure.action, ServeAction::Config);
         assert_eq!(configure.password_file, Some("password.txt".into()));
+
+        let Command::ConfigCli(config_cli::Command::Show { password_file }) = parse_args(vec![
+            os("config"),
+            os("show"),
+            os("--password-file"),
+            os("password.txt"),
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(password_file, Some("password.txt".into()));
+
+        let Command::ConfigCli(config_cli::Command::Patch {
+            patch,
+            password_file,
+            approval,
+        }) = parse_args(vec![
+            os("config"),
+            os("patch"),
+            os("patch.json"),
+            os("--password-file"),
+            os("password.txt"),
+            os("--approve"),
+            os("approval-token"),
+        ])
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(patch, PathBuf::from("patch.json"));
+        assert_eq!(password_file, Some("password.txt".into()));
+        assert_eq!(approval.as_deref(), Some("approval-token"));
 
         let Command::Serve(import) = parse_args(vec![
             os("import"),
