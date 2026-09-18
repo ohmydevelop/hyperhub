@@ -32,6 +32,8 @@ pub enum StoreError {
     Config(Box<ConfigError>),
     #[error("cannot serialize TOML configuration: {0}")]
     Serialize(#[from] toml::ser::Error),
+    #[error("cannot serialize JSON configuration view: {0}")]
+    JsonSerialize(#[from] serde_json::Error),
 }
 
 impl From<ConfigError> for StoreError {
@@ -69,6 +71,20 @@ pub fn default_config_path() -> Result<PathBuf, StoreError> {
             StoreError::Format("cannot determine the current user's home directory".into())
         })?;
     Ok(PathBuf::from(home).join(".hyperhub").join("config.bin"))
+}
+
+pub fn redacted_config_path(config_path: &Path) -> PathBuf {
+    config_path.with_extension("redacted.json")
+}
+
+pub fn save_redacted_json(config_path: &Path, config: &Config) -> Result<(), StoreError> {
+    let mut bytes = serde_json::to_vec_pretty(&config.redacted())?;
+    bytes.push(b'\n');
+    atomic_write(&redacted_config_path(config_path), &bytes)
+}
+
+pub fn read_redacted_json(config_path: &Path) -> Result<Vec<u8>, StoreError> {
+    read(&redacted_config_path(config_path))
 }
 
 pub fn new_descriptor() -> KdfDescriptor {
@@ -148,7 +164,8 @@ pub fn save_encrypted_with_descriptor(
     descriptor: &KdfDescriptor,
 ) -> Result<(), StoreError> {
     let bytes = encode_encrypted(config, password, descriptor)?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes)?;
+    save_redacted_json(path, config)
 }
 
 pub fn export(
@@ -772,7 +789,30 @@ mod tests {
             load_encrypted(&path, b"correct horse battery staple"),
             Err(StoreError::Authentication)
         ));
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(redacted_config_path(&path)).unwrap();
+    }
+
+    #[test]
+    fn encrypted_save_writes_a_complete_redacted_json_view() {
+        let path = temp_path("redacted-view");
+        let mut config = Config::default();
+        config.environment.push(crate::config::EnvironmentVariable {
+            name: "TOKEN".into(),
+            value: crate::config::SecretValue::Inline {
+                value: "actual-secret".into(),
+            },
+        });
+        save_encrypted(&path, &config, b"correct horse battery staple").unwrap();
+        let view_path = redacted_config_path(&path);
+        assert_eq!(view_path, path.with_extension("redacted.json"));
+        let text = fs::read_to_string(&view_path).unwrap();
+        assert!(!text.contains("actual-secret"));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["environment"][0]["name"], "TOKEN");
+        assert_eq!(value["environment"][0]["value"]["value"], "<redacted>");
         fs::remove_file(path).unwrap();
+        fs::remove_file(view_path).unwrap();
     }
 
     #[test]
@@ -814,7 +854,8 @@ mod tests {
             load_encrypted(&path, b"correct horse battery staple"),
             Err(StoreError::Authentication)
         ));
-        fs::remove_file(path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(redacted_config_path(&path)).unwrap();
     }
 
     fn temp_certificate_path(name: &str) -> PathBuf {
@@ -884,6 +925,7 @@ mod tests {
         assert!(delete_root_certificate(&config_path, &fingerprint).is_ok());
 
         fs::remove_file(&config_path).unwrap();
+        fs::remove_file(redacted_config_path(&config_path)).unwrap();
         fs::remove_dir_all(root_certificates_dir(&config_path)).ok();
     }
 }

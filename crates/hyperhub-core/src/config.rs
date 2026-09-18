@@ -139,6 +139,47 @@ impl Config {
         self.audit.transcript_dir = Some(audit_root.join("transcripts"));
     }
 
+    /// Return the complete serializable configuration with every inline secret
+    /// replaced. Environment and file secret references remain visible because
+    /// they do not contain the referenced secret value.
+    pub fn redacted(&self) -> Self {
+        let mut config = self.clone();
+        for variable in &mut config.environment {
+            variable.value.redact();
+        }
+        for upstream in &mut config.upstreams {
+            if let Some(username) = &mut upstream.username {
+                username.redact();
+            }
+            if let Some(password) = &mut upstream.password {
+                password.redact();
+            }
+            for value in upstream.headers.values_mut() {
+                value.redact();
+            }
+        }
+        for plugin in &mut config.plugins {
+            if let Some(secret) = &mut plugin.secret {
+                secret.redact();
+            }
+            if let Some(password) = &mut plugin.password {
+                password.redact();
+            }
+            for value in plugin.headers.values_mut() {
+                value.redact();
+            }
+            for account in &mut plugin.ssh_accounts {
+                for private_key in &mut account.private_keys {
+                    private_key.value.redact();
+                }
+                for password in &mut account.passwords {
+                    password.redact();
+                }
+            }
+        }
+        config
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_legacy()?;
         let listen = self
@@ -1492,6 +1533,12 @@ pub enum SecretValue {
 }
 
 impl SecretValue {
+    fn redact(&mut self) {
+        if let Self::Inline { value } = self {
+            *value = "<redacted>".into();
+        }
+    }
+
     pub fn resolve(&self) -> Result<String, ConfigError> {
         match self {
             Self::Inline { value } => Ok(value.clone()),
@@ -1711,6 +1758,74 @@ targets = ["example.com"]"#,
         assert!(config.validate().is_err());
         config.listener.socks_listen = "127.0.0.1:18444".into();
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn redacted_config_preserves_structure_and_hides_all_inline_secrets() {
+        let mut config = Config::default();
+        config.environment.push(EnvironmentVariable {
+            name: "TOKEN".into(),
+            value: SecretValue::Inline {
+                value: "environment-secret".into(),
+            },
+        });
+        config.upstreams.push(Upstream {
+            id: "proxy".into(),
+            kind: UpstreamKind::Socks5,
+            address: "127.0.0.1:1080".into(),
+            timeout_ms: 1000,
+            username: Some(SecretValue::Inline {
+                value: "username-secret".into(),
+            }),
+            password: Some(SecretValue::Inline {
+                value: "password-secret".into(),
+            }),
+            headers: HashMap::from([(
+                "authorization".into(),
+                SecretValue::Inline {
+                    value: "header-secret".into(),
+                },
+            )]),
+        });
+        let mut plugin = PluginConfig::default();
+        plugin.id = "credential".into();
+        plugin.kind = PluginKind::Credential;
+        plugin.secret = Some(SecretValue::Inline {
+            value: "plugin-secret".into(),
+        });
+        plugin.ssh_accounts.push(SshAccount {
+            username: "git".into(),
+            private_keys: vec![SshPrivateKey {
+                name: "default".into(),
+                value: SecretValue::Inline {
+                    value: "private-key".into(),
+                },
+            }],
+            passwords: vec![SecretValue::Inline {
+                value: "ssh-password".into(),
+            }],
+        });
+        config.plugins.push(plugin);
+
+        let original = serde_json::to_value(&config).unwrap();
+        let redacted = serde_json::to_value(config.redacted()).unwrap();
+        assert_eq!(
+            original.pointer("/upstreams/0/address"),
+            redacted.pointer("/upstreams/0/address")
+        );
+        let encoded = serde_json::to_string(&redacted).unwrap();
+        for secret in [
+            "environment-secret",
+            "username-secret",
+            "password-secret",
+            "header-secret",
+            "plugin-secret",
+            "private-key",
+            "ssh-password",
+        ] {
+            assert!(!encoded.contains(secret));
+        }
+        assert_eq!(encoded.matches("<redacted>").count(), 7);
     }
 
     #[test]
