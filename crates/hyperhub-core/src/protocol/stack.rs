@@ -167,6 +167,7 @@ mod tests {
 
     fn credential(protocols: &[PluginProtocol]) -> PluginConfig {
         PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "cred".into(),
             kind: PluginKind::Credential,
             protocols: protocols.to_vec(),
@@ -186,6 +187,7 @@ mod tests {
         );
         assert_eq!(
             LayerKind::Tunnel.audited(&PluginSet(vec![PluginConfig {
+                uuid: crate::config::new_config_uuid(),
                 id: "ws".into(),
                 kind: PluginKind::Audit,
                 protocols: vec![PluginProtocol::Ws],

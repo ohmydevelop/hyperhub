@@ -1763,12 +1763,14 @@ mod tests {
     fn mitm_config() -> Config {
         let mut config = Config::default();
         config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "audit".into(),
             kind: PluginKind::Audit,
             protocols: vec![PluginProtocol::Http],
             ..PluginConfig::default()
         });
         config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "mitm".into(),
             enabled: true,
             priority: 1,
@@ -2562,6 +2564,7 @@ mod tests {
     #[test]
     fn resolves_bearer_and_custom_headers() {
         let credential = PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "api".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Http],
@@ -2591,6 +2594,7 @@ mod tests {
     #[test]
     fn resolves_x_api_key_header() {
         let credential = PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "api".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Http],
@@ -2609,6 +2613,7 @@ mod tests {
     #[test]
     fn resolves_http_basic_from_username_and_password() {
         let credential = PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "basic".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Http],
@@ -2628,6 +2633,7 @@ mod tests {
     #[test]
     fn token_selects_bearer_for_http_and_basic_for_git() {
         let credential = PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "project".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Http],
@@ -2791,6 +2797,7 @@ mod tests {
         let mut config = Config::default();
         config.audit.transcript_dir = Some("audit/transcripts".into());
         config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "ws".into(),
             kind: PluginKind::Audit,
             protocols: vec![PluginProtocol::Ws],
@@ -2850,6 +2857,7 @@ mod tests {
         let mut config = Config::default();
         config.audit.transcript_dir = Some(root.clone());
         config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "body".into(),
             kind: PluginKind::Audit,
             protocols: vec![PluginProtocol::Http],
@@ -2862,6 +2870,7 @@ mod tests {
             ..PluginConfig::default()
         });
         config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "ws".into(),
             kind: PluginKind::Audit,
             protocols: vec![PluginProtocol::Ws],
@@ -2987,6 +2996,7 @@ mod tests {
             let upstream = TcpStream::connect(origin_address).await.unwrap();
             let mut config = Config::default();
             config.plugins.push(PluginConfig {
+                uuid: crate::config::new_config_uuid(),
                 id: "http-header".into(),
                 kind: PluginKind::Credential,
                 protocols: vec![PluginProtocol::Http],
@@ -3000,6 +3010,7 @@ mod tests {
                 ..PluginConfig::default()
             });
             config.rules.push(RouteRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "http".into(),
                 enabled: true,
                 priority: 1,
@@ -3181,6 +3192,7 @@ mod tests {
             let upstream = TcpStream::connect(origin_address).await.unwrap();
             let mut config = Config::default();
             config.plugins.push(PluginConfig {
+                uuid: crate::config::new_config_uuid(),
                 id: "path-token".into(),
                 kind: PluginKind::Credential,
                 protocols: vec![PluginProtocol::Http],
@@ -3206,6 +3218,7 @@ mod tests {
                 ..PluginConfig::default()
             });
             config.rules.push(RouteRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "private-path".into(),
                 enabled: true,
                 priority: 100,
@@ -3304,6 +3317,7 @@ mod tests {
             let upstream = TcpStream::connect(origin_address).await.unwrap();
             let mut config = Config::default();
             config.rules.push(RouteRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "blocked-path".into(),
                 enabled: true,
                 priority: 100,
@@ -3422,6 +3436,7 @@ mod tests {
             let mut config = Config::default();
             config.audit.transcript_dir = Some(proxy_capture_root);
             config.plugins.push(PluginConfig {
+                uuid: crate::config::new_config_uuid(),
                 id: "websocket".into(),
                 kind: PluginKind::Audit,
                 protocols: vec![PluginProtocol::Ws],
@@ -3432,6 +3447,7 @@ mod tests {
                 ..PluginConfig::default()
             });
             config.rules.push(RouteRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "websocket".into(),
                 enabled: true,
                 priority: 1,
@@ -3631,6 +3647,7 @@ mod tests {
             let mut config = Config::default();
             config.audit.transcript_dir = Some(proxy_capture_root);
             config.plugins.push(PluginConfig {
+                uuid: crate::config::new_config_uuid(),
                 id: "body".into(),
                 kind: PluginKind::Audit,
                 protocols: vec![PluginProtocol::Http],
@@ -3641,6 +3658,7 @@ mod tests {
                 ..PluginConfig::default()
             });
             config.rules.push(RouteRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "body".into(),
                 enabled: true,
                 priority: 1,
@@ -4159,6 +4177,7 @@ mod tests {
 
         let mut config = Config::default();
         config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "shared".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Http],
@@ -4169,6 +4188,7 @@ mod tests {
             ..PluginConfig::default()
         });
         config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "web".into(),
             enabled: true,
             priority: 1,

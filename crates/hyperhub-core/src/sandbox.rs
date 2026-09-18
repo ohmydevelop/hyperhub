@@ -339,6 +339,7 @@ mod tests {
         let mut config = Config::default();
         config.sandbox.process.enabled = true;
         config.sandbox.process.rules.push(ProcessSandboxRule {
+            uuid: crate::config::new_config_uuid(),
             id: "p".into(),
             enabled: true,
             priority: 2,
@@ -359,6 +360,7 @@ mod tests {
         });
         config.sandbox.file.enabled = true;
         config.sandbox.file.rules.push(FileSandboxRule {
+            uuid: crate::config::new_config_uuid(),
             id: "f".into(),
             enabled: true,
             priority: 1,

@@ -835,6 +835,7 @@ mod tests {
         let path = temp_path("redacted-view");
         let mut config = Config::default();
         config.environment.push(crate::config::EnvironmentVariable {
+            uuid: crate::config::new_config_uuid(),
             name: "TOKEN".into(),
             value: crate::config::SecretValue::Inline {
                 value: "actual-secret".into(),

@@ -180,6 +180,7 @@ mod tests {
 
     fn rule(id: &str, priority: i32, action: FirewallAction) -> FirewallRule {
         FirewallRule {
+            uuid: crate::config::new_config_uuid(),
             id: id.into(),
             enabled: true,
             priority,
@@ -229,6 +230,7 @@ mod tests {
         let mut config = Config::default();
         config.firewall.enabled = true;
         config.firewall.rules.push(FirewallRule {
+            uuid: crate::config::new_config_uuid(),
             id: "wildcard".into(),
             enabled: true,
             priority: 1,

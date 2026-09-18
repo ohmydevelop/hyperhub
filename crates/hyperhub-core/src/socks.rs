@@ -70,6 +70,7 @@ impl SessionProxyAffinity {
         };
         let proxy = LearnedProxy {
             upstream: Upstream {
+                uuid: crate::config::new_config_uuid(),
                 id: "observed-client-proxy".into(),
                 kind,
                 address: proxy_address.clone(),

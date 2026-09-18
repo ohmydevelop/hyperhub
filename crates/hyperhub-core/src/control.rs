@@ -1993,6 +1993,7 @@ mod tests {
             action: crate::config::FirewallAction::Pass,
         });
         config.firewall.rules.push(crate::config::FirewallRule {
+            uuid: crate::config::new_config_uuid(),
             id: "child-deny".into(),
             enabled: true,
             priority: 10,
@@ -2171,6 +2172,7 @@ mod tests {
 
         let mut config = Config::default();
         config.environment.push(crate::config::EnvironmentVariable {
+            uuid: crate::config::new_config_uuid(),
             name: "SESSION_SECRET".into(),
             value: crate::config::SecretValue::Inline {
                 value: "must-not-cross-sessions".into(),
@@ -2206,6 +2208,7 @@ mod tests {
     async fn registration_round_trip() {
         let mut config = Config::default();
         config.environment.push(crate::config::EnvironmentVariable {
+            uuid: crate::config::new_config_uuid(),
             name: "GH_TOKEN".into(),
             value: crate::config::SecretValue::Inline {
                 value: "session-secret".into(),
@@ -2216,6 +2219,7 @@ mod tests {
             action: crate::config::FirewallAction::Pass,
         });
         config.firewall.rules.push(crate::config::FirewallRule {
+            uuid: crate::config::new_config_uuid(),
             id: "block-example".into(),
             enabled: true,
             priority: 10,
@@ -2446,6 +2450,7 @@ mod tests {
                 action: crate::config::FirewallAction::Deny,
             });
             updated.firewall.rules.push(crate::config::FirewallRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "allow-updated".into(),
                 enabled: true,
                 priority: 20,

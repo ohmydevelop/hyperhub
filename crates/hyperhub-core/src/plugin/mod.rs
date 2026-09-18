@@ -99,6 +99,7 @@ mod tests {
 
     fn credential(id: &str, protocols: &[PluginProtocol]) -> PluginConfig {
         PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: id.into(),
             kind: PluginKind::Credential,
             protocols: protocols.to_vec(),
@@ -123,6 +124,7 @@ mod tests {
         let set = PluginSet(vec![
             credential("h", &[PluginProtocol::Http]),
             PluginConfig {
+                uuid: crate::config::new_config_uuid(),
                 id: "audit".into(),
                 kind: PluginKind::Audit,
                 protocols: vec![PluginProtocol::Http, PluginProtocol::Ws],

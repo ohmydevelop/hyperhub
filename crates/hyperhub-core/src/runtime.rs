@@ -140,6 +140,7 @@ mod tests {
 
     fn rule(id: &str, target: &str) -> RouteRule {
         RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: id.into(),
             enabled: true,
             priority: 0,
@@ -196,6 +197,7 @@ mod tests {
         // 无效配置（无法编译）不得破坏旧快照。
         let mut broken = Config::default();
         broken.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             deny: true,
             upstream: Some("missing".into()),
             ..rule("broken", "example.com")

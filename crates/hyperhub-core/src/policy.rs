@@ -366,6 +366,7 @@ mod tests {
         let mut config = Config::default();
         config.rules = vec![
             RouteRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "low".into(),
                 enabled: true,
                 priority: 1,
@@ -378,6 +379,7 @@ mod tests {
                 legacy: Default::default(),
             },
             RouteRule {
+                uuid: crate::config::new_config_uuid(),
                 id: "high".into(),
                 enabled: true,
                 priority: 5,
@@ -400,6 +402,7 @@ mod tests {
     fn disabled_rule_is_not_matched() {
         let mut config = Config::default();
         config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "off".into(),
             enabled: false,
             priority: 100,
@@ -421,6 +424,7 @@ mod tests {
     fn default_route_reports_its_id_deny_and_plugins() {
         let mut config = Config::default();
         config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "audit-all".into(),
             kind: PluginKind::Audit,
             protocols: vec![PluginProtocol::Http],
@@ -445,6 +449,7 @@ mod tests {
     fn exact_domain_target_does_not_match_subdomains_or_other_hosts() {
         let mut config = Config::default();
         config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "baidu".into(),
             enabled: true,
             priority: 100,
@@ -477,6 +482,7 @@ mod tests {
     fn route_endpoint_binds_target_and_gateway_port() {
         let mut config = Config::default();
         config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "https-only".into(),
             enabled: true,
             priority: 100,
@@ -510,6 +516,7 @@ mod tests {
     fn wildcard_targets_match_subdomains_but_not_apex() {
         let mut config = Config::default();
         config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "friendly".into(),
             enabled: true,
             priority: 100,
@@ -547,12 +554,14 @@ mod tests {
     fn url_form_targets_match_request_paths_only_for_http_family() {
         let mut config = Config::default();
         config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             id: "api-token".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Http],
             ..PluginConfig::default()
         });
         config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "api".into(),
             enabled: true,
             priority: 1,
@@ -627,6 +636,7 @@ mod tests {
         // 非 HTTP 协议：URL 路径约束不生效（无路径概念），连接级主机匹配即可。
         let mut ssh_config = Config::default();
         ssh_config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
             id: "ssh-host".into(),
             enabled: true,
             priority: 1,

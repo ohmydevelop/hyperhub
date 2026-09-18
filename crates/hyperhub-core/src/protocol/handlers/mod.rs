@@ -163,6 +163,7 @@ mod tests {
     #[test]
     fn ssh_passthrough_never_captures_ciphertext_as_transcript() {
         let profile = PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             capture_body: true,
             ssh_transcript: true,
             protocols: vec![PluginProtocol::Git],
@@ -179,6 +180,7 @@ mod tests {
         ));
 
         let explicit = PluginConfig {
+            uuid: crate::config::new_config_uuid(),
             capture_body: true,
             git_transcript: Some(false),
             protocols: vec![PluginProtocol::Http, PluginProtocol::Git],

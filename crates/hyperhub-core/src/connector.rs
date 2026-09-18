@@ -183,6 +183,7 @@ fn parse_environment_upstream(name: &str, value: &str) -> io::Result<Environment
     let address = format_host_port(&host, port);
     Ok(EnvironmentUpstream {
         upstream: Upstream {
+            uuid: crate::config::new_config_uuid(),
             id: format!("env:{name}"),
             kind,
             address,

@@ -1,5 +1,6 @@
 use ipnet::IpNet;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,53 @@ fn default_retention_days() -> u32 {
 }
 fn default_true() -> bool {
     true
+}
+
+/// Generate the stable identity used by independently editable configuration items.
+pub fn new_config_uuid() -> String {
+    let mut bytes = [0u8; 16];
+    rand::fill(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+fn legacy_config_uuid(kind: &str, identity: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"hyperhub/config-item-uuid/v1\0");
+    hash.update(kind.as_bytes());
+    hash.update([0]);
+    hash.update(identity.as_bytes());
+    let digest = hash.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+pub fn valid_config_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, character)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                character == '-'
+            } else {
+                character.is_ascii_hexdigit()
+            }
+        })
+        && matches!(value.as_bytes()[14].to_ascii_lowercase(), b'1'..=b'5')
+        && matches!(
+            value.as_bytes()[19].to_ascii_lowercase(),
+            b'8' | b'9' | b'a' | b'b'
+        )
 }
 
 fn default_firewall_default() -> Option<FirewallDefaultRule> {
@@ -59,7 +107,7 @@ pub enum ConfigError {
     InsecureSecretFile(PathBuf),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub mode: EnforcementMode,
@@ -91,6 +139,65 @@ pub struct Config {
     /// 用于在校验阶段为已移除的顶层字段生成可操作的迁移错误。
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ConfigWire {
+    #[serde(default)]
+    mode: EnforcementMode,
+    #[serde(default)]
+    debug: bool,
+    #[serde(default)]
+    firewall: FirewallConfig,
+    #[serde(default)]
+    sandbox: SandboxConfig,
+    #[serde(default)]
+    default_route: DefaultRoute,
+    #[serde(default)]
+    listener: ListenerConfig,
+    #[serde(default)]
+    audit: AuditPolicy,
+    #[serde(default)]
+    environment: Vec<EnvironmentVariable>,
+    #[serde(default)]
+    upstreams: Vec<Upstream>,
+    #[serde(default)]
+    plugins: Vec<PluginConfig>,
+    #[serde(default)]
+    root_certificates: Vec<RootCertificate>,
+    #[serde(default)]
+    ssh_host_keys: Vec<SshHostKey>,
+    #[serde(default, rename = "routes")]
+    rules: Vec<RouteRule>,
+    #[serde(default, flatten)]
+    legacy: HashMap<String, serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ConfigWire::deserialize(deserializer)?;
+        let mut config = Self {
+            mode: wire.mode,
+            debug: wire.debug,
+            firewall: wire.firewall,
+            sandbox: wire.sandbox,
+            default_route: wire.default_route,
+            listener: wire.listener,
+            audit: wire.audit,
+            environment: wire.environment,
+            upstreams: wire.upstreams,
+            plugins: wire.plugins,
+            root_certificates: wire.root_certificates,
+            ssh_host_keys: wire.ssh_host_keys,
+            rules: wire.rules,
+            legacy: wire.legacy,
+        };
+        config.ensure_item_uuids();
+        Ok(config)
+    }
 }
 
 impl Default for Config {
@@ -180,8 +287,44 @@ impl Config {
         config
     }
 
+    pub fn ensure_item_uuids(&mut self) {
+        let ensure = |uuid: &mut String, kind: &str, identity: &str| {
+            if uuid.is_empty() {
+                *uuid = legacy_config_uuid(kind, identity);
+            }
+        };
+        for item in &mut self.upstreams {
+            ensure(&mut item.uuid, "upstream", &item.id);
+        }
+        for item in &mut self.plugins {
+            ensure(&mut item.uuid, "plugin", &item.id);
+        }
+        for item in &mut self.rules {
+            ensure(&mut item.uuid, "route", &item.id);
+        }
+        for item in &mut self.environment {
+            ensure(&mut item.uuid, "environment", &item.name);
+        }
+        for item in &mut self.root_certificates {
+            ensure(&mut item.uuid, "root-certificate", &item.fingerprint);
+        }
+        for item in &mut self.ssh_host_keys {
+            ensure(&mut item.uuid, "ssh-host-key", &item.host);
+        }
+        for item in &mut self.firewall.rules {
+            ensure(&mut item.uuid, "network-rule", &item.id);
+        }
+        for item in &mut self.sandbox.process.rules {
+            ensure(&mut item.uuid, "process-rule", &item.id);
+        }
+        for item in &mut self.sandbox.file.rules {
+            ensure(&mut item.uuid, "file-rule", &item.id);
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_legacy()?;
+        self.validate_item_uuids()?;
         let listen = self
             .listener
             .socks_listen
@@ -589,6 +732,51 @@ impl Config {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn validate_item_uuids(&self) -> Result<(), ConfigError> {
+        let mut seen = HashSet::new();
+        let mut register = |kind: &str, name: &str, uuid: &str| {
+            if !valid_config_uuid(uuid) {
+                return Err(ConfigError::Validation(format!(
+                    "{kind} '{name}' has invalid UUID '{uuid}'"
+                )));
+            }
+            if !seen.insert(uuid.to_ascii_lowercase()) {
+                return Err(ConfigError::Validation(format!(
+                    "{kind} '{name}' reuses configuration UUID '{uuid}'"
+                )));
+            }
+            Ok(())
+        };
+        for item in &self.upstreams {
+            register("upstream", &item.id, &item.uuid)?;
+        }
+        for item in &self.plugins {
+            register("plugin", &item.id, &item.uuid)?;
+        }
+        for item in &self.rules {
+            register("route", &item.id, &item.uuid)?;
+        }
+        for item in &self.environment {
+            register("environment variable", &item.name, &item.uuid)?;
+        }
+        for item in &self.root_certificates {
+            register("root certificate", &item.fingerprint, &item.uuid)?;
+        }
+        for item in &self.ssh_host_keys {
+            register("SSH host key", &item.host, &item.uuid)?;
+        }
+        for item in &self.firewall.rules {
+            register("network rule", &item.id, &item.uuid)?;
+        }
+        for item in &self.sandbox.process.rules {
+            register("process sandbox rule", &item.id, &item.uuid)?;
+        }
+        for item in &self.sandbox.file.rules {
+            register("file sandbox rule", &item.id, &item.uuid)?;
         }
         Ok(())
     }
@@ -1124,6 +1312,8 @@ pub struct ProcessSandboxConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessSandboxRule {
+    #[serde(default)]
+    pub uuid: String,
     pub id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1173,6 +1363,8 @@ pub enum FileSandboxOperation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSandboxRule {
+    #[serde(default)]
+    pub uuid: String,
     pub id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1222,6 +1414,8 @@ impl Default for FirewallConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallRule {
+    #[serde(default)]
+    pub uuid: String,
     pub id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1279,6 +1473,8 @@ pub struct AuditPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentVariable {
+    #[serde(default)]
+    pub uuid: String,
     pub name: String,
     pub value: SecretValue,
 }
@@ -1296,6 +1492,8 @@ impl Default for AuditPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteRule {
+    #[serde(default)]
+    pub uuid: String,
     pub id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1327,6 +1525,8 @@ pub struct RouteEndpoint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootCertificate {
+    #[serde(default)]
+    pub uuid: String,
     /// SHA-256 of the certificate DER, used as the identity and storage file name.
     pub fingerprint: String,
     #[serde(default = "default_true")]
@@ -1336,6 +1536,8 @@ pub struct RootCertificate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshHostKey {
+    #[serde(default)]
+    pub uuid: String,
     /// 目标主机（host 或 host:port）。
     pub host: String,
     pub key_type: String,
@@ -1363,6 +1565,8 @@ pub enum UpstreamKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Upstream {
+    #[serde(default)]
+    pub uuid: String,
     pub id: String,
     #[serde(rename = "type")]
     pub kind: UpstreamKind,
@@ -1430,6 +1634,8 @@ pub struct SshAccount {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
+    #[serde(default)]
+    pub uuid: String,
     pub id: String,
     #[serde(rename = "kind")]
     pub kind: PluginKind,
@@ -1474,6 +1680,7 @@ pub struct PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
+            uuid: new_config_uuid(),
             id: String::new(),
             kind: PluginKind::Audit,
             protocols: Vec::new(),
@@ -1683,6 +1890,7 @@ targets = ["example.com"]"#,
         let mut config = Config::default();
         config.audit.transcript_dir = Some("audit/transcripts".into());
         config.plugins.push(PluginConfig {
+            uuid: new_config_uuid(),
             id: "audit".into(),
             kind: PluginKind::Audit,
             protocols: vec![PluginProtocol::Http],
@@ -1761,15 +1969,80 @@ targets = ["example.com"]"#,
     }
 
     #[test]
+    fn legacy_items_receive_deterministic_configuration_uuids() {
+        let source = r#"
+            [[routes]]
+            id = "legacy-route"
+            endpoints = [{ target = "example.com", port = 443 }]
+
+            [[plugins]]
+            id = "legacy-credential"
+            kind = "credential"
+            protocols = ["http"]
+            http_scheme = "bearer"
+            secret = { value = "token" }
+        "#;
+        let first: Config = toml::from_str(source).unwrap();
+        let second: Config = toml::from_str(source).unwrap();
+        assert_eq!(first.rules[0].uuid, second.rules[0].uuid);
+        assert_eq!(first.plugins[0].uuid, second.plugins[0].uuid);
+        assert!(valid_config_uuid(&first.rules[0].uuid));
+        assert!(valid_config_uuid(&first.plugins[0].uuid));
+        first.validate().unwrap();
+    }
+
+    #[test]
+    fn configuration_item_uuids_must_be_unique_and_valid() {
+        let mut config = Config::default();
+        let shared = new_config_uuid();
+        config.rules.push(RouteRule {
+            uuid: shared.clone(),
+            id: "one".into(),
+            enabled: true,
+            priority: 1,
+            endpoints: vec![RouteEndpoint {
+                target: "one.example".into(),
+                port: Some(443),
+            }],
+            deny: false,
+            rewrite_host: None,
+            rewrite_port: None,
+            upstream: None,
+            plugins: Vec::new(),
+            legacy: Default::default(),
+        });
+        config.environment.push(EnvironmentVariable {
+            uuid: shared,
+            name: "DUPLICATE_UUID".into(),
+            value: SecretValue::Inline {
+                value: "value".into(),
+            },
+        });
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("reuses"));
+        config.environment[0].uuid = "not-a-uuid".into();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid UUID"));
+    }
+
+    #[test]
     fn redacted_config_preserves_structure_and_hides_all_inline_secrets() {
         let mut config = Config::default();
         config.environment.push(EnvironmentVariable {
+            uuid: new_config_uuid(),
             name: "TOKEN".into(),
             value: SecretValue::Inline {
                 value: "environment-secret".into(),
             },
         });
         config.upstreams.push(Upstream {
+            uuid: new_config_uuid(),
             id: "proxy".into(),
             kind: UpstreamKind::Socks5,
             address: "127.0.0.1:1080".into(),
@@ -1832,6 +2105,7 @@ targets = ["example.com"]"#,
     fn validates_session_environment_names() {
         let mut config = Config::default();
         config.environment.push(EnvironmentVariable {
+            uuid: new_config_uuid(),
             name: "GH_TOKEN".into(),
             value: SecretValue::Inline {
                 value: "secret".into(),
@@ -1848,6 +2122,7 @@ targets = ["example.com"]"#,
     fn reserves_the_default_route_id() {
         let mut config = Config::default();
         config.rules.push(RouteRule {
+            uuid: new_config_uuid(),
             id: DEFAULT_ROUTE_ID.into(),
             enabled: true,
             priority: 0,
@@ -2044,6 +2319,7 @@ targets = ["example.com"]"#,
     fn ssh_credential_validates_key_and_password_shapes() {
         let mut config = Config::default();
         config.plugins.push(PluginConfig {
+            uuid: new_config_uuid(),
             id: "deploy".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Ssh],
@@ -2060,6 +2336,7 @@ targets = ["example.com"]"#,
 
         let mut blank_name = Config::default();
         blank_name.plugins.push(PluginConfig {
+            uuid: new_config_uuid(),
             id: "deploy".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Ssh],
@@ -2083,6 +2360,7 @@ targets = ["example.com"]"#,
 
         let mut empty_password = Config::default();
         empty_password.plugins.push(PluginConfig {
+            uuid: new_config_uuid(),
             id: "deploy".into(),
             kind: PluginKind::Credential,
             protocols: vec![PluginProtocol::Ssh],
@@ -2114,6 +2392,7 @@ targets = ["example.com"]"#,
         let config_with = |accounts| {
             let mut config = Config::default();
             config.plugins.push(PluginConfig {
+                uuid: new_config_uuid(),
                 id: "deploy".into(),
                 kind: PluginKind::Credential,
                 protocols: vec![PluginProtocol::Ssh],
@@ -2153,6 +2432,7 @@ targets = ["example.com"]"#,
     fn disabled_route_skips_semantic_validation() {
         let mut config = Config::default();
         config.rules.push(RouteRule {
+            uuid: new_config_uuid(),
             id: "parked".into(),
             enabled: false,
             priority: 0,
@@ -2331,6 +2611,7 @@ aktion = "deny""#,
         let mut config = Config::default();
         config.sandbox.process.enabled = true;
         config.sandbox.process.rules.push(ProcessSandboxRule {
+            uuid: new_config_uuid(),
             id: "empty".into(),
             enabled: true,
             priority: 0,
@@ -2352,6 +2633,7 @@ aktion = "deny""#,
 
         config.sandbox.file.enabled = true;
         config.sandbox.file.rules.push(FileSandboxRule {
+            uuid: new_config_uuid(),
             id: "missing-path".into(),
             enabled: true,
             priority: 0,
@@ -2421,6 +2703,7 @@ aktion = "deny""#,
         config.firewall.enabled = true;
         config.firewall.rules = vec![
             FirewallRule {
+                uuid: new_config_uuid(),
                 id: "duplicate".into(),
                 enabled: true,
                 priority: 0,
@@ -2432,6 +2715,7 @@ aktion = "deny""#,
                 legacy: Default::default(),
             },
             FirewallRule {
+                uuid: new_config_uuid(),
                 id: "duplicate".into(),
                 enabled: true,
                 priority: 0,
@@ -2463,6 +2747,7 @@ aktion = "deny""#,
         let mut config = Config::default();
         config.firewall.enabled = true;
         config.firewall.rules.push(FirewallRule {
+            uuid: new_config_uuid(),
             id: "invalid".into(),
             enabled: true,
             priority: 0,
