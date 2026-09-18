@@ -1,3 +1,4 @@
+use crate::config_semantics::{allow_deny_label, route_behavior_label, ConfigSection};
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -80,22 +81,26 @@ const CATEGORY_ENVIRONMENT: NavNode = NavNode::Environment;
 const DEFAULT_HTTP_HEADER_REMOVAL: &str = "PRIVATE-TOKEN";
 
 impl NavNode {
-    fn label(self) -> &'static str {
+    fn section(self) -> ConfigSection {
         match self {
-            Self::Gateway => "网关",
-            Self::Basic => "基础",
-            Self::Proxy => "代理",
-            Self::Credential => "凭证",
-            Self::Audit => "审计",
-            Self::Route => "路由",
-            Self::Certificate => "证书",
-            Self::Sandbox => "沙盒",
-            Self::Network => "网络",
-            Self::SandboxProcess => "子进程",
-            Self::Files => "文件",
-            Self::Process => "进程",
-            Self::Environment => "环境变量",
+            Self::Gateway => ConfigSection::Gateway,
+            Self::Basic => ConfigSection::Basic,
+            Self::Proxy => ConfigSection::Proxy,
+            Self::Credential => ConfigSection::Credential,
+            Self::Audit => ConfigSection::Audit,
+            Self::Route => ConfigSection::Route,
+            Self::Certificate => ConfigSection::Certificate,
+            Self::Sandbox => ConfigSection::Sandbox,
+            Self::Network => ConfigSection::Network,
+            Self::SandboxProcess => ConfigSection::SandboxProcess,
+            Self::Files => ConfigSection::Files,
+            Self::Process => ConfigSection::Process,
+            Self::Environment => ConfigSection::Environment,
         }
+    }
+
+    fn label(self) -> &'static str {
+        self.section().label()
     }
 
     fn sidebar_label(self) -> String {
@@ -133,20 +138,7 @@ impl NavNode {
     }
 
     fn breadcrumb(self) -> String {
-        match self {
-            Self::Gateway | Self::Sandbox | Self::Process | Self::Environment => {
-                self.label().into()
-            }
-            Self::Basic
-            | Self::Proxy
-            | Self::Credential
-            | Self::Audit
-            | Self::Route
-            | Self::Certificate => format!("网关 / {}", self.label()),
-            Self::Network | Self::SandboxProcess | Self::Files => {
-                format!("沙盒 / {}", self.label())
-            }
-        }
+        self.section().breadcrumb()
     }
 }
 
@@ -1443,9 +1435,9 @@ fn toggle_selected(app: &mut App) {
             app.config.debug = !app.config.debug;
             changed(app);
             app.status = if app.config.debug {
-                "Debug：已开启，保存后立即热更新".into()
+                "调试事件：已开启，保存后立即热更新".into()
             } else {
-                "Debug：已关闭，保存后立即热更新".into()
+                "调试事件：已关闭，保存后立即热更新".into()
             };
         }
         (CATEGORY_FIREWALL, 0) => {
@@ -1587,7 +1579,7 @@ fn edit_selected(app: &mut App) {
         {
             enter_editor(app, ObjectEditor::AuditProfile(field - 1))
         }
-        (CATEGORY_FIREWALL, 0) => app.status = "Firewall 启停请按 Space 切换".into(),
+        (CATEGORY_FIREWALL, 0) => app.status = "网络沙盒启停请按 Space 切换".into(),
         (CATEGORY_FIREWALL, 1) => app.status = "默认动作请按 Space 循环切换".into(),
         (CATEGORY_FIREWALL, 2) => app.status = "出错动作请按 Space 循环切换".into(),
         (CATEGORY_FIREWALL, field) if field >= 3 && field - 3 < app.config.firewall.rules.len() => {
@@ -1798,7 +1790,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
 
         (ObjectEditor::FirewallRule(index), 0) => open_text(
             app,
-            "Firewall 规则 ID",
+            "网络规则 ID",
             app.config.firewall.rules[index].id.clone(),
             TextField::FirewallId(index),
         ),
@@ -3120,9 +3112,9 @@ fn apply_text_field(app: &mut App, field: TextField, value: &str) -> Result<(), 
     match field {
         TextField::SocksListen => app.config.listener.socks_listen = required(value, "监听地址")?,
         TextField::PendingTtl => {
-            let ttl = value.parse().map_err(|_| "Pending TTL 必须是正整数")?;
+            let ttl = value.parse().map_err(|_| "待激活会话有效期必须是正整数")?;
             if ttl == 0 {
-                return Err("Pending TTL 必须大于 0".into());
+                return Err("待激活会话有效期必须大于 0".into());
             }
             app.config.listener.pending_session_ttl_secs = ttl;
         }
@@ -3900,7 +3892,7 @@ fn delete_selected(app: &mut App) {
             }
         }
         CATEGORY_FIREWALL if app.field < 3 => {
-            Err("Firewall 启停、默认动作和出错动作是固定项，不能删除".into())
+            Err("网络沙盒启停、默认动作和出错动作是固定项，不能删除".into())
         }
         CATEGORY_FIREWALL if app.field - 3 < app.config.firewall.rules.len() => {
             app.config.firewall.rules.remove(app.field - 3);
@@ -4216,11 +4208,11 @@ fn detail_lines(app: &App) -> Vec<String> {
             format!("模式              {:?}", app.config.mode),
             format!("SOCKS5            {}", app.config.listener.socks_listen),
             format!(
-                "Pending TTL       {} 秒",
+                "待激活会话有效期  {} 秒",
                 app.config.listener.pending_session_ttl_secs
             ),
             format!(
-                "Debug             {}",
+                "调试事件          {}",
                 if app.config.debug { "开启" } else { "关闭" }
             ),
         ],
@@ -4287,30 +4279,20 @@ fn detail_lines(app: &App) -> Vec<String> {
                 "[ ]"
             },
             DEFAULT_ROUTE_ID,
-            if app.config.default_route.deny {
-                "deny"
-            } else {
-                "passthrough"
-            }
+            route_behavior_label(app.config.default_route.deny, false)
         ))
         .chain(app.config.rules.iter().map(|item| {
             format!(
-                "{} {}  priority={}  {}",
+                "{} {}  优先级={}  {}",
                 if item.enabled { "[x]" } else { "[ ]" },
                 item.id,
                 item.priority,
-                if item.deny {
-                    "deny"
-                } else if item.upstream.is_some() {
-                    "proxy"
-                } else {
-                    "passthrough"
-                }
+                route_behavior_label(item.deny, item.upstream.is_some())
             )
         }))
         .collect(),
         CATEGORY_FIREWALL => std::iter::once(format!(
-            "Firewall          {}",
+            "网络沙盒          {}",
             if app.config.firewall.enabled {
                 "启用"
             } else {
@@ -4327,7 +4309,7 @@ fn detail_lines(app: &App) -> Vec<String> {
         )))
         .chain(app.config.firewall.rules.iter().map(|item| {
             format!(
-                "{} {}  priority={}  {}",
+                "{} {}  优先级={}  {}",
                 if item.enabled { "[x]" } else { "[ ]" },
                 item.id,
                 item.priority,
@@ -4382,7 +4364,7 @@ fn detail_lines(app: &App) -> Vec<String> {
         )))
         .chain(app.config.sandbox.process.rules.iter().map(|r| {
             format!(
-                "{} {}  priority={}  {}",
+                "{} {}  优先级={}  {}",
                 if r.enabled { "[x]" } else { "[ ]" },
                 r.id,
                 r.priority,
@@ -4408,7 +4390,7 @@ fn detail_lines(app: &App) -> Vec<String> {
         )))
         .chain(app.config.sandbox.file.rules.iter().map(|r| {
             format!(
-                "{} {}  priority={}  {}",
+                "{} {}  优先级={}  {}",
                 if r.enabled { "[x]" } else { "[ ]" },
                 r.id,
                 r.priority,
@@ -4927,23 +4909,17 @@ fn optional_summary(value: Option<&str>) -> &str {
 }
 
 fn firewall_action_label(action: FirewallAction) -> &'static str {
-    match action {
-        FirewallAction::Pass => "pass",
-        FirewallAction::Deny => "deny",
-    }
+    allow_deny_label(action == FirewallAction::Deny)
 }
 
 fn firewall_default_label(default: Option<&FirewallDefaultRule>) -> &'static str {
     default
         .map(|rule| firewall_action_label(rule.action))
-        .unwrap_or("pass")
+        .unwrap_or("放行")
 }
 
 fn sandbox_action_label(action: SandboxAction) -> &'static str {
-    match action {
-        SandboxAction::Pass => "pass",
-        SandboxAction::Deny => "deny",
-    }
+    allow_deny_label(action == SandboxAction::Deny)
 }
 fn opposite_sandbox_action(action: SandboxAction) -> SandboxAction {
     match action {
@@ -5044,7 +5020,9 @@ fn header_summary(headers: &std::collections::HashMap<String, SecretValue>) -> S
 
 fn object_editor_hint(editor: ObjectEditor) -> String {
     match editor {
-        ObjectEditor::DefaultRoute => "默认路由：内置兜底，配置启用、deny 与直通".to_string(),
+        ObjectEditor::DefaultRoute => {
+            "默认路由：内置兜底，配置启用状态、拒绝动作与直通".to_string()
+        }
         ObjectEditor::Upstream(_) => "代理：配置 ID、类型、地址与超时".to_string(),
         ObjectEditor::Credential(_) => "凭证：配置 HTTP 认证或 SSH 账号".to_string(),
         ObjectEditor::AuditProfile(_) => "审计插件：配置事件范围与内容转录".to_string(),
@@ -5122,11 +5100,11 @@ fn selection_hint(app: &App) -> Option<String> {
                 app.config.listener.socks_listen
             )),
             2 => Some(format!(
-                "Pending TTL：待激活会话 {} 秒",
+                "待激活会话有效期：{} 秒",
                 app.config.listener.pending_session_ttl_secs
             )),
             3 => Some(format!(
-                "Debug：{}，保存后热更新运行中的 Serve",
+                "调试事件：{}，保存后热更新运行中的 Serve",
                 if app.config.debug { "开启" } else { "关闭" }
             )),
             _ => None,
@@ -5200,21 +5178,15 @@ fn selection_hint(app: &App) -> Option<String> {
                 Some(format!(
                     "默认路由 {}：内置兜底，{}",
                     DEFAULT_ROUTE_ID,
-                    if default.deny { "deny" } else { "passthrough" }
+                    route_behavior_label(default.deny, false)
                 ))
             } else {
                 let field = app.field - 1;
                 if field < app.config.rules.len() {
                     let rule = &app.config.rules[field];
-                    let action = if rule.deny {
-                        "deny"
-                    } else if rule.upstream.is_some() {
-                        "proxy"
-                    } else {
-                        "passthrough"
-                    };
+                    let action = route_behavior_label(rule.deny, rule.upstream.is_some());
                     Some(format!(
-                        "路由 {}：priority={}，{action}，目标={}",
+                        "路由 {}：优先级={}，{action}，目标={}",
                         rule.id,
                         rule.priority,
                         route_targets_summary(rule)
@@ -5227,7 +5199,7 @@ fn selection_hint(app: &App) -> Option<String> {
         CATEGORY_FIREWALL => {
             if app.field == 0 {
                 Some(format!(
-                    "Firewall：{}；未启用时全部 pass",
+                    "网络沙盒：{}；未启用时全部放行",
                     if app.config.firewall.enabled {
                         "启用"
                     } else {
@@ -5236,7 +5208,7 @@ fn selection_hint(app: &App) -> Option<String> {
                 ))
             } else if app.field == 1 {
                 Some(format!(
-                    "默认动作：{}；未配置时为 pass",
+                    "默认动作：{}；未配置时为放行",
                     firewall_default_label(app.config.firewall.default.as_ref())
                 ))
             } else if app.field == 2 {
@@ -5248,14 +5220,14 @@ fn selection_hint(app: &App) -> Option<String> {
                 let index = app.field - 3;
                 if let Some(rule) = app.config.firewall.rules.get(index) {
                     Some(format!(
-                        "Firewall 规则 {}：priority={}，{}，绑定={} 条",
+                        "网络规则 {}：优先级={}，{}，绑定={} 条",
                         rule.id,
                         rule.priority,
                         firewall_action_label(rule.action),
                         rule.endpoints.len()
                     ))
                 } else {
-                    Some("暂无 Firewall 规则，按 a 新增".to_string())
+                    Some("暂无网络规则，按 a 新增".to_string())
                 }
             }
         }
@@ -6194,8 +6166,8 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(lines[0].contains("模式"));
         assert!(lines[1].contains("SOCKS5"));
-        assert!(lines[2].contains("Pending TTL"));
-        assert!(lines[3].contains("Debug"));
+        assert!(lines[2].contains("待激活会话有效期"));
+        assert!(lines[3].contains("调试事件"));
 
         let enforce = matches!(app.config.mode, EnforcementMode::Enforce);
         handle_key(
@@ -6342,14 +6314,14 @@ mod tests {
 
         let lines = detail_lines(&app);
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("Firewall"));
+        assert!(lines[0].starts_with("网络沙盒"));
         assert!(!lines[0].contains("[ ]"));
         assert!(lines[0].contains("停用"));
         app.field = 0;
         assert!(!selected_is_toggle(&app));
-        assert!(lines[1].contains("pass"));
+        assert!(lines[1].contains("放行"));
         assert!(!lines[1].contains("未配置"));
-        assert!(lines[2].contains("pass"));
+        assert!(lines[2].contains("放行"));
 
         app.field = 0;
         toggle_selected(&mut app);
@@ -7792,7 +7764,7 @@ mod tests {
         app.field = 3;
         assert_eq!(
             selection_hint(&app).unwrap(),
-            "Debug：关闭，保存后热更新运行中的 Serve"
+            "调试事件：关闭，保存后热更新运行中的 Serve"
         );
     }
 
@@ -7807,7 +7779,7 @@ mod tests {
         app.editor = Some(ObjectEditor::DefaultRoute);
         assert_eq!(
             selection_hint(&app).unwrap(),
-            "默认路由：内置兜底，配置启用、deny 与直通"
+            "默认路由：内置兜底，配置启用状态、拒绝动作与直通"
         );
     }
 

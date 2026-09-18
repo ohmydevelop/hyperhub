@@ -1,3 +1,6 @@
+use crate::config_semantics::{
+    describe_request, new_uuid, unique_valid_uuids, ConfigChangeDescription,
+};
 use hyperhub_core::config::Config;
 use hyperhub_core::config_store::{
     self, default_config_path, load_approval_state, load_encrypted, read_redacted_json,
@@ -43,6 +46,8 @@ const APPROVAL_QUEUE_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ApprovalRequest {
+    #[serde(default = "new_uuid")]
+    uuid: String,
     source_index: usize,
     operations: Vec<Value>,
     #[serde(default)]
@@ -228,7 +233,7 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
         return Err("JSON patch does not change the configuration".into());
     }
     let requests = build_approval_requests(&patch)?;
-    validate_request_sequence(&path, &active.config, &requests)?;
+    let request_descriptions = describe_request_sequence(&path, &active.config, &requests)?;
     let queue = ApprovalQueue {
         schema_version: APPROVAL_QUEUE_SCHEMA,
         proposal_token: prepared.approval_token.clone(),
@@ -241,6 +246,15 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
         in_flight: None,
     };
     save_queue(&queue_path, &queue, &active)?;
+    let request_views = queue
+        .requests
+        .iter()
+        .zip(&request_descriptions)
+        .enumerate()
+        .map(|(index, (request, description))| {
+            semantic_request_json(request, description, index, queue.requests.len())
+        })
+        .collect::<Vec<_>>();
     print_json(&json!({
         "schema_version": 1,
         "status": "approval_required",
@@ -249,6 +263,7 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
         "serve_running": crate::serve_is_running(),
         "config_path": path,
         "request_count": queue.requests.len(),
+        "requests": request_views,
         "changes": prepared.changes,
     }))?;
     Ok(0)
@@ -273,6 +288,8 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
     } else {
         active.descriptor = queue_descriptor;
     }
+    // Persist UUIDs generated while loading queues created by older versions.
+    save_queue(&queue_path, &queue, &active)?;
 
     recover_in_flight(&path, &queue_path, &mut active, &mut queue)?;
     let current_digest = config_digest(&active.config)?;
@@ -291,7 +308,17 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
         let patch = Value::Array(request.operations.clone());
         let preview = prepare_patch(&path, &active.config, &patch);
         let placeholders = collect_placeholders(&patch)?;
-        display_request(index, total, &request, preview.as_ref(), &placeholders)?;
+        let current_value =
+            serde_json::to_value(&active.config).map_err(|error| error.to_string())?;
+        let description = describe_request(&current_value, &request.operations)?;
+        display_request(
+            index,
+            total,
+            &request,
+            &description,
+            preview.as_ref(),
+            &placeholders,
+        )?;
         let decision = prompt_decision(preview.is_ok())?;
         match decision {
             ApprovalDecision::Quit => {
@@ -314,7 +341,7 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
                 queue.cursor += 1;
                 queue.rejected += 1;
                 save_queue(&queue_path, &queue, &active)?;
-                eprintln!("[{}/{}] rejected", index + 1, total);
+                eprintln!("[{}/{}] 已拒绝", index + 1, total);
             }
             ApprovalDecision::Approve => {
                 let mut approved_operations = request.operations.clone();
@@ -329,7 +356,7 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
                         total,
                         placeholder
                     );
-                    let value = crate::password::prompt_secret("Enter value (hidden): ")?;
+                    let value = crate::password::prompt_secret("Enter value (masked): ")?;
                     eprintln!();
                     if value.is_empty() {
                         return Err(format!(
@@ -514,6 +541,9 @@ fn validate_queue(queue: &ApprovalQueue) -> Result<(), String> {
     if queue.requests.is_empty() {
         return Err("approval state contains no requests".into());
     }
+    if !unique_valid_uuids(queue.requests.iter().map(|request| request.uuid.as_str())) {
+        return Err("approval state contains an invalid or duplicate request UUID".into());
+    }
     if queue.cursor > queue.requests.len()
         || queue.approved + queue.rejected != queue.cursor
         || queue
@@ -552,6 +582,7 @@ fn build_approval_requests(patch: &Value) -> Result<Vec<ApprovalRequest>, String
         let mut grouped = std::mem::take(&mut preconditions);
         grouped.push(operation.clone());
         requests.push(ApprovalRequest {
+            uuid: new_uuid(),
             source_index,
             operations: grouped,
             edited: false,
@@ -566,13 +597,16 @@ fn build_approval_requests(patch: &Value) -> Result<Vec<ApprovalRequest>, String
     Ok(requests)
 }
 
-fn validate_request_sequence(
+fn describe_request_sequence(
     path: &Path,
     current: &Config,
     requests: &[ApprovalRequest],
-) -> Result<(), String> {
+) -> Result<Vec<ConfigChangeDescription>, String> {
     let mut config = current.clone();
+    let mut descriptions = Vec::with_capacity(requests.len());
     for (index, request) in requests.iter().enumerate() {
+        let current_value = serde_json::to_value(&config).map_err(|error| error.to_string())?;
+        descriptions.push(describe_request(&current_value, &request.operations)?);
         let prepared = prepare_patch(path, &config, &Value::Array(request.operations.clone()))
             .map_err(|error| {
                 format!(
@@ -583,7 +617,27 @@ fn validate_request_sequence(
             })?;
         config = prepared.config;
     }
-    Ok(())
+    Ok(descriptions)
+}
+
+fn semantic_request_json(
+    request: &ApprovalRequest,
+    description: &ConfigChangeDescription,
+    index: usize,
+    total: usize,
+) -> Value {
+    json!({
+        "uuid": request.uuid,
+        "progress": {"current": index + 1, "total": total},
+        "action": description.action.label(),
+        "section": description.section.breadcrumb(),
+        "item_kind": description.item_kind,
+        "item_name": description.item_name,
+        "field": description.field,
+        "details": description.details,
+        "summary": description.summary,
+        "edited": request.edited,
+    })
 }
 
 fn recover_in_flight(
@@ -642,12 +696,15 @@ fn display_request(
     index: usize,
     total: usize,
     request: &ApprovalRequest,
+    description: &ConfigChangeDescription,
     preview: Result<&PreparedPatch, &String>,
     placeholders: &[String],
 ) -> Result<(), String> {
     let mutation = request
         .operations
-        .last()
+        .iter()
+        .rev()
+        .find(|operation| operation.get("op").and_then(Value::as_str) != Some("test"))
         .and_then(Value::as_object)
         .ok_or("approval request operation is invalid")?;
     let operation = mutation
@@ -658,16 +715,17 @@ fn display_request(
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    eprintln!("\n[{}/{}] configuration request", index + 1, total);
+    eprintln!("\n[{}/{}] 配置审批项", index + 1, total);
+    let request_view = semantic_request_json(request, description, index, total);
     let mut view = json!({
         "schema_version": 1,
         "status": "human_review",
         "progress": {"current": index + 1, "total": total},
-        "request": {
+        "request": request_view,
+        "technical": {
             "source_operation": request.source_index + 1,
             "op": operation,
             "path": path,
-            "edited": request.edited,
         },
         "sensitive_inputs": placeholders,
     });
@@ -685,9 +743,9 @@ fn display_request(
 fn prompt_decision(can_approve: bool) -> Result<ApprovalDecision, String> {
     loop {
         if can_approve {
-            eprint!("Choose [a]pprove, [e]dit, [r]eject, or [q]uit: ");
+            eprint!("选择 [a]批准、[e]编辑、[r]拒绝、[q]暂退: ");
         } else {
-            eprint!("Request is invalid; choose [e]dit, [r]eject, or [q]uit: ");
+            eprint!("当前配置项无效；选择 [e]编辑、[r]拒绝、[q]暂退: ");
         }
         std::io::stderr()
             .flush()
@@ -704,7 +762,7 @@ fn prompt_decision(can_approve: bool) -> Result<ApprovalDecision, String> {
             "e" | "edit" => return Ok(ApprovalDecision::Edit),
             "r" | "reject" => return Ok(ApprovalDecision::Reject),
             "q" | "quit" => return Ok(ApprovalDecision::Quit),
-            _ => eprintln!("Invalid choice."),
+            _ => eprintln!("无效选择。"),
         }
     }
 }
@@ -786,7 +844,7 @@ fn open_editor(review_path: &Path, explicit: Option<&Path>) -> Result<(), String
 
 fn print_apply_progress(index: usize, total: usize, outcome: &ApplyOutcome) {
     eprintln!(
-        "[{}/{}] approved (live_update={})",
+        "[{}/{}] 已批准（live_update={}）",
         index + 1,
         total,
         outcome.live_update
@@ -1221,6 +1279,9 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(requests.len(), 2);
+        assert!(crate::config_semantics::valid_uuid(&requests[0].uuid));
+        assert!(crate::config_semantics::valid_uuid(&requests[1].uuid));
+        assert_ne!(requests[0].uuid, requests[1].uuid);
         assert_eq!(requests[0].source_index, 1);
         assert_eq!(requests[0].operations.len(), 2);
         assert_eq!(requests[1].source_index, 2);
@@ -1228,8 +1289,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_approval_requests_receive_a_valid_uuid() {
+        let request: ApprovalRequest = serde_json::from_value(json!({
+            "source_index": 0,
+            "operations": [
+                {"op": "replace", "path": "/debug", "value": true}
+            ],
+            "edited": false
+        }))
+        .unwrap();
+        assert!(crate::config_semantics::valid_uuid(&request.uuid));
+    }
+
+    #[test]
     fn approval_queue_requires_consistent_progress() {
         let request = ApprovalRequest {
+            uuid: new_uuid(),
             source_index: 0,
             operations: vec![json!({"op": "replace", "path": "/debug", "value": true})],
             edited: false,

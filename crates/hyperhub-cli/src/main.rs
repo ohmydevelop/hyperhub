@@ -21,6 +21,7 @@ compile_error!("embedded-agent and external-runtime are mutually exclusive");
 mod agent_runtime;
 mod clipboard;
 mod config_cli;
+mod config_semantics;
 mod config_tui;
 mod lifecycle;
 mod password;
