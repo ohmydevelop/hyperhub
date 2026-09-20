@@ -54,9 +54,9 @@ target/benchmarks/linux-fixtures/<architecture>/
 
 | 分组 | Fixture/对象 | 必须验证的行为 |
 | --- | --- | --- |
-| 动态 ptrace 基线 | `linux-dynamic-probe`、`linux_http_credential_probe.py` | 动态 ELF 默认不依赖 Agent；覆盖 fork/exec、spawn，以及 IP-form SOCKS 经 HTTP Host/path 精化路由并注入凭证 |
-| 动态 Gum 优化 | `linux-dynamic-probe` | 显式 `--backend gum` 时 25 个动态 Hook descriptor 全部安装并命中 |
-| 静态后端边界 | 复制到无 Agent 目录的 CLI | 动态 ELF 必须拒绝启动；静态 ELF 必须在无 Agent runtime 时正常进入 ptrace |
+| 动态 ptrace 基线 | `linux-dynamic-probe`、`linux_http_credential_probe.py` | 动态 ELF 默认不依赖 Agent；覆盖 fork/exec、spawn、HTTP 凭证，以及自签名 TLS/SSH 的首次记录、复用和轮换拒绝 |
+| 动态 Gum 优化 | `linux-dynamic-probe` | 单文件 CLI 的内嵌 Agent 在显式 `--backend gum` 时无需 sidecar runtime，且 25 个动态 Hook descriptor 全部安装并命中 |
+| 后端边界 | 复制到构建树外的单文件 CLI | 动态/静态 ELF 默认继续进入 ptrace；动态 ELF 显式选择 Gum 时使用内嵌 Agent |
 | 静态 C | raw-syscall stripped static ELF | DNS 三种 I/O、TCP、descriptor、文件变体、clone/fork/exec/wait 和完整 manifest |
 | 静态 Go | `CGO_ENABLED=0` stripped binary | runtime 线程、raw syscall、根进程和 exec 后代 TCP |
 | 静态 Rust | musl stripped binary | 内联汇编 syscall、根进程和 exec 后代 TCP |

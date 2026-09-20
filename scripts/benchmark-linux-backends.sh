@@ -3,7 +3,6 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 hyperhub="$root/target/release/hyperhub"
-runtime="$root/target/release/libhyperhub_gum_agent.so"
 result_dir="$root/target/benchmarks/linux-backends"
 fixture_dir=
 iterations=1
@@ -23,7 +22,6 @@ options:
   --output DIR         suite result directory (default: target/benchmarks/linux-backends)
   --fixtures DIR       reusable fixture cache
   --hyperhub PATH      HyperHub CLI path
-  --runtime PATH       external Gum Agent runtime path
   --full               include BusyBox, gh, yq, and ripgrep performance workloads
   --rebuild-fixtures   force regeneration of cached fixture binaries
   --skip-build         use the supplied/existing CLI and Agent without cargo build
@@ -51,11 +49,6 @@ while (($#)); do
     --hyperhub)
       [[ $# -ge 2 ]] || { echo 'missing value for --hyperhub' >&2; exit 2; }
       hyperhub=$2
-      shift 2
-      ;;
-    --runtime)
-      [[ $# -ge 2 ]] || { echo 'missing value for --runtime' >&2; exit 2; }
-      runtime=$2
       shift 2
       ;;
     --full)
@@ -90,6 +83,10 @@ case "$(uname -m)" in
 esac
 [[ -n $fixture_dir ]] || fixture_dir="$root/target/benchmarks/linux-fixtures/$architecture"
 
+for command in openssl ssh ssh-keygen sshd; do
+  command -v "$command" >/dev/null 2>&1 || { echo "required command is unavailable: $command" >&2; exit 1; }
+done
+
 if ((build_release)); then
   cd "$root"
   mapfile -t devkits < <("$root/scripts/frida-devkit.sh" "$architecture")
@@ -98,13 +95,12 @@ if ((build_release)); then
   compiler_include=$(cc -print-file-name=include)
   export BINDGEN_EXTRA_CLANG_ARGS="-I$HYPERHUB_FRIDA_CORE_ROOT -isystem $compiler_include ${BINDGEN_EXTRA_CLANG_ARGS:-}"
   cargo build --release --locked -p hyperhub-agent-core --features gum-agent
-  cargo build --release --locked -p hyperhub
+  export HYPERHUB_EMBEDDED_AGENT_PATH="$root/target/release/libhyperhub_gum_agent.so"
+  cargo build --release --locked -p hyperhub --no-default-features --features embedded-agent
 fi
 
 [[ -x $hyperhub ]] || { echo "HyperHub is not executable: $hyperhub" >&2; exit 1; }
-[[ -f $runtime ]] || { echo "Linux Gum Agent runtime does not exist: $runtime" >&2; exit 1; }
 hyperhub=$(realpath "$hyperhub")
-runtime=$(realpath "$runtime")
 
 original_home=$HOME
 original_rustup_home=${RUSTUP_HOME:-"$original_home/.rustup"}
@@ -113,7 +109,11 @@ temporary=$(mktemp -d "${TMPDIR:-/tmp}/hyperhub-static-coverage.XXXXXX")
 serve_pid=
 echo_pid=
 credential_pid=
+trust_tls_pid=
+trust_ssh_pid=
 cleanup() {
+  [[ -z $trust_ssh_pid ]] || { kill "$trust_ssh_pid" 2>/dev/null || true; wait "$trust_ssh_pid" 2>/dev/null || true; }
+  [[ -z $trust_tls_pid ]] || { kill "$trust_tls_pid" 2>/dev/null || true; wait "$trust_tls_pid" 2>/dev/null || true; }
   [[ -z $credential_pid ]] || { kill "$credential_pid" 2>/dev/null || true; wait "$credential_pid" 2>/dev/null || true; }
   [[ -z $echo_pid ]] || { kill "$echo_pid" 2>/dev/null || true; wait "$echo_pid" 2>/dev/null || true; }
   [[ -z $serve_pid ]] || { kill "$serve_pid" 2>/dev/null || true; wait "$serve_pid" 2>/dev/null || true; }
@@ -157,8 +157,9 @@ start_serve() {
   "$hyperhub" serve --password-file "$password_file" >"$stdout" 2>"$stderr" &
   serve_pid=$!
   for ((attempt = 0; attempt < 100; attempt++)); do
-    if "$hyperhub" status --json 2>/dev/null \
-      | grep -Eq '"state"[[:space:]]*:[[:space:]]*"running"'; then
+    status=$("$hyperhub" status --json 2>/dev/null || true)
+    if grep -Eq '"state"[[:space:]]*:[[:space:]]*"running"' <<<"$status" \
+      && grep -Eq '"pid"[[:space:]]*:[[:space:]]*'"$serve_pid"'([,[:space:]}]|$)' <<<"$status"; then
       return
     fi
     kill -0 "$serve_pid" 2>/dev/null || {
@@ -231,9 +232,10 @@ if any(not row["hyperhub_median_ms"] for row in rows):
     raise SystemExit("static coverage did not produce HyperHub measurements")
 PY
 
-# Copy the CLI away from every runtime discovery location. A static target must
-# still start, proving this backend does not resolve or validate a Gum Agent.
-standalone_hyperhub="$temporary/hyperhub-no-agent-runtime"
+# Copy the single-file CLI away from the build tree. The default dynamic/static
+# backend must remain ptrace, while explicit Gum must use the embedded Agent
+# without relying on a sidecar runtime or discovery path.
+standalone_hyperhub="$temporary/hyperhub-embedded-agent"
 cp "$hyperhub" "$standalone_hyperhub"
 chmod 0755 "$standalone_hyperhub"
 (
@@ -241,23 +243,15 @@ chmod 0755 "$standalone_hyperhub"
   "$standalone_hyperhub" run \
     --password-file "$password_file" \
     -- /bin/true >/dev/null
-  if "$standalone_hyperhub" run \
+  "$standalone_hyperhub" run \
     --backend gum \
     --password-file "$password_file" \
-    -- /bin/true >/dev/null 2>"$temporary/dynamic-no-runtime.stderr.log"; then
-    echo 'explicit Gum unexpectedly started without an Agent runtime' >&2
-    exit 1
-  fi
-  if ! grep -q 'agent runtime was not found' "$temporary/dynamic-no-runtime.stderr.log"; then
-    cat "$temporary/dynamic-no-runtime.stderr.log" >&2
-    echo 'explicit Gum did not fail at Agent runtime resolution' >&2
-    exit 1
-  fi
+    -- /bin/true >/dev/null 2>"$temporary/dynamic-embedded-runtime.stderr.log"
   "$standalone_hyperhub" run \
     --password-file "$password_file" \
     -- "$fixture_dir/linux-static-c" --intent-read /etc/hosts >/dev/null
 )
-record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum requires Agent"
+record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum uses embedded Agent"
 
 pass_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
 [[ -n $pass_audit ]] || { echo 'static coverage audit was not created' >&2; exit 1; }
@@ -322,7 +316,6 @@ HYPERHUB_AGENT_DEBUG=1 \
 HYPERHUB_DYNAMIC_HOOK_REPORT=$dynamic_hook_report \
   "$hyperhub" run \
     --backend gum \
-    --runtime "$runtime" \
     --password-file "$password_file" \
     -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
     >/dev/null 2>"$temporary/dynamic-probe.stderr.log"
@@ -416,6 +409,158 @@ grep -q '"rule_id":"benchmark-http-route"' "$credential_audit" || {
   exit 1
 }
 record_check dynamic.ptrace_http_credential "route=benchmark-http-route"
+stop_serve
+
+# Trust-on-first-use regression: a self-signed TLS leaf is pinned to the exact
+# host:port, reused on the second visit, and rejected after certificate rotation.
+export HOME="$temporary/trust-home"
+mkdir -p "$HOME" "$temporary/trust"
+trust_tls_port_file="$temporary/trust/tls-port"
+: > "$trust_tls_port_file"
+trust_tls_key="$temporary/trust/tls-key.pem"
+trust_tls_cert="$temporary/trust/tls-cert.pem"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost' \
+  -keyout "$trust_tls_key" -out "$trust_tls_cert" >/dev/null 2>&1
+python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  --tls-server "$trust_tls_port_file" placeholder-token "$trust_tls_cert" "$trust_tls_key" &
+trust_tls_pid=$!
+for ((attempt = 0; attempt < 100; attempt++)); do
+  [[ -s $trust_tls_port_file ]] && break
+  sleep 0.05
+done
+trust_tls_port=$(cat "$trust_tls_port_file")
+trust_ssh_port=$(free_port)
+trust_config="$temporary/trust.toml"
+write_base_config "$trust_config" "$(free_port)"
+cat >> "$trust_config" <<TOML
+
+[[plugins]]
+id = "trust-http-audit"
+kind = "audit"
+protocols = ["http"]
+capture_body = false
+
+[[routes]]
+id = "trust-tls-route"
+enabled = true
+priority = 600
+endpoints = [{ target = "https://localhost/probe", port = $trust_tls_port }]
+deny = false
+plugins = ["trust-http-audit"]
+
+[[routes]]
+id = "trust-ssh-route"
+enabled = true
+priority = 600
+endpoints = [{ target = "localhost", port = $trust_ssh_port }]
+deny = false
+plugins = []
+TOML
+"$hyperhub" import "$trust_config" --password-file "$password_file" >/dev/null
+start_serve "$temporary/trust-serve.stdout.log" "$temporary/trust-serve.stderr.log"
+"$hyperhub" run --backend ptrace --password-file "$password_file" -- \
+  python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  --tls-client localhost "$trust_tls_port"
+wait "$trust_tls_pid"
+trust_tls_pid=
+python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  --tls-server "$trust_tls_port_file" placeholder-token "$trust_tls_cert" "$trust_tls_key" &
+trust_tls_pid=$!
+"$hyperhub" run --backend ptrace --password-file "$password_file" -- \
+  python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  --tls-client localhost "$trust_tls_port"
+wait "$trust_tls_pid"
+trust_tls_pid=
+"$hyperhub" show > "$temporary/trust-show.json"
+python3 - "$temporary/trust-show.json" "$trust_tls_port" <<'PYCODE'
+import json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+authority = f"localhost:{sys.argv[2]}"
+assert any(item.get("host") == authority and item.get("enabled") for item in config["root_certificates"]), (authority, config["root_certificates"])
+PYCODE
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost' \
+  -keyout "$trust_tls_key" -out "$trust_tls_cert" >/dev/null 2>&1
+python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  --tls-server "$trust_tls_port_file" placeholder-token "$trust_tls_cert" "$trust_tls_key" &
+trust_tls_pid=$!
+set +e
+"$hyperhub" run --backend ptrace --password-file "$password_file" -- \
+  python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  --tls-client localhost "$trust_tls_port" >/dev/null 2>"$temporary/trust-tls-rotated.stderr.log"
+rotated_tls_status=$?
+set -e
+wait "$trust_tls_pid" 2>/dev/null || true
+trust_tls_pid=
+((rotated_tls_status != 0)) || { echo 'rotated TLS certificate was unexpectedly trusted' >&2; exit 1; }
+record_check trust.tls_tofu "authority=localhost:$trust_tls_port rotation=rejected"
+
+# SSH uses the same TOFU rule: first key is persisted, the same key is accepted,
+# and a replacement key for the exact host:port is rejected and audited.
+sshd_bin=$(command -v sshd)
+trust_ssh_dir="$temporary/trust/ssh"
+mkdir -p "$trust_ssh_dir"
+ssh-keygen -q -t ed25519 -N '' -f "$trust_ssh_dir/host-key"
+cat > "$trust_ssh_dir/sshd_config" <<EOFSSH
+Port $trust_ssh_port
+ListenAddress 127.0.0.1
+HostKey $trust_ssh_dir/host-key
+PidFile $trust_ssh_dir/sshd.pid
+AuthorizedKeysFile none
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+PermitRootLogin no
+StrictModes no
+LogLevel ERROR
+EOFSSH
+"$sshd_bin" -D -e -f "$trust_ssh_dir/sshd_config" >"$temporary/trust-sshd.log" 2>&1 &
+trust_ssh_pid=$!
+for ((attempt = 0; attempt < 100; attempt++)); do
+  (echo >/dev/tcp/127.0.0.1/$trust_ssh_port) >/dev/null 2>&1 && break
+  sleep 0.05
+done
+set +e
+"$hyperhub" run --backend ptrace --password-file "$password_file" -- \
+  ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -p "$trust_ssh_port" nobody@localhost true \
+  >/dev/null 2>"$temporary/trust-ssh-first.stderr.log"
+set -e
+"$hyperhub" show > "$temporary/trust-show-ssh.json"
+python3 - "$temporary/trust-show-ssh.json" "$trust_ssh_port" <<'PYCODE'
+import json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+authority = f"127.0.0.1:{sys.argv[2]}"
+assert any(item.get("host") == authority and item.get("enabled") for item in config["ssh_host_keys"]), (authority, config["ssh_host_keys"])
+PYCODE
+kill "$trust_ssh_pid"
+wait "$trust_ssh_pid" 2>/dev/null || true
+trust_ssh_pid=
+ssh-keygen -q -t ed25519 -N '' -f "$trust_ssh_dir/host-key-rotated"
+sed -i "s#HostKey .*#HostKey $trust_ssh_dir/host-key-rotated#" "$trust_ssh_dir/sshd_config"
+"$sshd_bin" -D -e -f "$trust_ssh_dir/sshd_config" >>"$temporary/trust-sshd.log" 2>&1 &
+trust_ssh_pid=$!
+for ((attempt = 0; attempt < 100; attempt++)); do
+  (echo >/dev/tcp/127.0.0.1/$trust_ssh_port) >/dev/null 2>&1 && break
+  sleep 0.05
+done
+set +e
+"$hyperhub" run --backend ptrace --password-file "$password_file" -- \
+  ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -p "$trust_ssh_port" nobody@localhost true \
+  >/dev/null 2>"$temporary/trust-ssh-rotated.stderr.log"
+set -e
+kill "$trust_ssh_pid"
+wait "$trust_ssh_pid" 2>/dev/null || true
+trust_ssh_pid=
+trust_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
+grep -q '"outcome":"ssh_host_key_mismatch"' "$trust_audit" || {
+  cat "$trust_audit" >&2
+  echo 'rotated SSH host key was not rejected' >&2
+  exit 1
+}
+record_check trust.ssh_tofu "authority=127.0.0.1:$trust_ssh_port rotation=rejected"
 stop_serve
 
 # Enable file and process sandbox rules and verify every configured intent is denied.
