@@ -54,5 +54,4 @@ cargo build --release -p hyperhub --locked --target x86_64-unknown-linux-gnu
   "$root/target/x86_64-unknown-linux-gnu/release/hyperhub"
 "$root/scripts/benchmark-linux-backends.sh" \
   --skip-build \
-  --hyperhub "$root/target/x86_64-unknown-linux-gnu/release/hyperhub" \
-  --runtime "$root/target/x86_64-unknown-linux-gnu/release/libhyperhub_gum_agent.so"
+  --hyperhub "$root/target/x86_64-unknown-linux-gnu/release/hyperhub"
