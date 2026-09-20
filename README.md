@@ -75,6 +75,22 @@ hyperhub run bash       # Linux
 hyperhub.exe run cmd    # Windows
 ```
 
+### Linux 执行后端
+
+Linux 默认使用 `ptrace-syscall` 作为动态、静态和 stripped ELF 的通用可靠性基线。普通运行无需指定：
+
+```bash
+hyperhub run -- curl https://example.com
+```
+
+动态 ELF 可显式选择 Gum Interceptor 作为性能优化：
+
+```bash
+hyperhub run --backend gum -- curl https://example.com
+```
+
+`--backend gum` 依赖 Agent 注入且不支持静态 ELF；默认 ptrace 不依赖 Gum Agent。可用 `hyperhub run --dry-run -- ...` 查看实际后端。
+
 ### 一次认证，整个会话复用
 
 首次进入 `hyperhub run cmd` 或 `hyperhub run bash` 时完成一次 HyperHub 会话认证。进入 shell 后，在**同一个会话**中继续执行 `curl`、`git`、`ssh` 或其他命令时，子进程会自动继承当前会话，**无需为每条命令再次输入 HyperHub 主密码**：

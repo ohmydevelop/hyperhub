@@ -66,4 +66,4 @@ Sandbox Agent capability 包含 network、process-sandbox 和 file-sandbox。子
 
 ## Linux 平台边界
 
-Linux Agent 使用官方 `frida-sys` Rust bindings 调用 Frida Core 完成挂起启动和注入，并由 `unix_gum/` 的 Frida Gum Interceptor 安装原生 Hook；Frida child gating 负责挂起 exec/spawn 后代并递归注入，子进程沙盒按可执行文件与命令行执行 pass/deny；纯 `fork()` 子进程仅继承当前 Agent 映像，后续再 `exec` 的覆盖不在首期保证内；启动器校验目标与 Agent 的 ELF64 架构及动态解释器，Serve 校验根进程路径和启动时间；Windows 继续使用 Frida Gum Interceptor。平台接口、Session、规则快照和语义回调与 Windows 共用，原生 ABI 适配位于 Unix adapter。静态 ELF、secure-exec、直接 syscall 和运行中进程 Attach 不作首期覆盖保证。
+Linux 默认使用 ptrace syscall supervisor 覆盖动态、静态和 stripped ELF；动态 ELF 可显式选择官方 `frida-sys` Rust bindings 调用 Frida Core 完成挂起启动和注入，并由 `unix_gum/` 的 Frida Gum Interceptor 安装原生 Hook；Frida child gating 负责挂起 exec/spawn 后代并递归注入，子进程沙盒按可执行文件与命令行执行 pass/deny；纯 `fork()` 子进程仅继承当前 Agent 映像，后续再 `exec` 的覆盖不在首期保证内；启动器校验目标与 Agent 的 ELF64 架构及动态解释器，Serve 校验根进程路径和启动时间；Windows 继续使用 Frida Gum Interceptor。平台接口、Session、规则快照和语义回调与 Windows 共用，原生 ABI 适配位于 Unix adapter。静态 ELF、secure-exec、直接 syscall 和运行中进程 Attach 不作首期覆盖保证。

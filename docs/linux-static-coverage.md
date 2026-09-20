@@ -8,14 +8,15 @@ HyperHub 覆盖静态链接、已移除 ELF 符号的 Go、C 和 Rust 程序，�
 
 ## 后端边界
 
-- 有 `PT_INTERP` 的动态 ELF：必须使用 Frida Core 注入 Gum Agent，并由 Gum Interceptor 执行动态符号 Hook；Agent runtime 缺失或校验失败时不启动目标。
+- 动态、静态和 stripped ELF：默认使用 ptrace syscall supervisor，不依赖 Agent runtime、动态符号或目标 libc。
+- 有 `PT_INTERP` 的动态 ELF：可显式使用 `--backend gum`，由 Frida Core 注入 Gum Agent 并用 Gum Interceptor 执行动态符号 Hook；此模式下 Agent runtime 缺失或校验失败时不启动目标。
 - 无 `PT_INTERP` 的静态 ELF：标准 Frida Gum 注入不受支持，不解析或校验 Agent runtime，直接进入 ptrace syscall supervisor。
 
-`--runtime` 只对动态 ELF 有意义。开发构建对静态 ELF 收到该参数时会明确警告并忽略，避免让调用方误以为 Gum 已注入。
+`--runtime` 只对动态 ELF 的显式 Gum 模式有意义。默认 ptrace 或静态 ELF 收到该参数时会明确警告并忽略，避免让调用方误以为 Gum 已注入。
 
 ## 保底后端
 
-动态 ELF 使用 Frida Core + Gum Interceptor。没有 `PT_INTERP` 的静态 ELF 使用 CLI 内置 ptrace syscall supervisor：
+动态与静态 ELF 默认使用 CLI 内置 ptrace syscall supervisor；动态 ELF 的 Gum 是显式优化模式：
 
 1. 子进程 `PTRACE_TRACEME` 后 exec 原始目标；
 2. 父进程在 exec trap 激活 Session；

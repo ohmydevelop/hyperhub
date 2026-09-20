@@ -15,7 +15,7 @@
 1. 构建 release HyperHub CLI 与 Gum Agent；
 2. 根据源码、架构和工具链指纹生成或复用 fixture；
 3. 启动隔离的 HyperHub Serve 与临时配置；
-4. 执行动态 Gum、静态 ptrace、DNS、后代和 sandbox 功能检查；
+4. 执行动态/静态 ptrace 基线、显式动态 Gum、DNS、后代、凭证路由和 sandbox 功能检查；
 5. 交替测量 native/HyperHub 性能；
 6. 生成机器可读结果和 Markdown 报告。
 
@@ -54,7 +54,8 @@ target/benchmarks/linux-fixtures/<architecture>/
 
 | 分组 | Fixture/对象 | 必须验证的行为 |
 | --- | --- | --- |
-| 动态后端 | `linux-dynamic-probe` | 动态 ELF 必须要求 Gum Agent；25 个动态 Hook descriptor 全部安装并命中 |
+| 动态 ptrace 基线 | `linux-dynamic-probe`、`linux_http_credential_probe.py` | 动态 ELF 默认不依赖 Agent；覆盖 fork/exec、spawn，以及 IP-form SOCKS 经 HTTP Host/path 精化路由并注入凭证 |
+| 动态 Gum 优化 | `linux-dynamic-probe` | 显式 `--backend gum` 时 25 个动态 Hook descriptor 全部安装并命中 |
 | 静态后端边界 | 复制到无 Agent 目录的 CLI | 动态 ELF 必须拒绝启动；静态 ELF 必须在无 Agent runtime 时正常进入 ptrace |
 | 静态 C | raw-syscall stripped static ELF | DNS 三种 I/O、TCP、descriptor、文件变体、clone/fork/exec/wait 和完整 manifest |
 | 静态 Go | `CGO_ENABLED=0` stripped binary | runtime 线程、raw syscall、根进程和 exec 后代 TCP |
@@ -96,7 +97,7 @@ target/benchmarks/linux-backends/
 | `results.csv` | 每次 native/HyperHub 计时样本 |
 | `summary.csv` | 各 workload 中位数、增加时间和倍率 |
 | `report.md` | 独立性能表格 |
-| `dynamic-hooks.json` | Gum Interceptor 动态 Hook 覆盖 |
+| `dynamic-hooks.json` | 显式 Gum Interceptor 动态 Hook 覆盖 |
 | `hooks.json` | ptrace 静态 syscall Hook 覆盖 |
 | `suite.json` | 功能、性能和 fixture identity 的统一机器报告 |
 | `suite-report.md` | 一页式人工验收报告 |

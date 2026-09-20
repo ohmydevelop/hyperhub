@@ -122,9 +122,9 @@ Hook 层不解析应用层协议，也不会包装每次 `send()`。
 - 非阻塞 socket 当前在第一次 I/O 前同步完成 SOCKS5 握手，完整异步状态机仍需完善。
 - SSH 终止和完整转录能力仍需继续验收。
 
-## Linux 静态 ELF
+## Linux ELF 后端
 
-Linux 根据 ELF `PT_INTERP` 选择互斥后端：动态 ELF 要求 Frida Core + Gum Agent runtime，使用 Gum Interceptor 做动态符号 Hook；静态 ELF 的标准 Gum 注入不受支持，使用 CLI 内置的 ptrace syscall supervisor。分类发生在 Agent runtime 解析、校验和 Frida Core 初始化之前，所以静态目标即使系统中没有 Agent `.so` 也能启动。静态后端不加载目标 libc、不要求符号表，按 DNS、网络、descriptor、文件、映射和进程意图分派 syscall。
+Linux 默认对动态、静态和 stripped ELF 使用 CLI 内置的 ptrace syscall supervisor，建立不依赖 Agent 注入的可靠性基线。动态 ELF 可通过 `--backend gum` 显式选择 Frida Core + Gum Interceptor 优化；静态 ELF 的标准 Gum 注入不受支持。后端选择发生在 Agent runtime 解析与 Frida Core 初始化之前，因此默认 ptrace 即使系统中没有 Agent `.so` 也能启动。ptrace 后端不加载目标 libc、不要求符号表，按 DNS、网络、descriptor、文件、映射和进程意图分派 syscall；当系统解析器不产生可观测 DNS 报文时，Serve 在 TLS SNI 或 HTTP Host 出现后精化路由。
 
 TCP connect 在 syscall entry 改写为 HyperHub SOCKS listener，并在目标上下文中完成认证与 CONNECT。UDP DNS只观察不重定向；A/AAAA 响应恢复 IP→域名关联。file/process sandbox 在副作用前判定，deny 通过无副作用 syscall 和返回值替换实现。clone/fork/vfork/exec 后代由同一 supervisor 跟踪并登记真实 PID。
 
