@@ -3,8 +3,9 @@ use crate::config_semantics::{
 };
 use hyperhub_core::config::Config;
 use hyperhub_core::config_store::{
-    self, default_config_path, load_approval_state, load_encrypted, read_redacted_json,
-    save_approval_state, KdfDescriptor, StoreError,
+    self, default_config_path, load_approval_state_with_keyring, load_encrypted_with_keyring,
+    read_descriptor, read_redacted_json, save_approval_state_with_keyring,
+    save_encrypted_with_keyring, ConfigKeyring, KdfDescriptor, StoreError,
 };
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
 use hyperhub_core::session::{config_update_proof, ControlRequest, ControlResponse};
@@ -31,8 +32,7 @@ pub(crate) enum Command {
 
 struct ActiveConfig {
     config: Config,
-    descriptor: KdfDescriptor,
-    password: Zeroizing<String>,
+    keyring: ConfigKeyring,
     initialized: bool,
 }
 
@@ -170,7 +170,7 @@ pub(crate) fn save_direct_config(
     config: Config,
 ) -> Result<DirectApplyOutcome, String> {
     config.validate().map_err(|error| error.to_string())?;
-    let mut active = load_active_with_password(path, Zeroizing::new((**password).clone()))?;
+    let mut active = load_active_with_password(path, Zeroizing::new((**password).clone()), None)?;
     let prepared = PreparedPatch {
         config,
         approval_token: String::new(),
@@ -226,13 +226,17 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
     let queue_path = approval_queue_path(&path);
     let password =
         crate::password::acquire(password_file, !path.is_file() && !queue_path.is_file())?;
-    let active = load_active_with_password(&path, password)?;
+    let descriptor_hint = queue_path
+        .is_file()
+        .then(|| read_descriptor(&queue_path).map_err(|error| error.to_string()))
+        .transpose()?;
+    let active = load_active_with_password(&path, password, descriptor_hint)?;
     let mut patch = parse_patch_file(patch_path)?;
     collect_placeholders(&patch)?;
     let patch_digest = value_digest(b"hyperhub/config-patch/v1\0", &patch)?;
 
     if queue_path.is_file() {
-        let (queue, descriptor) = load_queue(&queue_path, active.password.as_bytes())?;
+        let (queue, descriptor) = load_queue(&queue_path, &active.keyring)?;
         ensure_queue_descriptor(&active, &descriptor)?;
         validate_queue(&queue)?;
         if queue.patch_digest != patch_digest {
@@ -306,14 +310,11 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
     }
 
     let password = crate::password::acquire(password_file, false)?;
-    let mut active = load_active_with_password(&path, password)?;
-    let (mut queue, queue_descriptor) = load_queue(&queue_path, active.password.as_bytes())?;
+    let queue_descriptor = read_descriptor(&queue_path).map_err(|error| error.to_string())?;
+    let mut active = load_active_with_password(&path, password, Some(queue_descriptor.clone()))?;
+    let (mut queue, queue_descriptor) = load_queue(&queue_path, &active.keyring)?;
     validate_queue(&queue)?;
-    if active.initialized {
-        ensure_queue_descriptor(&active, &queue_descriptor)?;
-    } else {
-        active.descriptor = queue_descriptor;
-    }
+    ensure_queue_descriptor(&active, &queue_descriptor)?;
     // Persist UUIDs generated while loading queues created by older versions.
     save_queue(&queue_path, &queue, &active)?;
 
@@ -438,13 +439,8 @@ fn persist_prepared(
     active: &mut ActiveConfig,
     prepared: &PreparedPatch,
 ) -> Result<ApplyOutcome, String> {
-    config_store::save_encrypted_with_descriptor(
-        path,
-        &prepared.config,
-        active.password.as_bytes(),
-        &active.descriptor,
-    )
-    .map_err(|error| error.to_string())?;
+    save_encrypted_with_keyring(path, &prepared.config, &active.keyring)
+        .map_err(|error| error.to_string())?;
     let _ = config_store::reconcile_root_certificates(
         path,
         prepared
@@ -454,11 +450,7 @@ fn persist_prepared(
             .map(|certificate| certificate.fingerprint.as_str()),
     );
     let (live_update, live_update_error) = if crate::serve_is_running() {
-        match push_live_update(
-            &prepared.config,
-            active.password.as_bytes(),
-            &active.descriptor,
-        ) {
+        match push_live_update(&prepared.config, &active.keyring) {
             Ok(()) => (true, None),
             Err(error) => (false, Some(error)),
         }
@@ -476,15 +468,23 @@ fn persist_prepared(
 fn load_active_with_password(
     path: &Path,
     password: Zeroizing<String>,
+    descriptor_hint: Option<KdfDescriptor>,
 ) -> Result<ActiveConfig, String> {
     let initialized = path.is_file();
+    let descriptor = if initialized {
+        read_descriptor(path).map_err(|error| error.to_string())?
+    } else {
+        descriptor_hint.unwrap_or_else(config_store::new_descriptor)
+    };
+    let keyring = ConfigKeyring::derive(password.as_bytes(), descriptor)
+        .map_err(|error| error.to_string())?;
+    drop(password);
     if initialized {
         let unlocked =
-            load_encrypted(path, password.as_bytes()).map_err(|error| error.to_string())?;
+            load_encrypted_with_keyring(path, &keyring).map_err(|error| error.to_string())?;
         Ok(ActiveConfig {
             config: unlocked.config,
-            descriptor: unlocked.descriptor,
-            password,
+            keyring,
             initialized,
         })
     } else {
@@ -493,8 +493,7 @@ fn load_active_with_password(
         config.environment = crate::default_environment();
         Ok(ActiveConfig {
             config,
-            descriptor: config_store::new_descriptor(),
-            password,
+            keyring,
             initialized,
         })
     }
@@ -522,8 +521,12 @@ fn approval_queue_path(config_path: &Path) -> PathBuf {
     config_path.with_extension("approval.bin")
 }
 
-fn load_queue(path: &Path, password: &[u8]) -> Result<(ApprovalQueue, KdfDescriptor), String> {
-    let unlocked = load_approval_state(path, password).map_err(|error| error.to_string())?;
+fn load_queue(
+    path: &Path,
+    keyring: &ConfigKeyring,
+) -> Result<(ApprovalQueue, KdfDescriptor), String> {
+    let unlocked =
+        load_approval_state_with_keyring(path, keyring).map_err(|error| error.to_string())?;
     let queue = serde_json::from_slice(&unlocked.bytes)
         .map_err(|error| format!("approval state is invalid: {error}"))?;
     Ok((queue, unlocked.descriptor))
@@ -531,7 +534,7 @@ fn load_queue(path: &Path, password: &[u8]) -> Result<(ApprovalQueue, KdfDescrip
 
 fn save_queue(path: &Path, queue: &ApprovalQueue, active: &ActiveConfig) -> Result<(), String> {
     let bytes = serde_json::to_vec(queue).map_err(|error| error.to_string())?;
-    save_approval_state(path, &bytes, active.password.as_bytes(), &active.descriptor)
+    save_approval_state_with_keyring(path, &bytes, &active.keyring)
         .map_err(|error| error.to_string())
 }
 
@@ -550,7 +553,7 @@ fn ensure_queue_descriptor(
     active: &ActiveConfig,
     descriptor: &KdfDescriptor,
 ) -> Result<(), String> {
-    if active.initialized && &active.descriptor != descriptor {
+    if active.initialized && active.keyring.descriptor() != descriptor {
         Err("approval state belongs to a different configuration generation".into())
     } else {
         Ok(())
@@ -772,12 +775,7 @@ fn recover_in_flight(
     } else if current_digest == in_flight.result_config_digest {
         let serve_running = crate::serve_is_running();
         let live_update_error = if serve_running {
-            push_live_update(
-                &active.config,
-                active.password.as_bytes(),
-                &active.descriptor,
-            )
-            .err()
+            push_live_update(&active.config, &active.keyring).err()
         } else {
             None
         };
@@ -1353,12 +1351,9 @@ fn escape_pointer(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
 
-fn push_live_update(
-    config: &Config,
-    password: &[u8],
-    descriptor: &KdfDescriptor,
-) -> Result<(), String> {
-    let key = config_store::derive_session_auth_key(password, descriptor)
+fn push_live_update(config: &Config, keyring: &ConfigKeyring) -> Result<(), String> {
+    let key = keyring
+        .session_auth_key()
         .map_err(|error| error.to_string())?;
     let config_json = serde_json::to_string(config).map_err(|error| error.to_string())?;
     let proof = config_update_proof(&key, &config_json)?;

@@ -16,6 +16,7 @@ const MAGIC: &[u8; 8] = b"HHCFGBIN";
 const VERSION: u16 = 1;
 const FLAG_ENCRYPTED: u8 = 1;
 const HEADER_LEN: usize = 120;
+const CONFIG_LABEL: &[u8] = b"hyperhub/config-aead/v1";
 const APPROVAL_STATE_LABEL: &[u8] = b"hyperhub/approval-state-aead/v1";
 const DEFAULT_MEMORY_KIB: u32 = 64 * 1024;
 const DEFAULT_ITERATIONS: u32 = 3;
@@ -50,6 +51,36 @@ pub struct KdfDescriptor {
     pub memory_kib: u32,
     pub iterations: u32,
     pub lanes: u32,
+}
+
+/// Password-derived key material for one configuration generation.
+///
+/// Argon2 is intentionally expensive, so interactive workflows derive it once
+/// after password entry and use domain-separated HKDF subkeys for config,
+/// approval-state, certificate, and control operations. The master key is
+/// zeroized when this value is dropped.
+pub struct ConfigKeyring {
+    descriptor: KdfDescriptor,
+    master: Zeroizing<Vec<u8>>,
+}
+
+impl ConfigKeyring {
+    pub fn derive(password: &[u8], descriptor: KdfDescriptor) -> Result<Self, StoreError> {
+        let master = derive_master(password, &descriptor)?;
+        Ok(Self { descriptor, master })
+    }
+
+    pub fn descriptor(&self) -> &KdfDescriptor {
+        &self.descriptor
+    }
+
+    pub fn session_auth_key(&self) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+        self.subkey(b"hyperhub/session-auth/v1")
+    }
+
+    fn subkey(&self, label: &[u8]) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+        derive_subkey(&self.master, &self.descriptor, label)
+    }
 }
 
 #[derive(Clone)]
@@ -122,11 +153,19 @@ pub fn derive_session_auth_key(
     password: &[u8],
     descriptor: &KdfDescriptor,
 ) -> Result<Zeroizing<Vec<u8>>, StoreError> {
-    let master = derive_master(password, descriptor)?;
-    derive_subkey(&master, descriptor, b"hyperhub/session-auth/v1")
+    ConfigKeyring::derive(password, descriptor.clone())?.session_auth_key()
 }
 
 pub fn load_encrypted(path: &Path, password: &[u8]) -> Result<UnlockedConfig, StoreError> {
+    let descriptor = read_descriptor(path)?;
+    let keyring = ConfigKeyring::derive(password, descriptor)?;
+    load_encrypted_with_keyring(path, &keyring)
+}
+
+pub fn load_encrypted_with_keyring(
+    path: &Path,
+    keyring: &ConfigKeyring,
+) -> Result<UnlockedConfig, StoreError> {
     let bytes = read(path)?;
     let header = parse_header(&bytes)?;
     if !header.encrypted {
@@ -134,9 +173,10 @@ pub fn load_encrypted(path: &Path, password: &[u8]) -> Result<UnlockedConfig, St
             "the active configuration must be encrypted".into(),
         ));
     }
-    let plaintext = decrypt_payload(&bytes, password)?;
+    ensure_keyring_descriptor(keyring, &header.descriptor)?;
+    let plaintext = decrypt_payload_with_keyring(&bytes, keyring, CONFIG_LABEL)?;
     let config = parse_toml(&plaintext, path)?;
-    let session_auth_key = derive_session_auth_key(password, &header.descriptor)?;
+    let session_auth_key = keyring.session_auth_key()?;
     Ok(UnlockedConfig {
         config,
         descriptor: header.descriptor,
@@ -153,13 +193,31 @@ pub fn save_approval_state(
     password: &[u8],
     descriptor: &KdfDescriptor,
 ) -> Result<(), StoreError> {
-    let encrypted = encrypt_payload(bytes, password, descriptor, APPROVAL_STATE_LABEL)?;
+    let keyring = ConfigKeyring::derive(password, descriptor.clone())?;
+    save_approval_state_with_keyring(path, bytes, &keyring)
+}
+
+pub fn save_approval_state_with_keyring(
+    path: &Path,
+    bytes: &[u8],
+    keyring: &ConfigKeyring,
+) -> Result<(), StoreError> {
+    let encrypted = encrypt_payload_with_keyring(bytes, keyring, APPROVAL_STATE_LABEL)?;
     atomic_write(path, &encrypted)
 }
 
 pub fn load_approval_state(
     path: &Path,
     password: &[u8],
+) -> Result<UnlockedApprovalState, StoreError> {
+    let descriptor = read_descriptor(path)?;
+    let keyring = ConfigKeyring::derive(password, descriptor)?;
+    load_approval_state_with_keyring(path, &keyring)
+}
+
+pub fn load_approval_state_with_keyring(
+    path: &Path,
+    keyring: &ConfigKeyring,
 ) -> Result<UnlockedApprovalState, StoreError> {
     let bytes = read(path)?;
     let header = parse_header(&bytes)?;
@@ -168,7 +226,8 @@ pub fn load_approval_state(
             "the approval state must be encrypted".into(),
         ));
     }
-    let plaintext = decrypt_payload_with_label(&bytes, password, APPROVAL_STATE_LABEL)?;
+    ensure_keyring_descriptor(keyring, &header.descriptor)?;
+    let plaintext = decrypt_payload_with_keyring(&bytes, keyring, APPROVAL_STATE_LABEL)?;
     Ok(UnlockedApprovalState {
         bytes: plaintext,
         descriptor: header.descriptor,
@@ -200,7 +259,17 @@ pub fn save_encrypted_with_descriptor(
     password: &[u8],
     descriptor: &KdfDescriptor,
 ) -> Result<(), StoreError> {
-    let bytes = encode_encrypted(config, password, descriptor)?;
+    let keyring = ConfigKeyring::derive(password, descriptor.clone())?;
+    save_encrypted_with_keyring(path, config, &keyring)
+}
+
+pub fn save_encrypted_with_keyring(
+    path: &Path,
+    config: &Config,
+    keyring: &ConfigKeyring,
+) -> Result<(), StoreError> {
+    let plaintext = Zeroizing::new(toml::to_string_pretty(config)?.into_bytes());
+    let bytes = encrypt_payload_with_keyring(&plaintext, keyring, CONFIG_LABEL)?;
     atomic_write(path, &bytes)?;
     save_redacted_json(path, config)
 }
@@ -229,7 +298,7 @@ fn encode_encrypted(
     descriptor: &KdfDescriptor,
 ) -> Result<Vec<u8>, StoreError> {
     let plaintext = Zeroizing::new(toml::to_string_pretty(config)?.into_bytes());
-    encrypt_payload(&plaintext, password, descriptor, b"hyperhub/config-aead/v1")
+    encrypt_payload(&plaintext, password, descriptor, CONFIG_LABEL)
 }
 
 fn encrypt_payload(
@@ -238,11 +307,20 @@ fn encrypt_payload(
     descriptor: &KdfDescriptor,
     label: &[u8],
 ) -> Result<Vec<u8>, StoreError> {
-    let key = derive_key(password, descriptor, label)?;
+    let keyring = ConfigKeyring::derive(password, descriptor.clone())?;
+    encrypt_payload_with_keyring(plaintext, &keyring, label)
+}
+
+fn encrypt_payload_with_keyring(
+    plaintext: &[u8],
+    keyring: &ConfigKeyring,
+    label: &[u8],
+) -> Result<Vec<u8>, StoreError> {
+    let key = keyring.subkey(label)?;
     let mut nonce = [0u8; 24];
     rand::fill(&mut nonce);
     let payload_len = plaintext.len() as u64 + 16;
-    let header = build_header(true, descriptor, nonce, payload_len, [0; 32]);
+    let header = build_header(true, keyring.descriptor(), nonce, payload_len, [0; 32]);
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| StoreError::Authentication)?;
     let ciphertext = cipher
         .encrypt(
@@ -334,6 +412,17 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, StoreError> {
     })
 }
 
+fn ensure_keyring_descriptor(
+    keyring: &ConfigKeyring,
+    descriptor: &KdfDescriptor,
+) -> Result<(), StoreError> {
+    if keyring.descriptor() == descriptor {
+        Ok(())
+    } else {
+        Err(StoreError::Authentication)
+    }
+}
+
 fn validate_descriptor(descriptor: &KdfDescriptor) -> Result<(), StoreError> {
     if !(8 * 1024..=1024 * 1024).contains(&descriptor.memory_kib)
         || !(1..=10).contains(&descriptor.iterations)
@@ -378,25 +467,27 @@ fn derive_subkey(
     Ok(output)
 }
 
-fn derive_key(
-    password: &[u8],
-    descriptor: &KdfDescriptor,
-    label: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, StoreError> {
-    let master = derive_master(password, descriptor)?;
-    derive_subkey(&master, descriptor, label)
-}
-
 fn decrypt_payload_with_label(
     bytes: &[u8],
     password: &[u8],
     label: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, StoreError> {
     let header = parse_header(bytes)?;
+    let keyring = ConfigKeyring::derive(password, header.descriptor.clone())?;
+    decrypt_payload_with_keyring(bytes, &keyring, label)
+}
+
+fn decrypt_payload_with_keyring(
+    bytes: &[u8],
+    keyring: &ConfigKeyring,
+    label: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+    let header = parse_header(bytes)?;
     if !header.encrypted {
         return Err(StoreError::Format("payload is not encrypted".into()));
     }
-    let key = derive_key(password, &header.descriptor, label)?;
+    ensure_keyring_descriptor(keyring, &header.descriptor)?;
+    let key = keyring.subkey(label)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| StoreError::Authentication)?;
     cipher
         .decrypt(
@@ -965,6 +1056,42 @@ mod tests {
         fs::remove_file(&config_path).unwrap();
         fs::remove_file(redacted_config_path(&config_path)).unwrap();
         fs::remove_dir_all(root_certificates_dir(&config_path)).ok();
+    }
+
+    #[test]
+    fn cached_keyring_reuses_one_master_for_config_approval_and_session_keys() {
+        let config_path = temp_path("cached-keyring-config");
+        let approval_path = temp_path("cached-keyring-approval");
+        let mut descriptor = new_descriptor();
+        descriptor.memory_kib = 8 * 1024;
+        descriptor.iterations = 1;
+        let keyring = ConfigKeyring::derive(b"cached password", descriptor.clone()).unwrap();
+        let mut config = Config::default();
+        config.debug = true;
+
+        save_encrypted_with_keyring(&config_path, &config, &keyring).unwrap();
+        let unlocked = load_encrypted_with_keyring(&config_path, &keyring).unwrap();
+        assert!(unlocked.config.debug);
+        assert_eq!(unlocked.descriptor, descriptor);
+        assert_eq!(unlocked.session_auth_key.len(), 32);
+
+        let approval = br#"{"cursor":1}"#;
+        save_approval_state_with_keyring(&approval_path, approval, &keyring).unwrap();
+        let unlocked = load_approval_state_with_keyring(&approval_path, &keyring).unwrap();
+        assert_eq!(unlocked.bytes.as_slice(), approval);
+        assert_eq!(keyring.session_auth_key().unwrap().len(), 32);
+
+        let mut other_descriptor = descriptor;
+        other_descriptor.config_id[0] ^= 1;
+        let other = ConfigKeyring::derive(b"cached password", other_descriptor).unwrap();
+        assert!(matches!(
+            load_approval_state_with_keyring(&approval_path, &other),
+            Err(StoreError::Authentication)
+        ));
+
+        fs::remove_file(&config_path).unwrap();
+        fs::remove_file(redacted_config_path(&config_path)).unwrap();
+        fs::remove_file(approval_path).unwrap();
     }
 
     #[test]
