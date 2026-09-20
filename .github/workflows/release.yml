@@ -73,6 +73,8 @@ jobs:
           install -m 0755 "$binary" "$package_dir/hyperhub"
           cp README.md LICENSE third_party/frida-gum/COPYING \
             "$package_dir/"
+          cp third_party/needle/LICENSE "$package_dir/LICENSE-NEEDLE.txt"
+          cp third_party/needle/README.md "$package_dir/NOTICE-NEEDLE.md"
           mv "$package_dir/COPYING" "$package_dir/LICENSE-FRIDA-GUM.txt"
           (cd "$package_dir" && sha256sum * > MANIFEST.sha256)
           tar -czf "$archive" -C dist "$package_name"

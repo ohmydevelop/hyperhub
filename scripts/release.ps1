@@ -64,15 +64,21 @@ try {
   $cli = Join-Path $repoRoot 'target\release\hyperhub.exe'
   $license = Join-Path $repoRoot 'LICENSE'
   $fridaLicense = Join-Path $repoRoot 'third_party\frida-gum\COPYING'
+  $needleLicense = Join-Path $repoRoot 'third_party\needle\LICENSE'
+  $needleNotice = Join-Path $repoRoot 'third_party\needle\README.md'
   Require-File $cli 'HyperHub CLI'
   Require-File $license 'HyperHub license'
   Require-File $fridaLicense 'Frida Gum license'
+  Require-File $needleLicense 'Needle license'
+  Require-File $needleNotice 'Needle notice'
 
   New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
   Copy-Item -LiteralPath $cli -Destination $packageDir
   Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination $packageDir
   Copy-Item -LiteralPath $license -Destination (Join-Path $packageDir 'LICENSE')
   Copy-Item -LiteralPath $fridaLicense -Destination (Join-Path $packageDir 'LICENSE-FRIDA-GUM.txt')
+  Copy-Item -LiteralPath $needleLicense -Destination (Join-Path $packageDir 'LICENSE-NEEDLE.txt')
+  Copy-Item -LiteralPath $needleNotice -Destination (Join-Path $packageDir 'NOTICE-NEEDLE.md')
 
   $runtimeFiles = @(Get-ChildItem -LiteralPath $packageDir -File | Where-Object {
     $_.Extension -in @('.exe', '.dll')
