@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use hyperhub_core::control::control_request;
+use hyperhub_core::control::{control_request, discovery_control_endpoint};
 
 use crate::platform::TargetBackend;
 use hyperhub_core::session::{ControlRequest, ControlResponse};
@@ -16,6 +16,104 @@ use sha2::{Digest, Sha256};
 const ELF_MACHINE_X86_64: u16 = 62;
 const ELF_MACHINE_AARCH64: u16 = 183;
 const ELF_PROGRAM_INTERPRETER: u32 = 3;
+
+pub fn backend_trust_environment(
+    backend: TargetBackend,
+    tls_ca_pem: &str,
+) -> Result<Vec<(OsString, OsString)>, String> {
+    if backend != TargetBackend::PtraceSyscall {
+        return Ok(Vec::new());
+    }
+    if !tls_ca_pem.contains("-----BEGIN CERTIFICATE-----")
+        || tls_ca_pem.contains("PRIVATE KEY-----")
+    {
+        return Err("Serve returned an invalid TLS root certificate".into());
+    }
+    let bundle = build_ptrace_trust_bundle(tls_ca_pem)?;
+    let digest = Sha256::digest(&bundle);
+    let name = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let endpoint = PathBuf::from(discovery_control_endpoint());
+    let directory = endpoint
+        .parent()
+        .ok_or("HyperHub control endpoint has no parent directory")?;
+    std::fs::create_dir_all(directory).map_err(|error| {
+        format!(
+            "cannot create HyperHub runtime directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    let path = directory.join(format!("ptrace-ca-{name}.pem"));
+    let current = std::fs::read(&path).ok();
+    if current.as_deref() != Some(bundle.as_slice()) {
+        let temporary = directory.join(format!(
+            ".ptrace-ca-{name}-{}-{:016x}.tmp",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::write(&temporary, &bundle).map_err(|error| {
+            format!(
+                "cannot write ptrace trust bundle {}: {error}",
+                temporary.display()
+            )
+        })?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("cannot protect ptrace trust bundle: {error}"))?;
+        std::fs::rename(&temporary, &path).map_err(|error| {
+            format!(
+                "cannot install ptrace trust bundle {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    let value = path.into_os_string();
+    Ok([
+        "SSL_CERT_FILE",
+        "CURL_CA_BUNDLE",
+        "REQUESTS_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "AWS_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+    ]
+    .into_iter()
+    .map(|name| (OsString::from(name), value.clone()))
+    .collect())
+}
+
+fn build_ptrace_trust_bundle(tls_ca_pem: &str) -> Result<Vec<u8>, String> {
+    let configured = ["SSL_CERT_FILE", "CURL_CA_BUNDLE"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from);
+    let system = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem",
+    ]
+    .into_iter()
+    .map(PathBuf::from);
+    let mut bundle = configured
+        .chain(system)
+        .find_map(|path| std::fs::read(path).ok())
+        .unwrap_or_default();
+    let root = tls_ca_pem.as_bytes();
+    if !bundle.windows(root.len()).any(|window| window == root) {
+        if !bundle.is_empty() && !bundle.ends_with(b"\n") {
+            bundle.push(b'\n');
+        }
+        bundle.extend_from_slice(root);
+        if !bundle.ends_with(b"\n") {
+            bundle.push(b'\n');
+        }
+    }
+    if bundle.is_empty() {
+        return Err("cannot construct ptrace TLS trust bundle".into());
+    }
+    Ok(bundle)
+}
 
 pub fn validate_target_runtime(target: &Path, runtime: &Path) -> Result<(), String> {
     let target = read_elf(target)?;
@@ -57,24 +155,23 @@ pub fn validate_target_runtime(target: &Path, runtime: &Path) -> Result<(), Stri
     Ok(())
 }
 
-pub fn target_backend(target: &Path) -> Result<TargetBackend, String> {
+pub fn target_backend(target: &Path, requested: Option<&str>) -> Result<TargetBackend, String> {
     let elf = read_elf(target)?;
-    Ok(if elf.has_interpreter {
-        TargetBackend::GumInterceptor
-    } else {
-        TargetBackend::PtraceSyscall
-    })
+    match requested {
+        None | Some("ptrace") => Ok(TargetBackend::PtraceSyscall),
+        Some("gum") if elf.has_interpreter => Ok(TargetBackend::GumInterceptor),
+        Some("gum") => Err(
+            "static ELF does not support standard Frida Gum injection; use --backend ptrace".into(),
+        ),
+        Some(value) => Err(format!("unknown backend '{value}'; use ptrace or gum")),
+    }
 }
 
 pub fn doctor_target(target: &Path) -> Result<String, String> {
     let elf = read_elf(target)?;
-    let backend = if elf.has_interpreter {
-        TargetBackend::GumInterceptor
-    } else {
-        TargetBackend::PtraceSyscall
-    };
+    let backend = TargetBackend::PtraceSyscall;
     Ok(format!(
-        "ELF64 little-endian {} {}; backend={}; agent-runtime={}",
+        "ELF64 little-endian {} {}; default-backend={}; gum={}; agent-runtime={}",
         machine_name(elf.machine),
         if elf.has_interpreter {
             "dynamically linked"
@@ -82,11 +179,12 @@ pub fn doctor_target(target: &Path) -> Result<String, String> {
             "static/no interpreter"
         },
         backend.name(),
-        if backend.requires_agent_runtime() {
-            "required"
+        if elf.has_interpreter {
+            "available"
         } else {
-            "unsupported/not-used"
-        }
+            "unavailable"
+        },
+        "not-used-by-default"
     ))
 }
 
@@ -155,6 +253,7 @@ pub fn run_injected<F>(
     target: &OsString,
     argv0: &OsString,
     args: &[OsString],
+    backend: TargetBackend,
     runtime: Option<&Path>,
     env: &[(OsString, OsString)],
     sandbox: Option<&hyperhub_core::sandbox::SandboxSnapshot>,
@@ -163,7 +262,6 @@ pub fn run_injected<F>(
 where
     F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
 {
-    let backend = target_backend(Path::new(target))?;
     let environment = merged_environment(env);
     if backend == TargetBackend::PtraceSyscall {
         return super::syscall_supervisor::run(
@@ -711,23 +809,41 @@ mod tests {
     }
 
     #[test]
+    fn ptrace_trust_bundle_contains_the_hyperhub_root_once() {
+        let root = "-----BEGIN CERTIFICATE-----\ntest-root\n-----END CERTIFICATE-----\n";
+        let bundle = build_ptrace_trust_bundle(root).unwrap();
+        assert_eq!(
+            bundle
+                .windows(root.len())
+                .filter(|window| *window == root.as_bytes())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn process_state_reads_the_current_process_without_reaping_it() {
         let state = process_state(std::process::id()).unwrap();
         assert!(!matches!(state, 'Z' | 'X'));
     }
 
     #[test]
-    fn backend_selection_keeps_gum_for_dynamic_and_ptrace_for_static() {
+    fn backend_selection_defaults_to_ptrace_and_allows_dynamic_gum() {
         let dynamic = write_test_elf(true);
         let static_target = write_test_elf(false);
         assert_eq!(
-            target_backend(&dynamic).unwrap(),
-            TargetBackend::GumInterceptor
-        );
-        assert_eq!(
-            target_backend(&static_target).unwrap(),
+            target_backend(&dynamic, None).unwrap(),
             TargetBackend::PtraceSyscall
         );
+        assert_eq!(
+            target_backend(&static_target, None).unwrap(),
+            TargetBackend::PtraceSyscall
+        );
+        assert_eq!(
+            target_backend(&dynamic, Some("gum")).unwrap(),
+            TargetBackend::GumInterceptor
+        );
+        assert!(target_backend(&static_target, Some("gum")).is_err());
         let _ = std::fs::remove_file(dynamic);
         let _ = std::fs::remove_file(static_target);
     }

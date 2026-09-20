@@ -1213,6 +1213,7 @@ impl ControlService {
                 agent_flags: AgentFlags {
                     observe: runtime.config.mode == crate::config::EnforcementMode::Observe,
                 },
+                tls_ca_pem: self.tls_ca_pem.as_ref().clone(),
                 environment: runtime.environment.as_ref().clone(),
                 sandbox: Some(sandbox),
             },

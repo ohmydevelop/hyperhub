@@ -1378,6 +1378,7 @@ pub enum ControlResponse {
         expires_at_ms: u64,
         lifecycle: SessionLifecycle,
         agent_flags: AgentFlags,
+        tls_ca_pem: String,
         environment: Vec<SessionEnvironmentVariable>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sandbox: Option<crate::sandbox::SandboxSnapshot>,

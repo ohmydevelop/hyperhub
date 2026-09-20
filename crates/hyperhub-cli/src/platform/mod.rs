@@ -22,6 +22,21 @@ impl TargetBackend {
     }
 }
 
+pub fn backend_trust_environment(
+    backend: TargetBackend,
+    tls_ca_pem: &str,
+) -> Result<Vec<(OsString, OsString)>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::backend_trust_environment(backend, tls_ca_pem);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (backend, tls_ca_pem);
+        Ok(Vec::new())
+    }
+}
+
 pub fn same_executable_path(left: &Path, right: &Path) -> bool {
     left == right
 }
@@ -51,17 +66,21 @@ pub const INJECTOR_NAME: &str = "frida-core+gum/ptrace-syscall";
 pub const INJECTOR_NAME: &str = "unsupported";
 
 #[cfg(windows)]
-pub fn target_backend(_target: &Path) -> Result<TargetBackend, String> {
-    Ok(TargetBackend::GumInterceptor)
+pub fn target_backend(_target: &Path, requested: Option<&str>) -> Result<TargetBackend, String> {
+    match requested {
+        None | Some("gum") => Ok(TargetBackend::GumInterceptor),
+        Some("ptrace") => Err("ptrace backend is only available on Linux".into()),
+        Some(value) => Err(format!("unknown backend '{value}'; use gum")),
+    }
 }
 
 #[cfg(target_os = "linux")]
-pub fn target_backend(target: &Path) -> Result<TargetBackend, String> {
-    linux::target_backend(target)
+pub fn target_backend(target: &Path, requested: Option<&str>) -> Result<TargetBackend, String> {
+    linux::target_backend(target, requested)
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub fn target_backend(_target: &Path) -> Result<TargetBackend, String> {
+pub fn target_backend(_target: &Path, _requested: Option<&str>) -> Result<TargetBackend, String> {
     Err("unsupported platform".into())
 }
 
@@ -98,6 +117,7 @@ pub fn run_injected<F>(
     target: &OsString,
     argv0: &OsString,
     args: &[OsString],
+    backend: TargetBackend,
     runtime: Option<&Path>,
     env: &[(OsString, OsString)],
     sandbox: Option<&hyperhub_core::sandbox::SandboxSnapshot>,
@@ -107,6 +127,9 @@ where
     F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
 {
     let _ = sandbox;
+    if backend != TargetBackend::GumInterceptor {
+        return Err("Windows supports only the Gum backend".into());
+    }
     windows::run_injected(target, argv0, args, runtime, env, activate)
 }
 
@@ -115,6 +138,7 @@ pub fn run_injected<F>(
     target: &OsString,
     argv0: &OsString,
     args: &[OsString],
+    backend: TargetBackend,
     runtime: Option<&Path>,
     env: &[(OsString, OsString)],
     sandbox: Option<&hyperhub_core::sandbox::SandboxSnapshot>,
@@ -123,13 +147,16 @@ pub fn run_injected<F>(
 where
     F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
 {
-    linux::run_injected(target, argv0, args, runtime, env, sandbox, activate)
+    linux::run_injected(
+        target, argv0, args, backend, runtime, env, sandbox, activate,
+    )
 }
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn run_injected<F>(
     _target: &OsString,
     _argv0: &OsString,
     _args: &[OsString],
+    _backend: TargetBackend,
     _runtime: Option<&Path>,
     _env: &[(OsString, OsString)],
     _activate: F,

@@ -31,6 +31,7 @@ mod platform;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunConfig {
     runtime: Option<PathBuf>,
+    backend: Option<String>,
     password_file: Option<PathBuf>,
     dry_run: bool,
     target: OsString,
@@ -454,7 +455,7 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
     let environment_password = password::take_environment();
     let control_endpoint = discovery_control_endpoint();
     let target = resolve_target(&run.target)?;
-    let backend = platform::target_backend(Path::new(&target))?;
+    let backend = platform::target_backend(Path::new(&target), run.backend.as_deref())?;
     if !backend.requires_agent_runtime() && run.runtime.is_some() {
         eprintln!(
             "hyperhub: warning: {} does not use an Agent runtime; ignoring --runtime",
@@ -508,6 +509,7 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
         socks_address,
         token,
         agent_flags,
+        tls_ca_pem,
         environment,
         sandbox,
         ..
@@ -570,6 +572,7 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
         ));
         return Ok(0);
     }
+    env.extend(platform::backend_trust_environment(backend, &tls_ca_pem)?);
     let executable = target.to_string_lossy().into_owned();
     // 密码提示在 Windows Terminal/ConPTY 下可能遗留残缺控制台模式；
     // 在创建子进程前用提示前保存的模式强制恢复，确保目标继承正常输入状态。
@@ -581,6 +584,7 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
         &target,
         &run.target,
         &run.target_args,
+        backend,
         agent_runtime.as_ref().map(|runtime| runtime.load_path()),
         &env,
         sandbox.as_ref(),
@@ -915,12 +919,13 @@ fn parse_single_password_file(command: &str, args: &[OsString]) -> Result<Option
 
 fn parse_run(args: &[OsString]) -> Result<RunConfig, String> {
     let mut runtime = None;
+    let mut backend = None;
     let mut password_file = None;
     let mut dry_run = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].to_string_lossy().as_ref() {
-            "--runtime" | "--password-file" => {
+            "--runtime" | "--backend" | "--password-file" => {
                 let option = args[index].to_string_lossy();
                 index += 1;
                 let value = args
@@ -932,6 +937,14 @@ fn parse_run(args: &[OsString]) -> Result<RunConfig, String> {
                         return Err("--runtime is disabled in this release build".into());
                     }
                     runtime = Some(value.into());
+                } else if option == "--backend" {
+                    let value = value
+                        .into_string()
+                        .map_err(|_| "--backend must be UTF-8".to_string())?;
+                    if !matches!(value.as_str(), "ptrace" | "gum") {
+                        return Err("--backend must be ptrace or gum".into());
+                    }
+                    backend = Some(value);
                 } else {
                     password_file = Some(value.into());
                 }
@@ -956,6 +969,7 @@ fn parse_run(args: &[OsString]) -> Result<RunConfig, String> {
     }
     Ok(RunConfig {
         runtime,
+        backend,
         password_file,
         dry_run,
         target: args[index].clone(),
@@ -1156,7 +1170,7 @@ server management:
   hyperhub serve [--debug] [--output file] [--password-file file]
 
 target execution:
-  hyperhub run [--password-file file] [--dry-run] [--] target [args...]
+  hyperhub run [--backend ptrace|gum] [--password-file file] [--dry-run] [--] target [args...]
 
 diagnostics:
   hyperhub doctor [--target exe]"
@@ -1356,8 +1370,17 @@ mod tests {
         else {
             panic!()
         };
+        assert_eq!(run.backend, None);
         assert_eq!(run.target, os("curl"));
         assert_eq!(run.target_args, vec![os("https://baidu.com")]);
+
+        let Command::Run(run) =
+            parse_args(vec![os("run"), os("--backend"), os("gum"), os("curl")]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(run.backend.as_deref(), Some("gum"));
+        assert!(parse_args(vec![os("run"), os("--backend"), os("invalid"), os("curl")]).is_err());
     }
 
     #[cfg(target_os = "linux")]

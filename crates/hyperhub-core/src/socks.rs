@@ -780,6 +780,101 @@ impl SocksService {
                 context.destination.hostnames.push(host.clone());
             }
         }
+        if inspection.protocol != Protocol::Unknown {
+            context.protocol = inspection.protocol;
+        }
+        // IP-form SOCKS requests (the ptrace baseline) may only reveal the hostname in
+        // the first TLS/HTTP bytes. Re-run connection policy before those bytes are
+        // consumed so host routes can enable MITM, credentials, deny, rewrites, or an
+        // upstream without depending on libc-level DNS hooks.
+        let refined = policy.decide(&context);
+        if refined.rule_id != decision.rule_id {
+            if refined.deny {
+                active.update(
+                    &refined.destination,
+                    context.protocol,
+                    refined.rule_id.as_deref(),
+                    "deny",
+                    refined.upstream.as_deref(),
+                    None,
+                    "protocol-refined-denied",
+                );
+                self.audit.connection(
+                    "authorize",
+                    &context,
+                    refined.rule_id.as_deref(),
+                    "deny",
+                    "denied",
+                    None,
+                    None,
+                    inspection.detail.clone(),
+                );
+                return Ok(());
+            }
+            let reconnect = refined.upstream != decision.upstream
+                || refined.destination.ip != context.destination.ip
+                || refined.destination.port != context.destination.port
+                || refined.destination.hostnames != context.destination.hostnames;
+            if reconnect {
+                let connected = match self
+                    .connect_for(
+                        &config,
+                        &session.session_id,
+                        &refined.destination,
+                        refined.upstream.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(connected) => connected,
+                    Err(error) if config.mode == EnforcementMode::Observe => {
+                        self.audit.connection(
+                            "fail_open",
+                            &context,
+                            refined.rule_id.as_deref(),
+                            action_name(refined.deny, refined.upstream.is_some()),
+                            "direct_fallback",
+                            None,
+                            Some(started.elapsed().as_millis()),
+                            Some(json!({"message": error.to_string(), "stage": "protocol_refine"})),
+                        );
+                        ConnectedUpstream {
+                            stream: connect_direct(refined.destination.clone()).await?,
+                            transport: UpstreamTransport::Direct,
+                            associated_client_proxy: None,
+                        }
+                    }
+                    Err(error) => {
+                        self.audit.connection(
+                            "connect",
+                            &context,
+                            refined.rule_id.as_deref(),
+                            action_name(refined.deny, refined.upstream.is_some()),
+                            "failed",
+                            None,
+                            Some(started.elapsed().as_millis()),
+                            Some(json!({"message": error.to_string(), "stage": "protocol_refine"})),
+                        );
+                        return Err(error);
+                    }
+                };
+                upstream = connected.stream;
+                upstream_transport = connected.transport;
+                associated_client_proxy = connected.associated_client_proxy;
+                upstream_replaced = true;
+            }
+            decision = refined;
+            active.update(
+                &decision.destination,
+                context.protocol,
+                decision.rule_id.as_deref(),
+                action_name(decision.deny, decision.upstream.is_some()),
+                decision.upstream.as_deref(),
+                None,
+                "protocol-refined",
+            );
+        } else {
+            decision = refined;
+        }
         // 统一入站分类：客户端对原对端说了什么协议，serve 对原对端就说什么协议。
         // 外层代理协议（HTTP CONNECT、SOCKS5、absolute-form）在此保留，MITM 只替换最内层。
         let ingress = classify_ingress(&peek[..count], context.destination.port);
@@ -1339,6 +1434,123 @@ mod tests {
         assert_eq!(reply, [5, 0xff]);
         task.await.unwrap();
         let _ = ListenerConfig::default();
+    }
+
+    #[tokio::test]
+    async fn ip_form_socks_refines_http_route_and_injects_credential() {
+        use crate::config::{
+            HttpAuthScheme, PluginConfig, PluginKind, PluginProtocol, RouteEndpoint, RouteRule,
+            SecretValue,
+        };
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let origin_task = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer injected-token\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        let registry = SessionRegistry::default();
+        let challenge = registry
+            .begin_auth("session-http".into(), "fixture".into(), [2; 32])
+            .unwrap();
+        let proof = crate::session::session_proof(&[0; 32], &challenge).unwrap();
+        let record = registry
+            .finish_auth(
+                &challenge.challenge_id,
+                &proof,
+                std::time::Duration::from_secs(30),
+            )
+            .unwrap();
+        assert!(registry.activate("session-http", &record.token, 1));
+
+        let mut config = Config::default();
+        config.plugins.push(PluginConfig {
+            uuid: crate::config::new_config_uuid(),
+            id: "credential".into(),
+            kind: PluginKind::Credential,
+            protocols: vec![PluginProtocol::Http],
+            http_scheme: Some(HttpAuthScheme::Bearer),
+            secret: Some(SecretValue::Inline {
+                value: "injected-token".into(),
+            }),
+            ..PluginConfig::default()
+        });
+        config.rules.push(RouteRule {
+            uuid: crate::config::new_config_uuid(),
+            id: "http-route".into(),
+            enabled: true,
+            priority: 100,
+            endpoints: vec![RouteEndpoint {
+                target: "http://localhost/probe".into(),
+                port: Some(origin_address.port()),
+            }],
+            deny: false,
+            rewrite_host: None,
+            rewrite_port: None,
+            upstream: None,
+            plugins: vec!["credential".into()],
+            legacy: Default::default(),
+        });
+        config.validate().unwrap();
+        let service =
+            SocksService::with_environment(Arc::new(config), registry, EnvironmentProxy::default())
+                .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            service.handle(stream).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        let mut method = [0u8; 2];
+        client.read_exact(&mut method).await.unwrap();
+        assert_eq!(method, [5, 2]);
+        let username = b"hh2:session-http:1:42";
+        let mut auth = vec![1, username.len() as u8];
+        auth.extend(username);
+        auth.push(record.token.len() as u8);
+        auth.extend(record.token.as_bytes());
+        client.write_all(&auth).await.unwrap();
+        let mut auth_reply = [0u8; 2];
+        client.read_exact(&mut auth_reply).await.unwrap();
+        assert_eq!(auth_reply, [1, 0]);
+        let mut connect = vec![5, 1, 0, 1, 127, 0, 0, 1];
+        connect.extend(origin_address.port().to_be_bytes());
+        client.write_all(&connect).await.unwrap();
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], 0);
+        client
+            .write_all(
+                format!(
+                    "GET /probe HTTP/1.1\r\nHost: localhost:{}\r\nAuthorization: Bearer placeholder\r\nConnection: close\r\n\r\n",
+                    origin_address.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 200"));
+        origin_task.await.unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]
