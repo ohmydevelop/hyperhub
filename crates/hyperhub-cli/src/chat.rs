@@ -1133,22 +1133,29 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
             Ok(format!("已删除凭证 {id}"))
         }
         "set_route" | "set_authenticated_route" => {
-            let mut id = normalize_identifier(required_arg(args, "route_id")?, query, "路由");
-            let mut target = required_arg(args, "target")?.to_owned();
-            if let Some(candidate) = route_target_from_query(query) {
-                target = candidate;
-            }
+            let mut id = identifier_after(query, "路由")
+                .or_else(|| {
+                    optional_arg(args, "route_id")
+                        .map(|value| normalize_identifier(value, query, "路由"))
+                })
+                .ok_or("工具参数缺少 route_id")?;
+            let target = route_target_from_query(query)
+                .or_else(|| optional_arg(args, "target").map(str::to_owned))
+                .ok_or("工具参数缺少 target")?;
             if id == target || !query.contains(&id) {
                 if let Some(candidate) = identifier_after(query, "路由") {
                     id = candidate;
                 }
             }
             let credential = if call.name == "set_authenticated_route" {
-                Some(normalize_identifier(
-                    required_arg(args, "credential_id")?,
-                    query,
-                    "凭证",
-                ))
+                Some(
+                    identifier_after(query, "凭证")
+                        .or_else(|| {
+                            optional_arg(args, "credential_id")
+                                .map(|value| normalize_identifier(value, query, "凭证"))
+                        })
+                        .ok_or("工具参数缺少 credential_id")?,
+                )
             } else {
                 None
             };
