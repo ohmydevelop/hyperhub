@@ -205,12 +205,12 @@ planned = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 uuids = [request["uuid"] for request in planned["requests"]]
 assert len(set(uuids)) == 3
-assert all(f'"uuid": "{uuid}"' in text for uuid in uuids)
-assert '"action": "修改"' in text
-assert text.count('"action": "新增"') == 2
-assert '"section": "网关 / 基础"' in text
-assert '"section": "环境变量"' in text
-assert '"section": "网关 / 路由"' in text
+assert all(uuid in text for uuid in uuids)
+assert "操作          修改" in text
+assert text.count("操作          新增") == 2
+assert "位置          网关 / 基础" in text
+assert "位置          环境变量" in text
+assert "位置          网关 / 路由" in text
 PY
 [[ -f $queue ]] || { echo 'interruption removed the pending approval queue' >&2; exit 1; }
 
@@ -232,7 +232,7 @@ drive_approve resume "$resume_transcript" unused "$review_editor"
 grep -q '\[3/3\] 配置审批项' "$resume_transcript"
 ! grep -q '\[1/3\] 配置审批项' "$resume_transcript"
 ! grep -q '\[2/3\] 配置审批项' "$resume_transcript"
-grep -q '"edited": true' "$resume_transcript"
+grep -q '（已二次编辑）' "$resume_transcript"
 grep -q '"status": "completed"' "$resume_transcript"
 python3 - "$plan" "$resume_transcript" <<'PY'
 import json
@@ -241,8 +241,8 @@ import sys
 planned = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 uuids = [request["uuid"] for request in planned["requests"]]
-assert f'"uuid": "{uuids[-1]}"' in text
-assert all(f'"uuid": "{uuid}"' not in text for uuid in uuids[:-1])
+assert uuids[-1] in text
+assert all(uuid not in text for uuid in uuids[:-1])
 PY
 [[ ! -e $queue ]] || { echo 'completed approval queue was not removed' >&2; exit 1; }
 
