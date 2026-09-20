@@ -81,6 +81,12 @@ struct ApplyOutcome {
     live_update_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectApplyOutcome {
+    pub(crate) live_update: bool,
+    pub(crate) live_update_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApprovalDecision {
     Approve,
@@ -155,6 +161,25 @@ pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
     Ok(Command::Approve {
         password_file,
         editor,
+    })
+}
+
+pub(crate) fn save_direct_config(
+    path: &Path,
+    password: &Zeroizing<String>,
+    config: Config,
+) -> Result<DirectApplyOutcome, String> {
+    config.validate().map_err(|error| error.to_string())?;
+    let mut active = load_active_with_password(path, Zeroizing::new((**password).clone()))?;
+    let prepared = PreparedPatch {
+        config,
+        approval_token: String::new(),
+        changes: Vec::new(),
+    };
+    let outcome = persist_prepared(path, &mut active, &prepared)?;
+    Ok(DirectApplyOutcome {
+        live_update: outcome.live_update,
+        live_update_error: outcome.live_update_error,
     })
 }
 

@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 compile_error!("embedded-agent and external-runtime are mutually exclusive");
 
 mod agent_runtime;
+mod chat;
 mod clipboard;
 mod config_cli;
 mod config_semantics;
@@ -108,6 +109,7 @@ enum Command {
     Status { json: bool },
     Logs(lifecycle::LogsConfig),
     AuthClear,
+    Chat(chat::ChatConfig),
     ConfigCli(config_cli::Command),
     Validate(Option<PathBuf>),
     Doctor(Option<PathBuf>),
@@ -164,6 +166,7 @@ fn execute(command: Command) -> Result<i32, String> {
         Command::Status { json } => lifecycle::status(json),
         Command::Logs(config) => lifecycle::logs(config),
         Command::AuthClear => clear_password_authorization(),
+        Command::Chat(config) => chat::run(config),
         Command::ConfigCli(command) => config_cli::run(command),
         Command::Run(run) => run_target(run),
     }
@@ -668,6 +671,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         "logs" => parse_logs(&args[1..]).map(Command::Logs),
         "auth" => parse_auth(&args[1..]),
         "config" => parse_config_command(&args[1..]),
+        "chat" => chat::parse(&args[1..]).map(Command::Chat),
         "show" => config_cli::parse_show(&args[1..]).map(Command::ConfigCli),
         "approve" => config_cli::parse_approve(&args[1..]).map(Command::ConfigCli),
         "import" => parse_import(&args[1..]).map(Command::Serve),
@@ -1133,6 +1137,7 @@ usage:
   hyperhub <command> [options]
 
 configuration:
+  hyperhub chat [--password-file file]
   hyperhub config [--password-file file]
   hyperhub show
   hyperhub config patch <json-patch|-> [--password-file file]
@@ -1182,6 +1187,7 @@ mod tests {
         let diagnostics = help.find("diagnostics:").unwrap();
         assert!(configuration < server && server < execution && execution < diagnostics);
         for command in [
+            "chat",
             "config",
             "show",
             "config patch",
@@ -1252,6 +1258,13 @@ mod tests {
                 follow: true,
             }
         );
+
+        let Command::Chat(chat) =
+            parse_args(vec![os("chat"), os("--password-file"), os("password.txt")]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(chat.password_file, Some("password.txt".into()));
 
         let Command::Serve(configure) = parse_args(vec![
             os("config"),

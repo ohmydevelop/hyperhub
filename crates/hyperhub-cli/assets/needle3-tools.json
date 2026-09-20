@@ -1,0 +1,721 @@
+[
+  {
+    "name": "set_environment_variable",
+    "description": "Create or update one environment variable. The name is the identifier after environment variable or 环境变量; the value is exact and may be secret.",
+    "triggers": [
+      "set environment variable",
+      "add environment variable",
+      "添加环境变量",
+      "设置环境变量"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Exact variable name, for example API_KEY"
+        },
+        "value": {
+          "type": "string",
+          "description": "Exact value, including secrets"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    }
+  },
+  {
+    "name": "delete_environment_variable",
+    "description": "Delete one environment variable by its exact name.",
+    "triggers": [
+      "delete environment variable",
+      "remove env",
+      "删除环境变量"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Exact variable name"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "set_bearer_credential",
+    "description": "Create or update one HTTP Bearer token credential. credential_id is the identifier after credential or 凭证, not the word credential itself.",
+    "triggers": [
+      "bearer credential",
+      "bearer token",
+      "Bearer 凭证",
+      "令牌凭证"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "credential_id": {
+          "type": "string",
+          "description": "Credential identifier, for example devboard-api-bearer"
+        },
+        "token": {
+          "type": "string",
+          "description": "Exact Bearer token"
+        }
+      },
+      "required": [
+        "credential_id",
+        "token"
+      ]
+    }
+  },
+  {
+    "name": "set_basic_credential",
+    "description": "Create or update one HTTP Basic authentication credential.",
+    "triggers": [
+      "basic credential",
+      "basic auth",
+      "Basic 凭证"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "credential_id": {
+          "type": "string",
+          "description": "Credential identifier"
+        },
+        "username": {
+          "type": "string",
+          "description": "Exact username"
+        },
+        "password": {
+          "type": "string",
+          "description": "Exact password"
+        }
+      },
+      "required": [
+        "credential_id",
+        "username",
+        "password"
+      ]
+    }
+  },
+  {
+    "name": "set_header_credential",
+    "description": "Create or update one HTTP custom header credential, such as Authorization or X-API-Key.",
+    "triggers": [
+      "header credential",
+      "custom header",
+      "请求头凭证",
+      "Header 凭证"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "credential_id": {
+          "type": "string",
+          "description": "Credential identifier"
+        },
+        "header_name": {
+          "type": "string",
+          "description": "Exact HTTP header name"
+        },
+        "header_value": {
+          "type": "string",
+          "description": "Exact HTTP header value"
+        }
+      },
+      "required": [
+        "credential_id",
+        "header_name",
+        "header_value"
+      ]
+    }
+  },
+  {
+    "name": "delete_credential",
+    "description": "Delete one credential by identifier.",
+    "triggers": [
+      "delete credential",
+      "remove credential",
+      "删除凭证"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "credential_id": {
+          "type": "string",
+          "description": "Credential identifier"
+        }
+      },
+      "required": [
+        "credential_id"
+      ]
+    }
+  },
+  {
+    "name": "set_route",
+    "description": "Create or update an unauthenticated route matching a URL, hostname, IP or CIDR target.",
+    "triggers": [
+      "add route",
+      "set route",
+      "添加路由",
+      "设置路由"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "route_id": {
+          "type": "string",
+          "description": "Route identifier after route or 路由"
+        },
+        "target": {
+          "type": "string",
+          "description": "URL, hostname, IP or CIDR target"
+        }
+      },
+      "required": [
+        "route_id",
+        "target"
+      ]
+    }
+  },
+  {
+    "name": "set_authenticated_route",
+    "description": "Create or update a route and attach an existing credential. Use this whenever the user names a credential for a route.",
+    "triggers": [
+      "route with credential",
+      "authenticated route",
+      "认证路由",
+      "使用凭证的路由",
+      "带凭证路由"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "route_id": {
+          "type": "string",
+          "description": "Route identifier after route or 路由"
+        },
+        "target": {
+          "type": "string",
+          "description": "URL, hostname, IP or CIDR target"
+        },
+        "credential_id": {
+          "type": "string",
+          "description": "Existing credential identifier after credential or 凭证"
+        }
+      },
+      "required": [
+        "route_id",
+        "target",
+        "credential_id"
+      ]
+    }
+  },
+  {
+    "name": "delete_route",
+    "description": "Delete one route by identifier.",
+    "triggers": [
+      "delete route",
+      "remove route",
+      "删除路由"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "route_id": {
+          "type": "string",
+          "description": "Route identifier"
+        }
+      },
+      "required": [
+        "route_id"
+      ]
+    }
+  },
+  {
+    "name": "set_default_route",
+    "description": "Set the built-in fallback route behavior.",
+    "triggers": [
+      "default route",
+      "fallback route",
+      "默认路由"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the default route is enabled"
+        },
+        "deny": {
+          "type": "boolean",
+          "description": "Deny unmatched traffic when true, pass when false"
+        }
+      },
+      "required": [
+        "enabled",
+        "deny"
+      ]
+    }
+  },
+  {
+    "name": "set_runtime_mode",
+    "description": "Set HyperHub enforcement mode and debug logging.",
+    "triggers": [
+      "enforce mode",
+      "observe mode",
+      "debug mode",
+      "执行模式",
+      "观察模式"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Mode",
+          "enum": [
+            "enforce",
+            "observe"
+          ]
+        },
+        "debug": {
+          "type": "boolean",
+          "description": "Enable debug event logging"
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    }
+  },
+  {
+    "name": "set_listener",
+    "description": "Set local SOCKS listener address or pending session lifetime.",
+    "triggers": [
+      "listener",
+      "socks listen",
+      "监听地址",
+      "会话超时"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "socks_listen": {
+          "type": "string",
+          "description": "host:port, for example 127.0.0.1:18444"
+        },
+        "pending_session_ttl_secs": {
+          "type": "integer",
+          "description": "Pending session lifetime in seconds"
+        }
+      }
+    }
+  },
+  {
+    "name": "set_audit_policy",
+    "description": "Set connection audit retention and allowed HTTP headers.",
+    "triggers": [
+      "audit policy",
+      "audit retention",
+      "审计保留",
+      "审计请求头"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "retention_days": {
+          "type": "integer",
+          "description": "Number of retention days"
+        },
+        "connections": {
+          "type": "boolean",
+          "description": "Record connection audit events"
+        },
+        "header_allowlist": {
+          "type": "string",
+          "description": "Comma-separated HTTP header names"
+        }
+      }
+    }
+  },
+  {
+    "name": "set_upstream_proxy",
+    "description": "Create or update an upstream SOCKS5 or HTTP CONNECT proxy.",
+    "triggers": [
+      "upstream proxy",
+      "socks5 proxy",
+      "http connect proxy",
+      "上游代理"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "upstream_id": {
+          "type": "string",
+          "description": "Upstream identifier"
+        },
+        "proxy_type": {
+          "type": "string",
+          "description": "Proxy type",
+          "enum": [
+            "socks5",
+            "http_connect"
+          ]
+        },
+        "address": {
+          "type": "string",
+          "description": "Proxy host:port"
+        },
+        "username": {
+          "type": "string",
+          "description": "Optional proxy username"
+        },
+        "password": {
+          "type": "string",
+          "description": "Optional proxy password"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "description": "Connect timeout milliseconds"
+        }
+      },
+      "required": [
+        "upstream_id",
+        "proxy_type",
+        "address"
+      ]
+    }
+  },
+  {
+    "name": "set_firewall_policy",
+    "description": "Enable or disable network firewall and set default/error actions.",
+    "triggers": [
+      "firewall policy",
+      "network policy",
+      "防火墙策略",
+      "网络策略"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether firewall enforcement is enabled"
+        },
+        "default_action": {
+          "type": "string",
+          "description": "Default action",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        },
+        "error_action": {
+          "type": "string",
+          "description": "Action on evaluation error",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "default_action",
+        "error_action"
+      ]
+    }
+  },
+  {
+    "name": "set_firewall_rule",
+    "description": "Create or update one network firewall rule for a target and optional port.",
+    "triggers": [
+      "firewall rule",
+      "network rule",
+      "防火墙规则",
+      "网络规则"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "description": "Rule identifier"
+        },
+        "target": {
+          "type": "string",
+          "description": "Hostname, URL, IP or CIDR"
+        },
+        "port": {
+          "type": "integer",
+          "description": "Optional destination port"
+        },
+        "action": {
+          "type": "string",
+          "description": "Rule action",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Higher priority runs first"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether rule is enabled"
+        }
+      },
+      "required": [
+        "rule_id",
+        "target",
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "delete_firewall_rule",
+    "description": "Delete one network firewall rule by identifier.",
+    "triggers": [
+      "delete firewall rule",
+      "删除防火墙规则",
+      "删除网络规则"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "description": "Rule identifier"
+        }
+      },
+      "required": [
+        "rule_id"
+      ]
+    }
+  },
+  {
+    "name": "set_file_sandbox_policy",
+    "description": "Enable or disable file sandbox and set default/error actions.",
+    "triggers": [
+      "file sandbox",
+      "file policy",
+      "文件沙盒",
+      "文件策略"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether sandbox enforcement is enabled"
+        },
+        "default_action": {
+          "type": "string",
+          "description": "Default action",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        },
+        "error_action": {
+          "type": "string",
+          "description": "Action on evaluation error",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "default_action",
+        "error_action"
+      ]
+    }
+  },
+  {
+    "name": "set_file_rule",
+    "description": "Create or update a file sandbox rule. pattern is a Rust regular expression. operations is comma-separated read,write,create,delete,rename.",
+    "triggers": [
+      "file rule",
+      "文件规则"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "description": "Rule identifier"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Rust regex matching paths"
+        },
+        "operations": {
+          "type": "string",
+          "description": "Comma-separated operations"
+        },
+        "action": {
+          "type": "string",
+          "description": "Rule action",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Higher priority runs first"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether rule is enabled"
+        }
+      },
+      "required": [
+        "rule_id",
+        "pattern",
+        "operations",
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "delete_file_rule",
+    "description": "Delete one file sandbox rule by identifier.",
+    "triggers": [
+      "delete file rule",
+      "删除文件规则"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "description": "Rule identifier"
+        }
+      },
+      "required": [
+        "rule_id"
+      ]
+    }
+  },
+  {
+    "name": "set_process_sandbox_policy",
+    "description": "Enable or disable child-process sandbox and set default/error actions.",
+    "triggers": [
+      "process sandbox",
+      "child process policy",
+      "进程沙盒",
+      "子进程策略"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether sandbox enforcement is enabled"
+        },
+        "default_action": {
+          "type": "string",
+          "description": "Default action",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        },
+        "error_action": {
+          "type": "string",
+          "description": "Action on evaluation error",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "default_action",
+        "error_action"
+      ]
+    }
+  },
+  {
+    "name": "set_process_rule",
+    "description": "Create or update a child-process sandbox rule using executable and command-line Rust regex patterns.",
+    "triggers": [
+      "process rule",
+      "child process rule",
+      "进程规则",
+      "子进程规则"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "description": "Rule identifier"
+        },
+        "executable": {
+          "type": "string",
+          "description": "Executable path Rust regex; empty means any"
+        },
+        "command_line": {
+          "type": "string",
+          "description": "Command-line Rust regex; empty means any"
+        },
+        "action": {
+          "type": "string",
+          "description": "Rule action",
+          "enum": [
+            "pass",
+            "deny"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Higher priority runs first"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether rule is enabled"
+        }
+      },
+      "required": [
+        "rule_id",
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "delete_process_rule",
+    "description": "Delete one child-process sandbox rule by identifier.",
+    "triggers": [
+      "delete process rule",
+      "删除进程规则",
+      "删除子进程规则"
+    ],
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "description": "Rule identifier"
+        }
+      },
+      "required": [
+        "rule_id"
+      ]
+    }
+  }
+]

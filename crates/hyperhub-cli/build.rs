@@ -2,10 +2,16 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 const FRIDA_VERSION: &str = "17.17.0";
+const NEEDLE3_REVISION: &str = "c1fc4d4cb32993156a880ceb8ff171b03b1f166a";
+const NEEDLE3_MODEL_SHA256: &str =
+    "c9d915eca282ed42d1a09b143b592adb4cc6744ffe2d294adf5cfc5548170c38";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=HYPERHUB_FRIDA_CORE_ROOT");
     println!("cargo:rerun-if-env-changed=HYPERHUB_EMBEDDED_AGENT_PATH");
+    println!("cargo:rerun-if-env-changed=HYPERHUB_NEEDLE3_MODEL");
+    println!("cargo:rerun-if-env-changed=HYPERHUB_NEEDLE3_RUNNER");
+    prepare_needle3();
     prepare_embedded_agent();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
@@ -52,6 +58,130 @@ fn main() {
     }
 
     println!("cargo:rustc-link-search=native={}", root.display());
+}
+
+fn prepare_needle3() {
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is required"));
+    let manifest = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is required"),
+    );
+    let cache = manifest.join("../..").join(".cache").join("needle3");
+    std::fs::create_dir_all(&cache).unwrap_or_else(|error| {
+        panic!("cannot create Needle 3 cache {}: {error}", cache.display())
+    });
+
+    let model = std::env::var_os("HYPERHUB_NEEDLE3_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join("needle3.cact"));
+    ensure_download(
+        &model,
+        &format!(
+            "https://huggingface.co/Cactus-Compute/needle3/resolve/{NEEDLE3_REVISION}/needle3.cact"
+        ),
+        NEEDLE3_MODEL_SHA256,
+        "Needle 3 model",
+    );
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let (remote, name, digest) = match (target_os.as_str(), target_arch.as_str()) {
+        ("linux", "x86_64") => (
+            "linux-x86_64/needle",
+            "needle",
+            "84994c65f1992c037a696370c567547e769dad168350bf9e0bdb3630a9bb1c28",
+        ),
+        ("linux", "aarch64") => (
+            "linux-arm64/needle",
+            "needle",
+            "e882ec2e60426cd6a77d1612c081d3f9e91dec12c9740f174de6a1c9dacbddb1",
+        ),
+        ("windows", "x86_64") => (
+            "windows-x86_64/needle.exe",
+            "needle.exe",
+            "6a2965401432722fda2479e2faae0accbb2cdd965e344009df690e780986196d",
+        ),
+        ("macos", "aarch64") => (
+            "macos-arm64/needle",
+            "needle",
+            "de023d7fa1bd9553ba5598d2208ed0e4b8960a2e5277f6b70678accd05d29560",
+        ),
+        _ => panic!(
+            "Needle 3 has no embedded runner for target {target_os}-{target_arch}; supported targets are Linux x86_64/aarch64, Windows x86_64, and macOS aarch64"
+        ),
+    };
+    let runner = std::env::var_os("HYPERHUB_NEEDLE3_RUNNER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache.join(target_os).join(target_arch).join(name));
+    ensure_download(
+        &runner,
+        &format!(
+            "https://huggingface.co/Cactus-Compute/needle3/resolve/{NEEDLE3_REVISION}/{remote}"
+        ),
+        digest,
+        "Needle 3 runner",
+    );
+
+    let model_destination = output.join("needle3.cact");
+    let runner_destination = output.join("needle3-runner.bin");
+    std::fs::copy(&model, &model_destination)
+        .unwrap_or_else(|error| panic!("cannot embed Needle 3 model {}: {error}", model.display()));
+    std::fs::copy(&runner, &runner_destination).unwrap_or_else(|error| {
+        panic!("cannot embed Needle 3 runner {}: {error}", runner.display())
+    });
+    println!("cargo:rerun-if-changed={}", model.display());
+    println!("cargo:rerun-if-changed={}", runner.display());
+}
+
+fn ensure_download(path: &std::path::Path, url: &str, expected: &str, label: &str) {
+    if file_sha256(path).as_deref() == Some(expected) {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap_or_else(|error| {
+            panic!(
+                "cannot create {} cache {}: {error}",
+                label,
+                parent.display()
+            )
+        });
+    }
+    let temporary = path.with_extension(format!("download-{}", std::process::id()));
+    let status = std::process::Command::new("curl")
+        .args(["-fL", "--retry", "3", "--output"])
+        .arg(&temporary)
+        .arg(url)
+        .status()
+        .unwrap_or_else(|error| panic!("cannot launch curl to download {label}: {error}"));
+    if !status.success() {
+        panic!("cannot download {label} from {url}: curl exited with {status}");
+    }
+    let actual = file_sha256(&temporary)
+        .unwrap_or_else(|| panic!("cannot hash downloaded {label} {}", temporary.display()));
+    if actual != expected {
+        let _ = std::fs::remove_file(&temporary);
+        panic!("{label} checksum mismatch: expected {expected}, got {actual}");
+    }
+    if path.exists() {
+        std::fs::remove_file(path).unwrap_or_else(|error| {
+            panic!("cannot replace cached {label} {}: {error}", path.display())
+        });
+    }
+    std::fs::rename(&temporary, path).unwrap_or_else(|error| {
+        panic!(
+            "cannot install downloaded {label} at {}: {error}",
+            path.display()
+        )
+    });
+}
+
+fn file_sha256(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
 }
 
 fn prepare_embedded_agent() {
