@@ -28,6 +28,8 @@ hyperhub show
 
 ## 提交配置变更
 
+新增或修改配置前，读取 [配置数据参考](references/configuration.md)，根据其中的对象结构和约束生成数据。
+
 1. 根据 `show` 输出生成 RFC 6902 风格 JSON Patch，只使用 `add`、`replace`、`remove`、`test`，数组追加使用 `/-`。
 2. 每个修改操作必须是可独立校验的完整配置请求。
 3. 现有配置对象的 `uuid` 是稳定身份，不得修改或复用；新增对象可省略 `uuid`，由 CLI 生成。

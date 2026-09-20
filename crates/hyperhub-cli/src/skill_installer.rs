@@ -260,6 +260,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(paths.contains(&"SKILL.md"));
         assert!(paths.contains(&"agents/openai.yaml"));
+        assert!(paths.contains(&"references/configuration.md"));
         assert!(EMBEDDED_SKILL_BUNDLE_VERSION.starts_with(env!("CARGO_PKG_VERSION")));
         assert_eq!(EMBEDDED_SKILL_SHA256.len(), 64);
     }
