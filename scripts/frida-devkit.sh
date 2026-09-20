@@ -20,10 +20,28 @@ install_devkit() {
   local kind=$1 sha=$2 dest=$3 lib=$4
   local archive="$cache/frida-$kind-devkit-$version-$platform.tar.xz"
   if [[ ! -f "$dest/$lib" ]]; then
-    if [[ ! -f "$archive" ]]; then
-      curl -fL "https://github.com/frida/frida/releases/download/$version/$(basename "$archive")" -o "$archive"
+    if [[ ! -f "$archive" ]] || ! echo "$sha  $archive" | sha256sum -c --status -; then
+      local temporary="$archive.download-$$"
+      python3 - "$temporary" <<'PYCODE'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).unlink(missing_ok=True)
+PYCODE
+      if ! curl -fL \
+        --retry 5 \
+        --retry-all-errors \
+        --retry-delay 2 \
+        --connect-timeout 20 \
+        "https://github.com/frida/frida/releases/download/$version/$(basename "$archive")" \
+        -o "$temporary"; then
+        python3 - "$temporary" <<'PYCODE'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).unlink(missing_ok=True)
+PYCODE
+        return 1
+      fi
+      echo "$sha  $temporary" | sha256sum -c --status -
+      mv "$temporary" "$archive"
     fi
-    echo "$sha  $archive" | sha256sum -c --status -
     mkdir -p "$dest"
     tar -xJf "$archive" -C "$dest"
   fi
