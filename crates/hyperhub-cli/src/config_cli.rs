@@ -824,29 +824,92 @@ fn display_request(
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let rendered_description = match preview {
+        Ok(prepared) if operation != "remove" => {
+            let resulting =
+                serde_json::to_value(&prepared.config).map_err(|error| error.to_string())?;
+            describe_request(&resulting, &request.operations)
+                .unwrap_or_else(|_| description.clone())
+        }
+        _ => description.clone(),
+    };
+    let validation_error = preview.err().map(String::as_str);
     eprintln!("\n[{}/{}] 配置审批项", index + 1, total);
-    let request_view = semantic_request_json(request, description, index, total);
-    let mut view = json!({
-        "schema_version": 1,
-        "status": "human_review",
-        "progress": {"current": index + 1, "total": total},
-        "request": request_view,
-        "technical": {
-            "source_operation": request.source_index + 1,
-            "op": operation,
-            "path": path,
-        },
-        "sensitive_inputs": placeholders,
-    });
-    match preview {
-        Ok(prepared) => view["changes"] = Value::Array(prepared.changes.clone()),
-        Err(error) => view["validation_error"] = Value::String(error.clone()),
-    }
     eprintln!(
         "{}",
-        serde_json::to_string_pretty(&view).map_err(|error| error.to_string())?
+        render_approval_review(
+            request,
+            &rendered_description,
+            operation,
+            path,
+            placeholders,
+            validation_error,
+        )
     );
     Ok(())
+}
+
+fn render_approval_review(
+    request: &ApprovalRequest,
+    description: &ConfigChangeDescription,
+    operation: &str,
+    path: &str,
+    placeholders: &[String],
+    validation_error: Option<&str>,
+) -> String {
+    let object = match description.item_name.as_deref() {
+        Some(name) => format!("{}「{name}」", description.item_kind),
+        None => description.item_kind.clone(),
+    };
+    let mut lines = vec![
+        format!("  操作          {}", description.action.label()),
+        format!("  位置          {}", description.section.breadcrumb()),
+        format!("  对象          {object}"),
+    ];
+    if let Some(uuid) = description.item_uuid.as_deref() {
+        lines.push(format!("  配置 UUID     {uuid}"));
+    }
+    if let Some(field) = description.field.as_deref() {
+        lines.push(format!("  字段          {field}"));
+    }
+    lines.push(format!("  摘要          {}", description.summary));
+    if !description.details.is_empty() {
+        lines.push("  配置详情".into());
+        lines.extend(
+            description
+                .details
+                .iter()
+                .map(|detail| format!("    • {detail}")),
+        );
+    }
+    if placeholders.is_empty() {
+        lines.push("  敏感信息      无需额外输入".into());
+    } else {
+        lines.push(format!(
+            "  敏感信息      {} 项，将在批准后隐藏输入",
+            placeholders.len()
+        ));
+        lines.extend(
+            placeholders
+                .iter()
+                .map(|placeholder| format!("    • {placeholder}")),
+        );
+    }
+    match validation_error {
+        Some(error) => lines.push(format!("  校验          失败：{error}")),
+        None => lines.push("  校验          通过".into()),
+    }
+    lines.push(format!(
+        "  审批请求      {}{}",
+        request.uuid,
+        if request.edited {
+            "（已二次编辑）"
+        } else {
+            ""
+        }
+    ));
+    lines.push(format!("  技术定位      {operation} {path}"));
+    lines.join("\n")
 }
 
 fn prompt_decision(can_approve: bool) -> Result<ApprovalDecision, String> {
@@ -1328,6 +1391,50 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_review_is_human_readable_instead_of_raw_json() {
+        let request = ApprovalRequest {
+            uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            source_index: 0,
+            operations: vec![json!({
+                "op": "add",
+                "path": "/routes/-",
+                "value": {
+                    "uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "id": "devboard-api",
+                    "enabled": true,
+                    "priority": 100,
+                    "endpoints": [{
+                        "target": "https://devboard.chaitin.net/devboard/api",
+                        "port": 443
+                    }],
+                    "deny": false,
+                    "plugins": ["devboard-token"]
+                }
+            })],
+            edited: false,
+        };
+        let description = describe_request(&json!({"routes": []}), &request.operations).unwrap();
+        let rendered = render_approval_review(
+            &request,
+            &description,
+            "add",
+            "/routes/-",
+            &["devboard-token".into()],
+            None,
+        );
+
+        assert!(rendered.contains("操作          新增"));
+        assert!(rendered.contains("位置          网关 / 路由"));
+        assert!(rendered.contains("对象          路由「devboard-api」"));
+        assert!(rendered.contains("https://devboard.chaitin.net/devboard/api（端口 443）"));
+        assert!(rendered.contains("敏感信息      1 项，将在批准后隐藏输入"));
+        assert!(rendered.contains("校验          通过"));
+        assert!(!rendered.contains("\"changes\""));
+        assert!(!rendered.contains("\"schema_version\""));
+        assert!(!rendered.contains('{'));
+    }
 
     #[test]
     fn json_patch_add_replace_remove_and_test() {
