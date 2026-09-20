@@ -195,12 +195,12 @@ pub fn status(json: bool) -> Result<i32, String> {
         println!("HyperHub serve is running");
         println!("pid: {}", status.pid);
         println!("sessions: {}", status.sessions.len());
-        let injected = status
+        let managed = status
             .sessions
             .iter()
             .map(|session| session.processes.len())
             .sum::<usize>();
-        println!("injected processes: {injected}");
+        println!("managed processes: {managed}");
         for session in &status.sessions {
             for process in &session.processes {
                 println!(

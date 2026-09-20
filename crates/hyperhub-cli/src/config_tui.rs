@@ -324,7 +324,7 @@ struct ReferencePicker {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct InjectedProcessView {
+struct ManagedProcessView {
     session_id: String,
     process: InjectedProcessSnapshot,
 }
@@ -332,7 +332,7 @@ struct InjectedProcessView {
 /// 后台轮询线程下发给 UI 的进程快照。
 struct ProcessPoll {
     live: bool,
-    processes: Vec<InjectedProcessView>,
+    processes: Vec<ManagedProcessView>,
 }
 
 struct App {
@@ -358,7 +358,7 @@ struct App {
     ssh_key_add_picker: Option<SshKeyAddPicker>,
     reference_picker: Option<ReferencePicker>,
     ssh_key_preview: Option<SshKeyPreview>,
-    injected_processes: Vec<InjectedProcessView>,
+    managed_processes: Vec<ManagedProcessView>,
     status: String,
     saved: bool,
     discarded: bool,
@@ -437,8 +437,8 @@ pub fn run(
         ssh_key_add_picker: None,
         reference_picker: None,
         ssh_key_preview: None,
-        injected_processes: if live {
-            query_injected_processes().unwrap_or_default()
+        managed_processes: if live {
+            query_managed_processes().unwrap_or_default()
         } else {
             Vec::new()
         },
@@ -457,7 +457,7 @@ pub fn run(
                 return;
             };
             loop {
-                let snapshot = match query_injected_processes_with(runtime) {
+                let snapshot = match query_managed_processes_with(runtime) {
                     Ok(processes) => ProcessPoll {
                         live: true,
                         processes,
@@ -479,13 +479,11 @@ pub fn run(
         .map_err(|error| error.to_string())?;
     loop {
         while let Ok(snapshot) = process_rx.try_recv() {
-            if snapshot.live != app.live || snapshot.processes != app.injected_processes {
+            if snapshot.live != app.live || snapshot.processes != app.managed_processes {
                 app.live = snapshot.live;
-                app.injected_processes = snapshot.processes;
+                app.managed_processes = snapshot.processes;
                 if app.category == CATEGORY_PROCESS {
-                    app.field = app
-                        .field
-                        .min(app.injected_processes.len().saturating_sub(1));
+                    app.field = app.field.min(app.managed_processes.len().saturating_sub(1));
                 }
                 terminal
                     .draw(|frame| draw(frame, &app))
@@ -674,10 +672,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         KeyCode::Char('d') if app.editor.is_some() => delete_editor_pattern(app),
         KeyCode::Char('d') => delete_selected(app),
         KeyCode::Char('r') if app.category == CATEGORY_PROCESS => {
-            app.status = if refresh_injected_processes(app) {
-                "✓ 已刷新注入进程列表".into()
+            app.status = if refresh_managed_processes(app) {
+                "✓ 已刷新受管进程列表".into()
             } else {
-                "⚠ Serve 未运行，无法刷新注入进程列表".into()
+                "⚠ Serve 未运行，无法刷新受管进程列表".into()
             };
         }
         KeyCode::Char('/') => open_input(app, "搜索配置", "", false, InputAction::Search),
@@ -1543,7 +1541,7 @@ fn edit_selected(app: &mut App) {
         }
         (CATEGORY_PROCESS, _) => {
             app.focus = Focus::Detail;
-            app.status = "进程概览显示活跃的已注入进程".into();
+            app.status = "进程概览显示活跃的受管进程".into();
         }
         (CATEGORY_BASIC, 0) => app.status = "模式请按 Space 切换".into(),
         (CATEGORY_BASIC, 3) => app.status = "Debug 请按 Space 切换".into(),
@@ -4072,14 +4070,14 @@ fn control_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
         .map_err(|error| error.clone())
 }
 
-fn query_injected_processes() -> Result<Vec<InjectedProcessView>, String> {
+fn query_managed_processes() -> Result<Vec<ManagedProcessView>, String> {
     let runtime = control_runtime()?;
-    query_injected_processes_with(runtime)
+    query_managed_processes_with(runtime)
 }
 
-fn query_injected_processes_with(
+fn query_managed_processes_with(
     runtime: &tokio::runtime::Runtime,
-) -> Result<Vec<InjectedProcessView>, String> {
+) -> Result<Vec<ManagedProcessView>, String> {
     let response = runtime
         .block_on(control_request(
             &discovery_control_endpoint(),
@@ -4095,7 +4093,7 @@ fn query_injected_processes_with(
             session
                 .processes
                 .into_iter()
-                .map(move |process| InjectedProcessView {
+                .map(move |process| ManagedProcessView {
                     session_id: session.session_id.clone(),
                     process,
                 })
@@ -4105,23 +4103,21 @@ fn query_injected_processes_with(
     Ok(processes)
 }
 
-fn refresh_injected_processes(app: &mut App) -> bool {
+fn refresh_managed_processes(app: &mut App) -> bool {
     // 直接复用同一 runtime 查询状态；Serve 离线时控制面请求快速失败，
     // 不再为 serve_is_running 重复新建 Runtime 并增加一次控制面往返。
-    match query_injected_processes() {
+    match query_managed_processes() {
         Ok(processes) => {
             app.live = true;
-            app.injected_processes = processes;
+            app.managed_processes = processes;
             if app.category == CATEGORY_PROCESS {
-                app.field = app
-                    .field
-                    .min(app.injected_processes.len().saturating_sub(1));
+                app.field = app.field.min(app.managed_processes.len().saturating_sub(1));
             }
             true
         }
         Err(_) => {
             app.live = false;
-            app.injected_processes.clear();
+            app.managed_processes.clear();
             false
         }
     }
@@ -4429,11 +4425,11 @@ fn detail_lines(app: &App) -> Vec<String> {
         .collect(),
         CATEGORY_PROCESS => {
             if !app.live {
-                vec!["Serve 未运行，暂无可观测的注入进程".into()]
-            } else if app.injected_processes.is_empty() {
-                vec!["暂无活跃的已注入进程".into()]
+                vec!["Serve 未运行，暂无可观测的受管进程".into()]
+            } else if app.managed_processes.is_empty() {
+                vec!["暂无活跃的受管进程".into()]
             } else {
-                app.injected_processes
+                app.managed_processes
                     .iter()
                     .map(|item| {
                         format!(
@@ -5121,7 +5117,7 @@ fn selection_hint(app: &App) -> Option<String> {
             CATEGORY_SANDBOX => "沙盒：网络、文件与子进程沙盒能力概览".to_string(),
             CATEGORY_SANDBOX_PROCESS => "沙盒 / 子进程：控制子程序创建".to_string(),
             CATEGORY_FILES => "沙盒 / 文件：控制文件访问权限".to_string(),
-            CATEGORY_PROCESS => "进程：活跃注入进程观测".to_string(),
+            CATEGORY_PROCESS => "进程：活跃受管进程观测".to_string(),
             CATEGORY_CERTIFICATE => "证书：根证书与 SSH 主机密钥".to_string(),
             CATEGORY_ENVIRONMENT => "环境变量：注入目标进程的环境变量".to_string(),
         });
@@ -5344,7 +5340,7 @@ fn selection_hint(app: &App) -> Option<String> {
             }
         }
         CATEGORY_PROCESS => {
-            if let Some(item) = app.injected_processes.get(app.field) {
+            if let Some(item) = app.managed_processes.get(app.field) {
                 Some(format!(
                     "PID {}：{}，session={}，Hook={}，Firewall 快照版本={}",
                     item.process.pid,
@@ -5358,7 +5354,7 @@ fn selection_hint(app: &App) -> Option<String> {
                     item.process.firewall_version
                 ))
             } else if app.live {
-                Some("暂无活跃的已注入进程；列表每秒刷新".to_string())
+                Some("暂无活跃的受管进程；列表每秒刷新".to_string())
             } else {
                 Some("Serve 未运行".to_string())
             }
@@ -5749,7 +5745,7 @@ fn draw(frame: &mut Frame, app: &App) {
         } else if app.header_editor.is_some() {
             "↑↓/jk 选择 Header\na 添加，Enter/e 修改选中值，d 删除\n值始终以掩码显示，Esc 返回凭证表单"
         } else {
-            "↑↓/jk 导航，Tab 切换面板\nEnter/e 打开、编辑或切换选项，Space 专用于切换选项或启停路由\nEsc 按层返回：编辑器 → 右侧列表 → 左侧分类；分类中再次按 Esc 退出\na 新增，d 删除，/ 搜索，p 修改密码\n规则内目标/端口/路径/命令均使用列表管理：a 添加，Enter/e 修改，d 删除\n路由目标支持域名、URL 路径、IP 与 CIDR；网络/文件/子进程规则不再限制进程\n进程页面只显示活跃注入进程，Agent 默认 hook 所有目标进程\n沙盒/文件控制读写、创建、删除、重命名；沙盒/子进程按可执行文件与命令行控制\n基础页模式：Enforce=严格拒绝且失败不兜底，Observe=失败时直连兜底\nCtrl+S 校验并保存，Q 强制放弃修改"
+            "↑↓/jk 导航，Tab 切换面板\nEnter/e 打开、编辑或切换选项，Space 专用于切换选项或启停路由\nEsc 按层返回：编辑器 → 右侧列表 → 左侧分类；分类中再次按 Esc 退出\na 新增，d 删除，/ 搜索，p 修改密码\n规则内目标/端口/路径/命令均使用列表管理：a 添加，Enter/e 修改，d 删除\n路由目标支持域名、URL 路径、IP 与 CIDR；网络/文件/子进程规则不再限制进程\n进程页面显示当前活跃受管进程，包括 ptrace 与 Gum 后端\n沙盒/文件控制读写、创建、删除、重命名；沙盒/子进程按可执行文件与命令行控制\n基础页模式：Enforce=严格拒绝且失败不兜底，Observe=失败时直连兜底\nCtrl+S 校验并保存，Q 强制放弃修改"
         };
         popup(frame, area, "帮助", help, false);
     }
@@ -6017,7 +6013,7 @@ mod tests {
                 ssh_key_add_picker: None,
                 reference_picker: None,
                 ssh_key_preview: None,
-                injected_processes: Vec::new(),
+                managed_processes: Vec::new(),
                 status: "✓ 配置有效".into(),
                 saved: false,
                 discarded: false,
@@ -6059,7 +6055,7 @@ mod tests {
             ssh_key_add_picker: None,
             reference_picker: None,
             ssh_key_preview: None,
-            injected_processes: Vec::new(),
+            managed_processes: Vec::new(),
             status: String::new(),
             saved: false,
             discarded: false,
@@ -6343,12 +6339,12 @@ mod tests {
     }
 
     #[test]
-    fn process_overview_lists_injected_agents() {
+    fn process_overview_lists_managed_processes() {
         let mut app = test_app();
         app.live = true;
         app.category = CATEGORY_PROCESS;
         app.focus = Focus::Detail;
-        app.injected_processes.push(InjectedProcessView {
+        app.managed_processes.push(ManagedProcessView {
             session_id: "session-1".into(),
             process: InjectedProcessSnapshot {
                 pid: 42,
@@ -7933,7 +7929,7 @@ mod tests {
             ssh_key_add_picker: None,
             reference_picker: None,
             ssh_key_preview: None,
-            injected_processes: Vec::new(),
+            managed_processes: Vec::new(),
             status: String::new(),
             saved: false,
             discarded: false,

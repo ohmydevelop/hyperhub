@@ -1061,19 +1061,28 @@ impl SessionRegistry {
                     .sessions
                     .values()
                     .map(|record| {
+                        // `members` is the source of truth for every managed process.
+                        // Gum agents add heartbeat/firewall telemetry, while the ptrace
+                        // backend intentionally has no in-process heartbeat. Filtering by
+                        // heartbeats made active ptrace processes disappear from status/TUI.
                         let mut processes = record
-                            .agent_heartbeats
+                            .members
                             .iter()
-                            .filter(|(_, heartbeat)| {
-                                now_ms.saturating_sub(heartbeat.last_seen_ms) <= 5_000
-                            })
-                            .filter_map(|(pid, heartbeat)| {
-                                Some(InjectedProcessSnapshot {
+                            .map(|(pid, executable)| {
+                                let heartbeat =
+                                    record.agent_heartbeats.get(pid).filter(|heartbeat| {
+                                        now_ms.saturating_sub(heartbeat.last_seen_ms) <= 5_000
+                                    });
+                                InjectedProcessSnapshot {
                                     pid: *pid,
-                                    executable: record.members.get(pid)?.clone(),
+                                    executable: executable.clone(),
                                     root: *pid == record.root_pid,
-                                    last_seen_ms: heartbeat.last_seen_ms,
-                                    firewall_version: heartbeat.firewall_version,
+                                    last_seen_ms: heartbeat
+                                        .map(|heartbeat| heartbeat.last_seen_ms)
+                                        .unwrap_or_default(),
+                                    firewall_version: heartbeat
+                                        .map(|heartbeat| heartbeat.firewall_version)
+                                        .unwrap_or_default(),
                                     hook_status: record
                                         .process_policies
                                         .get(pid)
@@ -1093,7 +1102,7 @@ impl SessionRegistry {
                                         .get(pid)
                                         .map(|policy| policy.decision_source.clone())
                                         .unwrap_or_else(default_unknown_source),
-                                })
+                                }
                             })
                             .collect::<Vec<_>>();
                         processes.sort_by_key(|process| process.pid);
@@ -1606,7 +1615,23 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_recent_injected_agent_processes() {
+    fn snapshots_managed_processes_without_agent_heartbeats() {
+        let (registry, record) = authenticated_registry();
+        assert!(registry.register_child("s", &record.token, 7, 8, "child".into()));
+
+        let sessions = registry.snapshot();
+        assert_eq!(sessions[0].process_count, 2);
+        assert_eq!(sessions[0].processes.len(), 2);
+        assert!(sessions[0].processes[0].root);
+        assert_eq!(sessions[0].processes[0].pid, 7);
+        assert_eq!(sessions[0].processes[0].last_seen_ms, 0);
+        assert_eq!(sessions[0].processes[0].firewall_version, 0);
+        assert_eq!(sessions[0].processes[1].pid, 8);
+        assert_eq!(sessions[0].processes[1].executable, "child");
+    }
+
+    #[test]
+    fn snapshots_managed_processes_with_agent_telemetry() {
         let (registry, record) = authenticated_registry();
         assert!(registry.register_child("s", &record.token, 7, 8, "child".into()));
         assert!(registry.note_agent("s", &record.token, 7, 10));
