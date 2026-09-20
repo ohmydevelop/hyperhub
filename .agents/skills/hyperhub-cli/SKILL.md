@@ -71,6 +71,7 @@ hyperhub run --password-file /path/to/password -- program args...
 
 - 不使用 `export --plain` 获取配置，也不在回复、日志或 Commit 中输出 secret。
 - 计划阶段不得修改活动配置；LLM 不得代替用户运行交互式 `approve`、输入密码、敏感值或审批决定。
+- `hyperhub chat` 是用户输入主密码后使用内嵌本地模型直接修改配置的人工交互入口；外部 LLM/Skill 不得调用它绕过 JSON Patch 审批队列。
 - 不手工编辑加密的 `config.bin`。
 - 不使用未知字段或跳过 CLI 语义校验；若 patch 被拒绝，修正 patch 后重新计划。
 - 操作结束后删除含 secret 的临时文件；不得提交密码文件、patch secret 或生成的配置。

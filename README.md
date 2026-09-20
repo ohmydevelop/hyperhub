@@ -104,6 +104,21 @@ hyperhub stop
 
 Windows 使用 `hyperhub.exe` 替换 `hyperhub`。具体参数可通过 `hyperhub --help` 查看。
 
+## 本地 Needle 3 配置 Chat
+
+HyperHub 单文件程序内嵌 Needle 3 模型和对应平台推理引擎。运行 Chat 后输入
+HyperHub 主密码，即可在本地对话中直接创建、修改或删除配置：
+
+```bash
+hyperhub chat
+# 或从权限为 0600 的密码文件读取
+hyperhub chat --password-file ~/.hyperhub/password
+```
+
+对话界面采用与 Codex CLI 相同的信息层级：顶部会话标识、中央消息流、底部圆角输入框和状态栏。`Enter` 发送，`Ctrl+J` 换行，`Ctrl+C` 退出。
+
+Chat 已通过主密码解锁配置，因此模型工具调用会在完整校验后直接加密保存，并在 Serve 运行时热更新，**不会进入 `approve` 队列**。模型推理只在本机回环地址运行，Needle telemetry 被强制关闭；可以输入 API key、Token 和密码等敏感值。聊天内容只保存在当前进程内存中，工具摘要不会回显敏感值。
+
 ## LLM 通过 CLI 配置
 
 仓库提供 `$hyperhub-cli` Skill。LLM 先通过 `hyperhub show` 读取完整的脱敏 JSON 配置并提交 JSON Patch；CLI 将请求写入加密审批队列，但不会在规划阶段修改活动配置：

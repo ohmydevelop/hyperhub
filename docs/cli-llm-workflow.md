@@ -1,5 +1,17 @@
 # CLI + Skill 的 LLM 驱动工作流
 
+## 0. 本地 Chat 直接配置
+
+交互式本地配置可运行：
+
+```sh
+hyperhub chat
+```
+
+用户先输入 HyperHub 主密码，随后进入内嵌 Needle 3 驱动的 Chat。因为本地用户已经用主密码解锁活动配置，Chat 的语义化工具调用在全量校验后直接加密保存并热更新 Serve，不创建审批队列，也不需要 `approve`。该通道适合由用户亲自输入敏感数据。
+
+Needle 3 权重与平台 runner 都嵌入 HyperHub 二进制；运行时关闭 telemetry，只在随机本机回环端口进行父子进程通信。聊天记录不持久化，配置摘要不显示 Secret。非交互式外部 LLM 和 Skill 仍必须使用下述 JSON Patch + 人工审批流程，两条信任边界不能混用。
+
 LLM 通过仓库 Skill 调用普通 CLI；Shell 负责组合能力，HyperHub CLI 负责配置语义、加密存储、运行时热更新和可恢复的人工审批队列。
 
 Skill 位于：
