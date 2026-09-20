@@ -248,6 +248,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     let config = Arc::new(unlocked.config);
     let mut output = ServeOutput::open(run.output.as_deref())?;
     let session_auth_key = unlocked.session_auth_key.clone();
+    let descriptor = unlocked.descriptor.clone();
     let sessions = SessionRegistry::new(unlocked.session_auth_key, unlocked.descriptor);
     let root_certificates = config_store::load_root_certificates(
         &path,
@@ -255,7 +256,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         config
             .root_certificates
             .iter()
-            .filter(|certificate| certificate.enabled)
+            .filter(|certificate| certificate.enabled && certificate.host.is_none())
             .map(|certificate| certificate.fingerprint.as_str()),
     )
     .map_err(|error| error.to_string())?;
@@ -268,6 +269,14 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         session_auth_key.as_slice(),
     )
     .map_err(|e| e.to_string())?;
+    let trust = Arc::new(hyperhub_core::trust::TrustStore::new(
+        path.clone(),
+        password.as_bytes().to_vec(),
+        descriptor,
+        socks.runtime(),
+        socks.audit_writer(),
+    ));
+    let socks = socks.with_trust_store(trust);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let socks_address = runtime
         .block_on(socks.prepare_listener())

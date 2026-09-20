@@ -270,6 +270,7 @@ mod tests {
             context,
             decision,
             sessions: SessionRegistry::default(),
+            trust: None,
             upstream_tunneled: false,
         }
     }

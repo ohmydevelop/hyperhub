@@ -306,7 +306,15 @@ impl Config {
             ensure(&mut item.uuid, "environment", &item.name);
         }
         for item in &mut self.root_certificates {
-            ensure(&mut item.uuid, "root-certificate", &item.fingerprint);
+            ensure(
+                &mut item.uuid,
+                "root-certificate",
+                &format!(
+                    "{}|{}",
+                    item.host.as_deref().unwrap_or("global"),
+                    item.fingerprint
+                ),
+            );
         }
         for item in &mut self.ssh_host_keys {
             ensure(&mut item.uuid, "ssh-host-key", &item.host);
@@ -500,10 +508,22 @@ impl Config {
                     certificate.fingerprint
                 )));
             }
-            if !certificate_fingerprints.insert(certificate.fingerprint.clone()) {
+            if let Some(host) = certificate.host.as_deref() {
+                validate_trust_host(host).map_err(ConfigError::Validation)?;
+            }
+            let identity = (
+                certificate
+                    .host
+                    .as_deref()
+                    .unwrap_or("global")
+                    .to_ascii_lowercase(),
+                certificate.fingerprint.to_ascii_lowercase(),
+            );
+            if !certificate_fingerprints.insert(identity) {
                 return Err(ConfigError::Validation(format!(
-                    "duplicate root certificate fingerprint '{}'",
-                    certificate.fingerprint
+                    "duplicate TLS trust certificate '{}' for '{}'",
+                    certificate.fingerprint,
+                    certificate.host.as_deref().unwrap_or("global")
                 )));
             }
         }
@@ -846,6 +866,21 @@ fn reject_removed_fields(
             Some(migration) => format!("{owner} contains removed field '{key}'; {migration}"),
             None => format!("{owner} contains unknown field '{key}'"),
         }));
+    }
+    Ok(())
+}
+
+fn validate_trust_host(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("TLS host trust entry is empty".into());
+    }
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return Err(format!("TLS host trust '{value}' must include host:port"));
+    };
+    let host = host.trim_matches(['[', ']']);
+    if host.is_empty() || port.parse::<u16>().ok().is_none_or(|port| port == 0) {
+        return Err(format!("TLS host trust '{value}' is invalid"));
     }
     Ok(())
 }
@@ -1529,6 +1564,9 @@ pub struct RootCertificate {
     pub uuid: String,
     /// SHA-256 of the certificate DER, used as the identity and storage file name.
     pub fingerprint: String,
+    /// Exact TLS host pin (`host:port`). None means a globally trusted root certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -2773,5 +2811,31 @@ aktion = "deny""#,
             .unwrap_err()
             .to_string()
             .contains("port 0"));
+    }
+
+    #[test]
+    fn tls_trust_allows_global_and_host_scopes_but_rejects_duplicate_scope() {
+        let fingerprint = "01".repeat(32);
+        let mut config = Config::default();
+        config.root_certificates.push(RootCertificate {
+            uuid: new_config_uuid(),
+            fingerprint: fingerprint.clone(),
+            host: None,
+            enabled: true,
+        });
+        config.root_certificates.push(RootCertificate {
+            uuid: new_config_uuid(),
+            fingerprint: fingerprint.clone(),
+            host: Some("localhost:443".into()),
+            enabled: true,
+        });
+        config.validate().unwrap();
+        config.root_certificates.push(RootCertificate {
+            uuid: new_config_uuid(),
+            fingerprint,
+            host: Some("localhost:443".into()),
+            enabled: true,
+        });
+        assert!(config.validate().is_err());
     }
 }

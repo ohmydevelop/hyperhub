@@ -129,3 +129,7 @@ Linux 默认对动态、静态和 stripped ELF 使用 CLI 内置的 ptrace sysca
 TCP connect 在 syscall entry 改写为 HyperHub SOCKS listener，并在目标上下文中完成认证与 CONNECT。UDP DNS只观察不重定向；A/AAAA 响应恢复 IP→域名关联。file/process sandbox 在副作用前判定，deny 通过无副作用 syscall 和返回值替换实现。clone/fork/vfork/exec 后代由同一 supervisor 跟踪并登记真实 PID。
 
 静态 TCP 最终仍进入同一个 Serve listener，因此服务端会再次执行 firewall、route、代理和审计决策。当前第一阶段只启用全量 `PTRACE_SYSCALL` 保底路径；seccomp、pidfd、eBPF 与更快的跨进程内存 API 必须等保底语义稳定后再作为可回退优化引入。
+
+## TLS / SSH 首次使用信任
+
+Serve 持有与活动配置相同的加密存储上下文。需要检查的自签名 TLS 首次握手通过主机名、有效期和精确叶证书验证后，将 DER 以 `host:port` 作用域写入证书存储；SSH 首次握手保存主机公钥。信任记录写入配置后立即替换运行时快照，后续连接按精确 pin 校验，变化时 fail closed。全局根证书与单主机 pin 共用 DER 存储但具有独立配置作用域。

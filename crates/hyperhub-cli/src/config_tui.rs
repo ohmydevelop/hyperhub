@@ -2978,17 +2978,28 @@ fn apply_input(app: &mut App, modal: InputModal) -> Result<(), String> {
                 app.status = format!("✓ 已导入 SSH 主机密钥 {}", rest);
                 return Ok(());
             }
-            let certificates = if let Some(rest) = input.strip_prefix("https://") {
+            let (certificates, host_scope) = if let Some(rest) = input.strip_prefix("https://") {
                 let (host, port) = parse_certificate_host(rest, 443)?;
-                vec![hyperhub_core::certificate::fetch_tls_peer_ca(host, port)
-                    .map_err(|error| error.to_string())?]
+                let certificate =
+                    hyperhub_core::certificate::fetch_tls_peer_certificates(host, port)
+                        .map_err(|error| error.to_string())?
+                        .into_iter()
+                        .next()
+                        .ok_or("未捕获到 TLS 叶证书")?;
+                (
+                    vec![certificate],
+                    Some(hyperhub_core::trust::trust_authority(host, port)),
+                )
             } else {
                 let path = PathBuf::from(required(input, "证书路径")?);
                 if !path.is_file() {
                     return Err(format!("文件不存在或不可读：{}", path.display()));
                 }
-                hyperhub_core::certificate::load_root_certificates(&path)
-                    .map_err(|error| error.to_string())?
+                (
+                    hyperhub_core::certificate::load_root_certificates(&path)
+                        .map_err(|error| error.to_string())?,
+                    None,
+                )
             };
             let imported = config_store::import_root_certificates_from_der(
                 &app.path,
@@ -3001,17 +3012,15 @@ fn apply_input(app: &mut App, modal: InputModal) -> Result<(), String> {
             }
             let mut added = 0usize;
             for item in imported {
-                if app
-                    .config
-                    .root_certificates
-                    .iter()
-                    .any(|certificate| certificate.fingerprint == item.fingerprint)
-                {
+                if app.config.root_certificates.iter().any(|certificate| {
+                    certificate.fingerprint == item.fingerprint && certificate.host == host_scope
+                }) {
                     continue;
                 }
                 app.config.root_certificates.push(RootCertificate {
                     uuid: hyperhub_core::config::new_config_uuid(),
                     fingerprint: item.fingerprint,
+                    host: host_scope.clone(),
                     enabled: true,
                 });
                 added += 1;
@@ -3930,12 +3939,22 @@ fn delete_selected(app: &mut App) {
         CATEGORY_CERTIFICATE if app.field < app.config.root_certificates.len() => {
             let fingerprint = app.config.root_certificates[app.field].fingerprint.clone();
             app.config.root_certificates.remove(app.field);
-            match config_store::delete_root_certificate(&app.path, &fingerprint) {
-                Ok(()) => {
-                    refresh_root_certificate_cache(app);
-                    Ok(())
+            if app
+                .config
+                .root_certificates
+                .iter()
+                .any(|item| item.fingerprint == fingerprint)
+            {
+                refresh_root_certificate_cache(app);
+                Ok(())
+            } else {
+                match config_store::delete_root_certificate(&app.path, &fingerprint) {
+                    Ok(()) => {
+                        refresh_root_certificate_cache(app);
+                        Ok(())
+                    }
+                    Err(error) => Err(error.to_string()),
                 }
-                Err(error) => Err(error.to_string()),
             }
         }
         CATEGORY_CERTIFICATE
@@ -4457,7 +4476,13 @@ fn detail_lines(app: &App) -> Vec<String> {
                         .unwrap_or_else(|| {
                             hyperhub_core::certificate::short_fingerprint(&item.fingerprint)
                         });
-                    format!("{}  {}", name, if item.enabled { "启用" } else { "停用" })
+                    let scope = item.host.as_deref().unwrap_or("全局根");
+                    format!(
+                        "{}  {}  {}",
+                        name,
+                        scope,
+                        if item.enabled { "启用" } else { "停用" }
+                    )
                 })
                 .collect::<Vec<_>>();
             lines.extend(app.config.ssh_host_keys.iter().map(|key| {
@@ -4776,6 +4801,10 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
         ObjectEditor::RootCertificate(index) => {
             let item = &app.config.root_certificates[index];
             let mut lines = vec![
+                format!(
+                    "信任范围          {}",
+                    item.host.as_deref().unwrap_or("全局根证书")
+                ),
                 format!("指纹              {}", item.fingerprint),
                 format!("启用              {}", yes_no(item.enabled)),
             ];
@@ -7538,11 +7567,27 @@ mod tests {
                 .as_ref()
         );
 
+        app.config.root_certificates.push(RootCertificate {
+            uuid: hyperhub_core::config::new_config_uuid(),
+            fingerprint: fingerprint.clone(),
+            host: Some("localhost:443".into()),
+            enabled: true,
+        });
+        refresh_root_certificate_cache(&mut app);
+        delete_selected(&mut app);
+        assert_eq!(app.config.root_certificates.len(), 1);
+        assert_eq!(
+            app.config.root_certificates[0].host.as_deref(),
+            Some("localhost:443")
+        );
+        assert!(config_store::root_certificates_dir(&app.path)
+            .join(format!("{fingerprint}.bin"))
+            .exists());
+
+        app.field = 0;
         delete_selected(&mut app);
         assert!(app.config.root_certificates.is_empty());
-        assert!(!source
-            .parent()
-            .unwrap()
+        assert!(!config_store::root_certificates_dir(&app.path)
             .join(format!("{fingerprint}.bin"))
             .exists());
         std::fs::remove_dir_all(source.parent().unwrap()).ok();
@@ -7557,6 +7602,7 @@ mod tests {
         app.config.root_certificates.push(RootCertificate {
             uuid: hyperhub_core::config::new_config_uuid(),
             fingerprint: fingerprint.clone(),
+            host: None,
             enabled: true,
         });
         app.root_certificate_cache = Some(vec![RootCertificateView {
@@ -7573,8 +7619,14 @@ mod tests {
         assert!(!lines[0].contains(&fingerprint));
 
         let editor = editor_lines(&app, ObjectEditor::RootCertificate(0)).join("\n");
+        assert!(editor.contains("信任范围          全局根证书"));
         assert!(editor.contains("指纹"));
         assert!(editor.contains("主体              CN=Corp Root"));
+
+        app.config.root_certificates[0].host = Some("example.test:443".into());
+        let editor = editor_lines(&app, ObjectEditor::RootCertificate(0)).join("\n");
+        assert!(editor.contains("信任范围          example.test:443"));
+        assert!(detail_lines(&app)[0].contains("example.test:443"));
 
         app.root_certificate_cache = None;
         let lines = detail_lines(&app);
@@ -7594,6 +7646,7 @@ mod tests {
         app.config.root_certificates.push(RootCertificate {
             uuid: hyperhub_core::config::new_config_uuid(),
             fingerprint: fingerprint.clone(),
+            host: None,
             enabled: true,
         });
         app.root_certificate_cache = Some(vec![RootCertificateView {

@@ -8,6 +8,7 @@ use crate::audit::{AuditWriter, TranscriptMetadata};
 use crate::duplex::{prepare_transcript, CaptureConfig};
 use crate::policy::ConnectionContext;
 use crate::protocol::stack::BoxedStream;
+use base64::Engine;
 use russh::client;
 use russh::server;
 use russh::Channel;
@@ -620,17 +621,29 @@ async fn run_channel_bridge(
     });
 }
 
-struct ClientHandler;
+pub struct SshHostKeyExpectation {
+    pub key_type: String,
+    pub key_blob: String,
+}
+
+struct ClientHandler {
+    expected: SshHostKeyExpectation,
+}
 
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // 主机密钥已在建立 MITM 前用探测校验，这里放行。
-        Ok(true)
+        let key_type = server_public_key.algorithm().to_string();
+        let key_blob = base64::engine::general_purpose::STANDARD.encode(
+            server_public_key
+                .to_bytes()
+                .map_err(|_| russh::Error::Disconnect)?,
+        );
+        Ok(key_type == self.expected.key_type && key_blob == self.expected.key_blob)
     }
 }
 
@@ -1008,6 +1021,7 @@ pub async fn run_ssh_mitm(
     client_stream: BoxedStream,
     upstream_stream: BoxedStream,
     candidates: SshAuthCandidates,
+    expected_host_key: SshHostKeyExpectation,
     audit: SshAuditContext,
 ) -> io::Result<()> {
     let SshAuditContext {
@@ -1044,9 +1058,15 @@ pub async fn run_ssh_mitm(
         shutdown: CancellationToken::new(),
     });
 
-    let client_handle = client::connect_stream(client_config, upstream_stream, ClientHandler)
-        .await
-        .map_err(io::Error::other)?;
+    let client_handle = client::connect_stream(
+        client_config,
+        upstream_stream,
+        ClientHandler {
+            expected: expected_host_key,
+        },
+    )
+    .await
+    .map_err(io::Error::other)?;
 
     let running = server::run_stream(
         server_config,
@@ -1241,8 +1261,10 @@ mod tests {
             let finished = Arc::new(AtomicBool::new(false));
             let signal_seen = Arc::new(AtomicBool::new(false));
             let subsystem_seen = Arc::new(AtomicBool::new(false));
+            let upstream_key = server_key_from_master(b"upstream-test-key");
+            let host_public = upstream_key.public_key().clone();
             let upstream_config = Arc::new(server::Config {
-                keys: vec![server_key_from_master(b"upstream-test-key")],
+                keys: vec![upstream_key],
                 auth_rejection_time: Duration::ZERO,
                 event_buffer_size: 8,
                 channel_buffer_size: 8,
@@ -1294,6 +1316,11 @@ mod tests {
                         keys: Vec::new(),
                         passwords: vec!["configured-secret".into()],
                     }],
+                },
+                SshHostKeyExpectation {
+                    key_type: host_public.algorithm().to_string(),
+                    key_blob: base64::engine::general_purpose::STANDARD
+                        .encode(host_public.to_bytes().unwrap()),
                 },
                 audit,
             ));

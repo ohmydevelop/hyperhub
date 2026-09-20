@@ -120,6 +120,24 @@ hyperhub stop
 
 Windows 使用 `hyperhub.exe` 替换 `hyperhub`。具体参数可通过 `hyperhub --help` 查看。
 
+## TLS 与 SSH 首次信任
+
+对需要网关检查的自签名 TLS 站点以及 SSH 主机，HyperHub 使用 TOFU（Trust On First Use）：首次访问自动把证书或 SSH 主机密钥按精确主机/地址和端口写入加密配置；后续值发生变化时拒绝连接并审计。
+
+也可以在 `hyperhub config` 的“证书”分类中人工管理：
+
+- 导入本地 PEM/DER：添加全局根证书；
+- 输入 `https://host[:port]`：信任该 TLS 主机的当前叶证书；
+- 输入 `ssh://host[:port]`：信任该 SSH 主机的当前主机密钥；
+- 已有记录可以停用或删除。
+
+```bash
+hyperhub config --password-file ~/.hyperhub/password
+hyperhub show
+```
+
+`show` 会保留证书/主机、端口、指纹和启用状态，但不会显示其他敏感配置。TOFU 只能检测首次记录后的替换；若第一次连接也可能遭受主动中间人攻击，应预先人工导入并通过独立渠道核对指纹。
+
 ## 本地 Needle 3 配置 Chat
 
 HyperHub 单文件程序内嵌 Needle 3 模型和对应平台推理引擎。运行 Chat 后输入

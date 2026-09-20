@@ -186,6 +186,7 @@ pub struct SocksService {
     listener_commands: Arc<Mutex<Option<mpsc::Receiver<ListenerCommand>>>>,
     initial_listener: Arc<Mutex<Option<TcpListener>>>,
     bound_address: Arc<RwLock<Option<SocketAddr>>>,
+    trust: Option<Arc<crate::trust::TrustStore>>,
 }
 
 impl SocksService {
@@ -279,7 +280,13 @@ impl SocksService {
             listener_commands: Arc::new(Mutex::new(Some(listener_commands))),
             initial_listener: Arc::new(Mutex::new(None)),
             bound_address,
+            trust: None,
         })
+    }
+
+    pub fn with_trust_store(mut self, trust: Arc<crate::trust::TrustStore>) -> Self {
+        self.trust = Some(trust);
+        self
     }
 
     pub fn tls_ca_pem(&self) -> &str {
@@ -1080,6 +1087,7 @@ impl SocksService {
             context,
             decision,
             sessions: self.sessions.clone(),
+            trust: self.trust.clone(),
             upstream_tunneled,
         };
         // 把 peek 过的字节从 client socket 消费掉，交给栈回放，避免与 socket 残留重复。

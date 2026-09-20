@@ -22,6 +22,7 @@ pub(crate) struct HandlerContext {
     pub context: ConnectionContext,
     pub decision: RouteDecision,
     pub sessions: SessionRegistry,
+    pub trust: Option<Arc<crate::trust::TrustStore>>,
     /// true 时 upstream 已是到真实目标的隧道，HTTP 层应把 absolute-form 转 origin-form。
     pub upstream_tunneled: bool,
 }

@@ -6,6 +6,7 @@ use crate::duplex::{bridge, prepare_transcript, CaptureConfig, PrefixedIo};
 use crate::inspect;
 use crate::policy::{ConnectionContext, PolicySnapshot, Protocol};
 use crate::protocol::{run_stack, BoxedStream, HandlerContext};
+use crate::trust::TrustStore;
 use crate::websocket::{self, Compression};
 use base64::Engine;
 use http_body::{Body as HttpBodyTrait, Frame, SizeHint};
@@ -19,8 +20,13 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::WebPkiServerVerifier;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig,
+    SignatureScheme,
+};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -186,8 +192,15 @@ where
     let host = inner.host.clone();
     let (client, inbound_alpn) = accept_client_tls(client, &host, &inner.mitm).await?;
     let inbound_h2 = inbound_alpn.as_deref() == Some(b"h2");
-    let upstream =
-        connect_outbound_tls(upstream, &host, &inner.mitm, inbound_alpn.as_deref()).await?;
+    let upstream = connect_outbound_tls(
+        upstream,
+        &host,
+        inner.context.destination.port,
+        &inner.mitm,
+        inner.trust.clone(),
+        inbound_alpn.as_deref(),
+    )
+    .await?;
     let outbound_h2 = upstream.get_ref().1.alpn_protocol() == Some(b"h2");
     serve_decrypted(
         Box::new(client) as BoxedStream,
@@ -227,10 +240,177 @@ where
     Ok((client, inbound_alpn))
 }
 
+#[derive(Debug)]
+struct FirstUseServerVerifier {
+    standard: Arc<WebPkiServerVerifier>,
+    pinned: Option<CertificateDer<'static>>,
+    captured: Arc<Mutex<Option<CertificateDer<'static>>>>,
+}
+
+impl ServerCertVerifier for FirstUseServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if let Some(pinned) = self.pinned.as_ref() {
+            if pinned.as_ref() != end_entity.as_ref() {
+                return Err(rustls::Error::General(
+                    "TLS host certificate changed from the trusted first-use value".into(),
+                ));
+            }
+            return verify_with_exact_certificate(
+                end_entity,
+                intermediates,
+                server_name,
+                ocsp_response,
+                now,
+            );
+        }
+        match self.standard.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(verified) => Ok(verified),
+            Err(_) if certificate_is_self_signed(end_entity) => {
+                let verified = verify_with_exact_certificate(
+                    end_entity,
+                    intermediates,
+                    server_name,
+                    ocsp_response,
+                    now,
+                )?;
+                *self
+                    .captured
+                    .lock()
+                    .map_err(|_| rustls::Error::General("TLS TOFU state poisoned".into()))? =
+                    Some(CertificateDer::from(end_entity.as_ref().to_vec()));
+                Ok(verified)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.standard.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.standard.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.standard.supported_verify_schemes()
+    }
+}
+
+fn certificate_is_self_signed(certificate: &CertificateDer<'_>) -> bool {
+    x509_parser::parse_x509_certificate(certificate.as_ref()).is_ok_and(|(_, certificate)| {
+        certificate.subject() == certificate.issuer() && certificate.verify_signature(None).is_ok()
+    })
+}
+
+fn verify_with_exact_certificate(
+    end_entity: &CertificateDer<'_>,
+    _intermediates: &[CertificateDer<'_>],
+    server_name: &ServerName<'_>,
+    _ocsp_response: &[u8],
+    now: UnixTime,
+) -> Result<ServerCertVerified, rustls::Error> {
+    let (_, certificate) = x509_parser::parse_x509_certificate(end_entity.as_ref())
+        .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+    let now = x509_parser::time::ASN1Time::from_timestamp(now.as_secs() as i64)
+        .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+    if !certificate.validity().is_valid_at(now) {
+        return Err(rustls::Error::InvalidCertificate(CertificateError::Expired));
+    }
+    if !certificate_matches_server_name(&certificate, server_name)? {
+        return Err(rustls::Error::InvalidCertificate(
+            CertificateError::NotValidForName,
+        ));
+    }
+    Ok(ServerCertVerified::assertion())
+}
+
+fn certificate_matches_server_name(
+    certificate: &x509_parser::certificate::X509Certificate<'_>,
+    server_name: &ServerName<'_>,
+) -> Result<bool, rustls::Error> {
+    use x509_parser::extensions::GeneralName;
+
+    let alternative_names = certificate
+        .subject_alternative_name()
+        .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+    match server_name {
+        ServerName::DnsName(expected) => {
+            let expected = expected.as_ref().trim_end_matches('.').to_ascii_lowercase();
+            if let Some(names) = alternative_names {
+                return Ok(names.value.general_names.iter().any(|name| {
+                    matches!(name, GeneralName::DNSName(candidate) if dns_name_matches(candidate, &expected))
+                }));
+            }
+            Ok(certificate.subject().iter_common_name().any(|name| {
+                name.as_str()
+                    .is_ok_and(|candidate| dns_name_matches(candidate, &expected))
+            }))
+        }
+        ServerName::IpAddress(expected) => {
+            let expected = std::net::IpAddr::from(*expected);
+            Ok(alternative_names.is_some_and(|names| {
+                names.value.general_names.iter().any(|name| match name {
+                    GeneralName::IPAddress(bytes) if bytes.len() == 4 => {
+                        expected
+                            == std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                                bytes[0], bytes[1], bytes[2], bytes[3],
+                            ))
+                    }
+                    GeneralName::IPAddress(bytes) if bytes.len() == 16 => {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(bytes);
+                        expected == std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets))
+                    }
+                    _ => false,
+                })
+            }))
+        }
+        _ => Ok(false),
+    }
+}
+
+fn dns_name_matches(candidate: &str, expected: &str) -> bool {
+    let candidate = candidate.trim_end_matches('.').to_ascii_lowercase();
+    if let Some(suffix) = candidate.strip_prefix("*.") {
+        return expected != suffix
+            && expected.ends_with(&format!(".{suffix}"))
+            && expected[..expected.len() - suffix.len() - 1]
+                .find('.')
+                .is_none();
+    }
+    candidate == expected
+}
+
 async fn connect_outbound_tls<S>(
     upstream: S,
     host: &str,
+    port: u16,
     mitm: &TlsMitm,
+    trust: Option<Arc<TrustStore>>,
     inbound_alpn: Option<&[u8]>,
 ) -> io::Result<tokio_rustls::client::TlsStream<S>>
 where
@@ -238,15 +418,35 @@ where
 {
     let server_name = ServerName::try_from(host.to_owned())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
-    // HTTP/1 Upgrade is hop-by-hop. Keep an HTTP/1 client connection to the
-    // origin so a WebSocket handshake can be upgraded on both sides instead
-    // of being translated to HTTP/2 and losing its raw byte stream.
-    let outbound_config = match inbound_alpn {
-        Some(b"h2") => mitm.outbound.clone(),
-        Some(b"http/1.1") => mitm.outbound_http1.clone(),
-        _ => mitm.outbound_raw.clone(),
+    let captured = Arc::new(Mutex::new(None));
+    let outbound_config = if let Some(trust) = trust.as_ref() {
+        let material = trust.tls_material(host, port)?;
+        let standard = WebPkiServerVerifier::builder(material.roots)
+            .build()
+            .map_err(io::Error::other)?;
+        let verifier = Arc::new(FirstUseServerVerifier {
+            standard,
+            pinned: material.host_certificate,
+            captured: captured.clone(),
+        });
+        let mut config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        config.alpn_protocols = match inbound_alpn {
+            Some(b"h2") => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            Some(b"http/1.1") => vec![b"http/1.1".to_vec()],
+            _ => Vec::new(),
+        };
+        Arc::new(config)
+    } else {
+        match inbound_alpn {
+            Some(b"h2") => mitm.outbound.clone(),
+            Some(b"http/1.1") => mitm.outbound_http1.clone(),
+            _ => mitm.outbound_raw.clone(),
+        }
     };
-    TlsConnector::from(outbound_config)
+    let stream = TlsConnector::from(outbound_config)
         .connect(server_name, upstream)
         .await
         .map_err(|error| {
@@ -256,23 +456,40 @@ where
                     "upstream TLS handshake failed while validating the real target certificate: {error}"
                 ),
             )
-        })
+        })?;
+    let first_seen = captured
+        .lock()
+        .map_err(|_| io::Error::other("TLS TOFU state poisoned"))?
+        .take();
+    if let (Some(trust), Some(certificate)) = (trust, first_seen) {
+        let host = host.to_owned();
+        tokio::task::spawn_blocking(move || trust.trust_tls_host(&host, port, &certificate))
+            .await
+            .map_err(io::Error::other)??;
+    }
+    Ok(stream)
 }
 
-/// 客户端 HTTP 代理 CONNECT 隧道在 2xx 之后进入 TLS 阶段。隧道在 TLS 阶段死亡时
-/// 不再静默直连重建：传输路径由客户端代理决定，代理不可达就干净失败并保留
-/// `tls handshake eof` 等真实原因，由上层（agent/客户端）感知。外层 CONNECT 仍
-/// 如实转发并保留，serve 对原对端说的协议始终是 TLS。
 async fn connect_outbound_through_client_proxy<S>(
     proxy: S,
     host: &str,
+    port: u16,
     mitm: &TlsMitm,
+    trust: Option<Arc<TrustStore>>,
     inbound_alpn: Option<&[u8]>,
 ) -> io::Result<tokio_rustls::client::TlsStream<BoxedStream>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    connect_outbound_tls(Box::new(proxy) as BoxedStream, host, mitm, inbound_alpn).await
+    connect_outbound_tls(
+        Box::new(proxy) as BoxedStream,
+        host,
+        port,
+        mitm,
+        trust,
+        inbound_alpn,
+    )
+    .await
 }
 
 /// TLS 解密后的下钻：ALPN 已协商 HTTP 时直接进入 HTTP 层（h2/h1，与既有热路径
@@ -464,9 +681,15 @@ where
     }
     let (client, inbound_alpn) = accept_client_tls(client, &host, &inner.mitm).await?;
     let inbound_h2 = inbound_alpn.as_deref() == Some(b"h2");
-    let upstream =
-        connect_outbound_through_client_proxy(proxy, &host, &inner.mitm, inbound_alpn.as_deref())
-            .await?;
+    let upstream = connect_outbound_through_client_proxy(
+        proxy,
+        &host,
+        inner.context.destination.port,
+        &inner.mitm,
+        inner.trust.clone(),
+        inbound_alpn.as_deref(),
+    )
+    .await?;
     let outbound_h2 = upstream.get_ref().1.alpn_protocol() == Some(b"h2");
     serve_decrypted(
         Box::new(client) as BoxedStream,
@@ -1755,6 +1978,7 @@ mod tests {
             context,
             decision,
             sessions: SessionRegistry::default(),
+            trust: None,
             upstream_tunneled: false,
         }
     }

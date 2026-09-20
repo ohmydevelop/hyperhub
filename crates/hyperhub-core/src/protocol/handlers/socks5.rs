@@ -127,6 +127,7 @@ impl ProtocolHandler for Socks5Layer {
                 context,
                 decision,
                 sessions: inner.sessions,
+                trust: inner.trust,
                 upstream_tunneled: false,
             };
             let port = inner.context.destination.port;

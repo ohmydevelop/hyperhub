@@ -500,7 +500,13 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
             details
         }
         ConfigSection::Environment => vec!["变量值=已脱敏".into()],
-        ConfigSection::Certificate => vec![format!("状态={}", enabled.unwrap_or("启用"))],
+        ConfigSection::Certificate => vec![format!(
+            "范围={}，状态={}",
+            item.get("host")
+                .and_then(Value::as_str)
+                .unwrap_or("全局根证书"),
+            enabled.unwrap_or("启用")
+        )],
         ConfigSection::Network => vec![format!(
             "{}，优先级={}，动作={}，目标={} 条",
             enabled.unwrap_or("启用"),

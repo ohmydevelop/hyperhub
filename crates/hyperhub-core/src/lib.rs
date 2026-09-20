@@ -21,6 +21,7 @@ pub mod session;
 pub mod socks;
 pub mod ssh_keys;
 pub(crate) mod ssh_mitm;
+pub mod trust;
 mod websocket;
 
 pub use config::{Config, ConfigError};
