@@ -665,7 +665,9 @@ impl NeedleSession {
     }
 
     fn wait_until_ready(&mut self) -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        // Model mapping and runtime initialization can exceed 20 seconds on
+        // shared CI runners or low-power machines even when the child is healthy.
+        let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait().map_err(|error| error.to_string())? {
                 return Err(format!(
