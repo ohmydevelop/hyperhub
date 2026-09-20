@@ -5,11 +5,11 @@ description: Use when an Agent needs to inspect, plan, submit, or verify HyperHu
 
 # HyperHub CLI 操作
 
-只通过已安装的 `hyperhub` CLI 操作 HyperHub；不要查找、修改或依赖 HyperHub 源码、仓库脚本和当前工作目录。
+通过已安装的 `hyperhub` CLI 管理本机 HyperHub。
 
 ## 定位 CLI 与认证材料
 
-1. 使用 PATH 中的 `hyperhub`；找不到时请用户提供可执行文件路径，不要猜测仓库路径。
+1. 使用 PATH 中的 `hyperhub`；找不到时请用户提供可执行文件路径。
 2. 需要认证的非交互命令使用用户明确提供的权限受限密码文件：
 
    ```sh
