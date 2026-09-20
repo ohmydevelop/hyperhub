@@ -1041,7 +1041,10 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
             if !valid_environment_name(&name) {
                 return Err(format!("无效的环境变量名：{name}"));
             }
-            let value = required_arg(args, "value")?.to_owned();
+            let mut value = required_arg(args, "value")?.to_owned();
+            if let Some(candidate) = environment_value_from_query(query, &name) {
+                value = candidate;
+            }
             if let Some(variable) = config.environment.iter_mut().find(|item| item.name == name) {
                 variable.value = SecretValue::Inline { value };
             } else {
@@ -1573,6 +1576,30 @@ fn environment_name_from_query(query: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn environment_value_from_query(query: &str, name: &str) -> Option<String> {
+    let lowered = query.to_ascii_lowercase();
+    let name_position = lowered.find(&name.to_ascii_lowercase())?;
+    let tail = &query[name_position + name.len()..];
+    let lowered_tail = tail.to_ascii_lowercase();
+    for marker in ["值是", "值为", " to ", " value is ", "="] {
+        let position = if marker.is_ascii() {
+            lowered_tail.find(marker)
+        } else {
+            tail.find(marker)
+        };
+        let Some(position) = position else {
+            continue;
+        };
+        let value = tail[position + marker.len()..]
+            .trim()
+            .trim_matches(|character| matches!(character, '"' | '\'' | '`'));
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
 fn normalize_identifier(value: &str, query: &str, marker: &str) -> String {
     identifier_after(query, marker).unwrap_or_else(|| value.to_owned())
 }
@@ -1670,6 +1697,40 @@ mod tests {
                 .as_deref(),
             Some("NEEDLE_TEST_ENV")
         );
+        assert_eq!(
+            environment_value_from_query(
+                "Set environment variable NEEDLE_TEST_ENV to local-value",
+                "NEEDLE_TEST_ENV"
+            )
+            .as_deref(),
+            Some("local-value")
+        );
+        assert_eq!(
+            environment_value_from_query(
+                "添加环境变量 CHAT_FINAL_TOKEN，值是 final-secret",
+                "CHAT_FINAL_TOKEN"
+            )
+            .as_deref(),
+            Some("final-secret")
+        );
+    }
+
+    #[test]
+    fn environment_tool_uses_the_exact_user_value_over_model_guess() {
+        let mut config = Config::default();
+        execute_tool(
+            &mut config,
+            &call(
+                "set_environment_variable",
+                json!({"name": "NEEDLE_TEST_ENV", "value": "model-guess"}),
+            ),
+            "Set environment variable NEEDLE_TEST_ENV to local-value",
+        )
+        .unwrap();
+        assert!(matches!(
+            &config.environment[0].value,
+            SecretValue::Inline { value } if value == "local-value"
+        ));
     }
 
     #[test]
