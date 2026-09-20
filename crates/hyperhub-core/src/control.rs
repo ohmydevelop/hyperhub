@@ -972,6 +972,40 @@ impl ControlService {
                     message: "invalid firewall refresh reporter".into(),
                 },
             },
+            ControlRequest::RefreshSandbox {
+                session_id,
+                token,
+                root_pid,
+                current_version,
+            } => {
+                if !self
+                    .sessions
+                    .authenticate_member(&session_id, &token, root_pid)
+                {
+                    ControlResponse::Error {
+                        message: "invalid sandbox refresh session".into(),
+                    }
+                } else if current_version >= runtime.updated_at_ms {
+                    ControlResponse::SandboxRefresh {
+                        version: current_version,
+                        changed: false,
+                        enforce: runtime.config.mode == crate::config::EnforcementMode::Enforce,
+                        sandbox: None,
+                    }
+                } else {
+                    match compile_sandbox_snapshot(&runtime.config, runtime.updated_at_ms) {
+                        Ok(sandbox) => ControlResponse::SandboxRefresh {
+                            version: runtime.updated_at_ms,
+                            changed: true,
+                            enforce: runtime.config.mode == crate::config::EnforcementMode::Enforce,
+                            sandbox: Some(sandbox),
+                        },
+                        Err(message) => ControlResponse::Error {
+                            message: format!("cannot compile sandbox snapshot: {message}"),
+                        },
+                    }
+                }
+            }
             ControlRequest::ReportFirewallAudit {
                 session_id,
                 token,
@@ -2245,12 +2279,13 @@ mod tests {
         };
         #[cfg(unix)]
         let endpoint = endpoint_root.join("control.sock").display().to_string();
+        let runtime = RuntimeState::new(Arc::new(config)).unwrap();
         let service = ControlService::new(
             SessionRegistry::default(),
             ConnectionRegistry::default(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n".into(),
             crate::audit::AuditWriter::open(None).unwrap(),
-            RuntimeState::new(Arc::new(config)).unwrap(),
+            runtime.clone(),
             Zeroizing::new(vec![0; 32]),
         );
         let task = tokio::spawn(run_control_server(endpoint.clone(), service));
@@ -2347,6 +2382,88 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(response, ControlResponse::Ok));
+        let response = control_request(
+            &endpoint,
+            &ControlRequest::RefreshSandbox {
+                session_id: "test".into(),
+                token: token.clone(),
+                root_pid: std::process::id(),
+                current_version: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let sandbox_version = match response {
+            ControlResponse::SandboxRefresh {
+                version,
+                changed: true,
+                enforce: true,
+                sandbox: Some(sandbox),
+            } => {
+                assert_eq!(sandbox.version, version);
+                version
+            }
+            _ => panic!("unexpected sandbox refresh response"),
+        };
+        let response = control_request(
+            &endpoint,
+            &ControlRequest::RefreshSandbox {
+                session_id: "test".into(),
+                token: token.clone(),
+                root_pid: std::process::id(),
+                current_version: sandbox_version,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            response,
+            ControlResponse::SandboxRefresh {
+                version,
+                changed: false,
+                enforce: true,
+                sandbox: None,
+            } if version == sandbox_version
+        ));
+        let mut observe = (*runtime.snapshot().config).clone();
+        observe.mode = crate::config::EnforcementMode::Observe;
+        runtime.apply(Arc::new(observe)).unwrap();
+        let response = control_request(
+            &endpoint,
+            &ControlRequest::RefreshSandbox {
+                session_id: "test".into(),
+                token: token.clone(),
+                root_pid: std::process::id(),
+                current_version: sandbox_version,
+            },
+        )
+        .await
+        .unwrap();
+        let sandbox_version = match response {
+            ControlResponse::SandboxRefresh {
+                version,
+                changed: true,
+                enforce: false,
+                sandbox: Some(sandbox),
+            } => {
+                assert_eq!(sandbox.version, version);
+                version
+            }
+            _ => panic!("sandbox refresh did not propagate observe mode"),
+        };
+        let response = control_request(
+            &endpoint,
+            &ControlRequest::RefreshSandbox {
+                session_id: "test".into(),
+                token: token.clone(),
+                root_pid: u32::MAX,
+                current_version: sandbox_version,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(response, ControlResponse::Error { .. }));
+
         let response = control_request(
             &endpoint,
             &ControlRequest::ResolveName {

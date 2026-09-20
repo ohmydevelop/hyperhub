@@ -1350,6 +1350,12 @@ pub enum ControlRequest {
         token: String,
         current_version: u64,
     },
+    RefreshSandbox {
+        session_id: String,
+        token: String,
+        root_pid: u32,
+        current_version: u64,
+    },
     SubscribeSandbox {
         session_id: String,
         token: String,
@@ -1441,6 +1447,13 @@ pub enum ControlResponse {
     SandboxUpdate {
         version: u64,
         changed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox: Option<crate::sandbox::SandboxSnapshot>,
+    },
+    SandboxRefresh {
+        version: u64,
+        changed: bool,
+        enforce: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sandbox: Option<crate::sandbox::SandboxSnapshot>,
     },

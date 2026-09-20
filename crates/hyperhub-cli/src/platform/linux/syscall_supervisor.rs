@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString, OsString};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::ffi::OsStrExt;
+use std::time::{Duration, Instant};
 
 use hyperhub_core::config::{FileSandboxOperation, SandboxAction};
 use hyperhub_core::control::control_request;
@@ -36,6 +37,7 @@ const PTRACE_EVENT_EXEC: u32 = 4;
 const NT_PRSTATUS: usize = 1;
 const SYSCALL_STOP: i32 = libc::SIGTRAP | 0x80;
 const SCRATCH_SIZE: usize = 4096;
+const SANDBOX_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 struct TargetAddress {
@@ -115,6 +117,8 @@ struct Supervisor {
     next_connection_id: u64,
     control: tokio::runtime::Runtime,
     sandbox: Option<CompiledSandboxSnapshot>,
+    next_sandbox_refresh: Instant,
+    last_sandbox_refresh_error: Option<String>,
     hook_counts: HashMap<&'static str, u64>,
     hook_report: Option<std::path::PathBuf>,
     require_all_hooks: bool,
@@ -204,6 +208,8 @@ where
         next_connection_id: 1,
         control,
         sandbox,
+        next_sandbox_refresh: Instant::now() + SANDBOX_REFRESH_INTERVAL,
+        last_sandbox_refresh_error: None,
         hook_counts: HashMap::new(),
         hook_report,
         require_all_hooks,
@@ -313,8 +319,74 @@ impl Supervisor {
         Ok(())
     }
 
+    fn refresh_sandbox_if_due(&mut self) {
+        let now = Instant::now();
+        if now < self.next_sandbox_refresh {
+            return;
+        }
+        self.next_sandbox_refresh = now + SANDBOX_REFRESH_INTERVAL;
+        let current_version = self.sandbox.as_ref().map_or(0, |snapshot| snapshot.version);
+        let request = ControlRequest::RefreshSandbox {
+            session_id: self.session_id.clone(),
+            token: String::from_utf8_lossy(&self.password).into_owned(),
+            root_pid: self.root_pid as u32,
+            current_version,
+        };
+        let response = self
+            .control
+            .block_on(control_request(&self.endpoint, &request));
+        let result = (|| -> Result<(), String> {
+            match response {
+                Ok(ControlResponse::SandboxRefresh {
+                    version,
+                    changed,
+                    enforce,
+                    sandbox,
+                }) => {
+                    self.enforce = enforce;
+                    if !changed {
+                        return Ok(());
+                    }
+                    let snapshot = sandbox.ok_or_else(|| {
+                        "sandbox refresh reported a change without a snapshot".to_string()
+                    })?;
+                    if snapshot.version != version {
+                        return Err(format!(
+                            "sandbox refresh version mismatch: response={version} snapshot={}",
+                            snapshot.version
+                        ));
+                    }
+                    let compiled = compile_runtime_snapshot(snapshot)
+                        .map_err(|error| format!("cannot compile refreshed sandbox: {error}"))?;
+                    self.sandbox = Some(compiled);
+                    Ok(())
+                }
+                Ok(ControlResponse::Error { message }) => Err(message),
+                Ok(_) => Err("Serve returned an unexpected sandbox refresh response".into()),
+                Err(error) => Err(format!("cannot refresh ptrace sandbox: {error}")),
+            }
+        })();
+        match result {
+            Ok(()) => self.last_sandbox_refresh_error = None,
+            Err(error) => self.log_sandbox_refresh_error(error),
+        }
+    }
+
+    fn log_sandbox_refresh_error(&mut self, error: String) {
+        if self.last_sandbox_refresh_error.as_deref() == Some(error.as_str()) {
+            return;
+        }
+        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+            eprintln!("hyperhub: ptrace sandbox refresh kept the previous snapshot: {error}");
+        }
+        self.last_sandbox_refresh_error = Some(error);
+    }
+
     fn handle_syscall(&mut self, tid: libc::pid_t) -> Result<(), String> {
         let entering = self.threads.entry(tid).or_default().entering;
+        if entering {
+            self.refresh_sandbox_if_due();
+        }
         let mut registers = Registers::get(tid)?;
         if entering {
             let pending = self.syscall_enter(tid, &mut registers)?;
