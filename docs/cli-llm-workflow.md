@@ -12,13 +12,15 @@ hyperhub chat
 
 Needle 3 权重与平台 runner 都嵌入 HyperHub 二进制；运行时关闭 telemetry，只在随机本机回环端口进行父子进程通信。聊天记录不持久化，配置摘要不显示 Secret。非交互式外部 LLM 和 Skill 仍必须使用下述 JSON Patch + 人工审批流程，两条信任边界不能混用。
 
-LLM 通过仓库 Skill 调用普通 CLI；Shell 负责组合能力，HyperHub CLI 负责配置语义、加密存储、运行时热更新和可恢复的人工审批队列。
+LLM 通过 HyperHub CLI 内嵌并安装的 Agent Skill 调用普通 CLI；Shell 负责组合能力，HyperHub CLI 负责配置语义、加密存储、运行时热更新和可恢复的人工审批队列。
 
-Skill 位于：
+`hyperhub start` 和 `hyperhub restart` 会把 Skill 安装到用户级通用目录：
 
 ```text
-.agents/skills/hyperhub-cli/SKILL.md
+~/.agents/skills/hyperhub-cli
 ```
+
+Skill 源码属于 CLI 构建资源，不依赖仓库工作目录。CLI 版本或内容摘要变化时全量原子替换，版本一致时跳过；安装失败会阻止 Serve 启动。
 
 ## 1. 读取脱敏配置
 

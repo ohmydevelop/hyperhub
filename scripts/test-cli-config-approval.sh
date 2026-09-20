@@ -286,21 +286,26 @@ cmp "$migrated_show" "$redacted_view"
 
 live_transcript=skipped
 run_live_update_test() {
-  "$hyperhub" serve --password-file "$password_file" \
-    >"$temporary/serve.stdout" 2>"$temporary/serve.stderr" &
-  serve_pid=$!
-  for ((attempt = 0; attempt < 100; attempt++)); do
-    if "$hyperhub" status --json 2>/dev/null | grep -q '"state".*"running"'; then
-      break
-    fi
-    kill -0 "$serve_pid" 2>/dev/null || {
-      cat "$temporary/serve.stderr" >&2
-      echo 'Serve exited during config approval test' >&2
-      exit 1
-    }
-    sleep 0.05
-  done
-  "$hyperhub" status --json | grep -q '"state".*"running"'
+  "$hyperhub" start --password-file "$password_file" \
+    >"$temporary/start.stdout" 2>"$temporary/start.stderr"
+  skill="$HOME/.agents/skills/hyperhub-cli"
+  [[ -f $skill/SKILL.md ]]
+  [[ -f $skill/agents/openai.yaml ]]
+  python3 - "$skill/.hyperhub-skill.json" <<'PY'
+import json
+import pathlib
+import sys
+marker = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert marker["schema_version"] == 1
+assert marker["name"] == "hyperhub-cli"
+assert len(marker["content_sha256"]) == 64
+assert marker["bundle_version"].startswith(marker["cli_version"] + "+sha256.")
+PY
+  "$hyperhub" start --password-file "$password_file" >"$temporary/start-again.stdout"
+  ! grep -q 'Agent Skill installed\|Agent Skill upgraded' "$temporary/start-again.stdout"
+  status=$("$hyperhub" status --json)
+  grep -q '"state".*"running"' <<<"$status"
+  serve_pid=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"])' <<<"$status")
 
   live_patch="$temporary/live-patch.json"
   printf '[{"op":"replace","path":"/debug","value":true}]\n' > "$live_patch"
@@ -310,8 +315,7 @@ run_live_update_test() {
   drive_approve apply "$live_transcript"
   grep -q '\[1/1\] 已批准（live_update=true）' "$live_transcript"
 
-  kill "$serve_pid" 2>/dev/null || true
-  wait "$serve_pid" 2>/dev/null || true
+  "$hyperhub" stop >/dev/null
   serve_pid=
 }
 

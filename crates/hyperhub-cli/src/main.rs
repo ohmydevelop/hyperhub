@@ -27,6 +27,7 @@ mod config_tui;
 mod lifecycle;
 mod password;
 mod platform;
+mod skill_installer;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunConfig {

@@ -75,6 +75,16 @@ hyperhub run bash       # Linux
 hyperhub.exe run cmd    # Windows
 ```
 
+### Agent Skill 自动安装
+
+HyperHub CLI 内嵌用于 Agent 操作配置的 `hyperhub-cli` Skill。每次执行 `hyperhub start`（包括 `restart`）时都会检查用户级通用目录：
+
+```text
+~/.agents/skills/hyperhub-cli
+```
+
+首次运行会完整安装；CLI 版本或 Skill 内容摘要变化时会原子替换升级；版本一致则跳过。安装失败会阻止 `start`，避免 Serve 已运行但 Agent 仍使用缺失或过期的操作说明。Skill 仅通过已安装 CLI 工作，不依赖 HyperHub 源码或当前目录。
+
 ### Linux 执行后端
 
 Linux 默认使用 `ptrace-syscall` 作为动态、静态和 stripped ELF 的通用可靠性基线。普通运行无需指定：

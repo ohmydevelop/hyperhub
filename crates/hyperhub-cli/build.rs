@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 const FRIDA_VERSION: &str = "17.17.0";
 const NEEDLE3_REVISION: &str = "c1fc4d4cb32993156a880ceb8ff171b03b1f166a";
@@ -11,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HYPERHUB_EMBEDDED_AGENT_PATH");
     println!("cargo:rerun-if-env-changed=HYPERHUB_NEEDLE3_MODEL");
     println!("cargo:rerun-if-env-changed=HYPERHUB_NEEDLE3_RUNNER");
+    prepare_embedded_skill();
     prepare_needle3();
     prepare_embedded_agent();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
@@ -58,6 +59,114 @@ fn main() {
     }
 
     println!("cargo:rustc-link-search=native={}", root.display());
+}
+
+fn prepare_embedded_skill() {
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is required"));
+    let manifest = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is required"),
+    );
+    let source = manifest.join("assets").join("skills").join("hyperhub-cli");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let mut files = Vec::new();
+    collect_skill_files(&source, &source, &mut files);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    if !files.iter().any(|(path, _)| path == "SKILL.md") {
+        panic!("embedded HyperHub Skill is missing SKILL.md");
+    }
+    if !files.iter().any(|(path, _)| path == "agents/openai.yaml") {
+        panic!("embedded HyperHub Skill is missing agents/openai.yaml");
+    }
+
+    let mut digest = Sha256::new();
+    let mut entries = String::new();
+    for (relative, path) in &files {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = std::fs::read(path).unwrap_or_else(|error| {
+            panic!("cannot read embedded Skill {}: {error}", path.display())
+        });
+        digest.update((relative.len() as u64).to_le_bytes());
+        digest.update(relative.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(&bytes);
+        let source_literal = format!("{:?}", path.canonicalize().unwrap().to_string_lossy());
+        entries.push_str(&format!(
+            "    EmbeddedSkillFile {{ path: {relative:?}, bytes: include_bytes!({source_literal}) }},\n"
+        ));
+    }
+    let digest = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is required");
+    let bundle_version = format!("{version}+sha256.{digest}");
+    std::fs::write(
+        output.join("embedded_skill.rs"),
+        format!(
+            "const EMBEDDED_SKILL_NAME: &str = \"hyperhub-cli\";\n\
+             const EMBEDDED_SKILL_CLI_VERSION: &str = {version:?};\n\
+             const EMBEDDED_SKILL_SHA256: &str = {digest:?};\n\
+             const EMBEDDED_SKILL_BUNDLE_VERSION: &str = {bundle_version:?};\n\
+             static EMBEDDED_SKILL_FILES: &[EmbeddedSkillFile] = &[\n{entries}];\n"
+        ),
+    )
+    .expect("cannot write embedded Skill metadata");
+}
+
+fn collect_skill_files(root: &Path, directory: &Path, output: &mut Vec<(String, PathBuf)>) {
+    let mut entries = std::fs::read_dir(directory)
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot read Skill directory {}: {error}",
+                directory.display()
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| panic!("cannot enumerate Skill directory: {error}"));
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type().unwrap_or_else(|error| {
+            panic!("cannot inspect Skill path {}: {error}", path.display())
+        });
+        if file_type.is_symlink() {
+            panic!(
+                "embedded Skill must not contain symlinks: {}",
+                path.display()
+            );
+        }
+        if file_type.is_dir() {
+            collect_skill_files(root, &path, output);
+            continue;
+        }
+        if !file_type.is_file() {
+            panic!(
+                "embedded Skill contains a non-file entry: {}",
+                path.display()
+            );
+        }
+        let relative = path
+            .strip_prefix(root)
+            .expect("Skill file must remain below its root");
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            panic!("embedded Skill path is invalid: {}", relative.display());
+        }
+        let relative = relative
+            .components()
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .expect("Skill paths must be UTF-8")
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        output.push((relative, path));
+    }
 }
 
 fn prepare_needle3() {

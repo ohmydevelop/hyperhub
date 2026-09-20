@@ -23,6 +23,20 @@ pub struct LogsConfig {
 }
 
 pub fn start(config: StartConfig) -> Result<i32, String> {
+    let skill = crate::skill_installer::install_user_skill()?;
+    match skill.status {
+        crate::skill_installer::SkillInstallStatus::Installed => println!(
+            "HyperHub Agent Skill installed ({})\nskill: {}",
+            skill.bundle_version,
+            skill.path.display()
+        ),
+        crate::skill_installer::SkillInstallStatus::Upgraded => println!(
+            "HyperHub Agent Skill upgraded ({})\nskill: {}",
+            skill.bundle_version,
+            skill.path.display()
+        ),
+        crate::skill_installer::SkillInstallStatus::Current => {}
+    }
     if let Some(status) = query_status()? {
         println!("HyperHub serve is already running (pid {})", status.pid);
         return Ok(0);
