@@ -54,7 +54,7 @@ target/benchmarks/linux-fixtures/<architecture>/
 
 | 分组 | Fixture/对象 | 必须验证的行为 |
 | --- | --- | --- |
-| 动态 ptrace 基线 | `linux-dynamic-probe`、`linux_http_credential_probe.py` | 动态 ELF 默认不依赖 Agent；覆盖 fork/exec、spawn、HTTP 凭证，以及自签名 TLS/SSH 的首次记录、复用和轮换拒绝 |
+| 动态 ptrace 基线 | `linux-dynamic-probe`、`linux_http_credential_probe.py`、`linux_ptrace_hot_update_probe.c` | 动态 ELF 默认不依赖 Agent；覆盖 fork/exec、spawn、HTTP 凭证、既有会话文件/子进程沙盒热更新，以及自签名 TLS/SSH 的首次记录、复用和轮换拒绝 |
 | 动态 Gum 优化 | `linux-dynamic-probe` | 单文件 CLI 的内嵌 Agent 在显式 `--backend gum` 时无需 sidecar runtime，且 25 个动态 Hook descriptor 全部安装并命中 |
 | 后端边界 | 复制到构建树外的单文件 CLI | 动态/静态 ELF 默认继续进入 ptrace；动态 ELF 显式选择 Gum 时使用内嵌 Agent |
 | 静态 C | raw-syscall stripped static ELF | DNS 三种 I/O、TCP、descriptor、文件变体、clone/fork/exec/wait 和完整 manifest |

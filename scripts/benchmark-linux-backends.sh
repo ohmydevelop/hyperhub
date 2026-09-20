@@ -111,7 +111,9 @@ echo_pid=
 credential_pid=
 trust_tls_pid=
 trust_ssh_pid=
+hot_update_pid=
 cleanup() {
+    [[ -z $hot_update_pid ]] || { kill "$hot_update_pid" 2>/dev/null || true; wait "$hot_update_pid" 2>/dev/null || true; }
   [[ -z $trust_ssh_pid ]] || { kill "$trust_ssh_pid" 2>/dev/null || true; wait "$trust_ssh_pid" 2>/dev/null || true; }
   [[ -z $trust_tls_pid ]] || { kill "$trust_tls_pid" 2>/dev/null || true; wait "$trust_tls_pid" 2>/dev/null || true; }
   [[ -z $credential_pid ]] || { kill "$credential_pid" 2>/dev/null || true; wait "$credential_pid" 2>/dev/null || true; }
@@ -279,29 +281,38 @@ done
 read -r echo_port dns_port < "$ports_file"
 dynamic_probe="$fixture_dir/linux-dynamic-probe"
 dynamic_source="$root/tests/fixtures/linux_probe.c"
+hot_update_probe="$fixture_dir/linux-ptrace-hot-update-probe"
+hot_update_source="$root/tests/fixtures/linux_ptrace_hot_update_probe.c"
 if ((rebuild_fixtures)) || [[ ! -x $dynamic_probe || $dynamic_source -nt $dynamic_probe ]]; then
   cc -O2 -Wall -Wextra "$dynamic_source" -o "$dynamic_probe"
 fi
-python3 - "$fixture_dir/manifest.json" "$dynamic_probe" <<'PYCODE'
+if ((rebuild_fixtures)) || [[ ! -x $hot_update_probe || $hot_update_source -nt $hot_update_probe ]]; then
+  cc -O2 -Wall -Wextra "$hot_update_source" -o "$hot_update_probe"
+fi
+python3 - "$fixture_dir/manifest.json" "$dynamic_probe" "$hot_update_probe" <<'PYCODE'
 import hashlib
 import json
 import pathlib
 import sys
 manifest_path = pathlib.Path(sys.argv[1])
-binary = pathlib.Path(sys.argv[2])
+binaries = {
+    "dynamic-c": ("dynamic-probe", pathlib.Path(sys.argv[2])),
+    "ptrace-hot-update": ("dynamic-probe", pathlib.Path(sys.argv[3])),
+}
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 manifest["fixtures"] = [
-    fixture for fixture in manifest["fixtures"] if fixture["workload"] != "dynamic-c"
+    fixture for fixture in manifest["fixtures"] if fixture["workload"] not in binaries
 ]
-manifest["fixtures"].append(
-    {
-        "workload": "dynamic-c",
-        "kind": "dynamic-probe",
-        "path": str(binary),
-        "bytes": binary.stat().st_size,
-        "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-    }
-)
+for workload, (kind, binary) in binaries.items():
+    manifest["fixtures"].append(
+        {
+            "workload": workload,
+            "kind": kind,
+            "path": str(binary),
+            "bytes": binary.stat().st_size,
+            "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+        }
+    )
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PYCODE
 "$hyperhub" run \
@@ -409,6 +420,149 @@ grep -q '"rule_id":"benchmark-http-route"' "$credential_audit" || {
   exit 1
 }
 record_check dynamic.ptrace_http_credential "route=benchmark-http-route"
+stop_serve
+
+# A long-running ptrace target must receive file/process sandbox changes without
+# being restarted. This guards parity with Gum's versioned sandbox subscription.
+export HOME="$temporary/hot-update-home"
+mkdir -p "$HOME" "$temporary/hot-update"
+hot_target="$temporary/hot-update/target.txt"
+printf 'hot-update-target\n' > "$hot_target"
+hot_config="$temporary/hot-update/config.toml"
+write_base_config "$hot_config" "$(free_port)"
+"$hyperhub" import "$hot_config" --password-file "$password_file" >/dev/null
+start_serve "$temporary/hot-update-serve.stdout.log" "$temporary/hot-update-serve.stderr.log"
+hot_fifo="$temporary/hot-update/commands.fifo"
+hot_output="$temporary/hot-update/output.log"
+mkfifo "$hot_fifo"
+exec 9<>"$hot_fifo"
+"$hyperhub" run --backend ptrace --password-file "$password_file" -- \
+  "$hot_update_probe" "$hot_target" /usr/bin/true \
+  <&9 >"$hot_output" 2>"$temporary/hot-update/target.stderr.log" &
+hot_update_pid=$!
+wait_for_hot_line() {
+  local pattern=$1 expected=$2
+  for ((attempt = 0; attempt < 200; attempt++)); do
+    count=$(grep -Ec "$pattern" "$hot_output" 2>/dev/null || true)
+    ((count >= expected)) && return
+    kill -0 "$hot_update_pid" 2>/dev/null || {
+      cat "$hot_output" >&2
+      cat "$temporary/hot-update/target.stderr.log" >&2
+      echo "ptrace hot-update fixture exited before '$pattern'" >&2
+      exit 1
+    }
+    sleep 0.025
+  done
+  cat "$hot_output" >&2
+  echo "timed out waiting for ptrace hot-update result '$pattern'" >&2
+  exit 1
+}
+wait_for_hot_line '^ready$' 1
+printf 'read\n' >&9
+wait_for_hot_line '^read:ok$' 1
+printf 'hold\n' >&9
+wait_for_hot_line '^hold:ok$' 1
+printf 'exec\n' >&9
+wait_for_hot_line '^exec:ok$' 1
+printf 'spawn\n' >&9
+wait_for_hot_line '^spawn:ok$' 1
+hot_patch="$temporary/hot-update/patch.json"
+python3 - "$hot_patch" "$hot_target" <<'PYCODE'
+import json, pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+target = sys.argv[2]
+patch = [
+    {
+        "op": "replace",
+        "path": "/sandbox/file",
+        "value": {
+            "enabled": True,
+            "default": {"action": "pass"},
+            "error_action": "deny",
+            "rules": [{
+                "uuid": "11111111-1111-4111-8111-111111111111",
+                "id": "deny-hot-read",
+                "enabled": True,
+                "priority": 100,
+                "action": "deny",
+                "patterns": [{"enabled": True, "pattern": f"^{re.escape(target)}$"}],
+                "operations": ["read"],
+            }],
+        },
+    },
+    {
+        "op": "replace",
+        "path": "/sandbox/process",
+        "value": {
+            "enabled": True,
+            "default": {"action": "pass"},
+            "error_action": "deny",
+            "rules": [{
+                "uuid": "22222222-2222-4222-8222-222222222222",
+                "id": "deny-hot-exec",
+                "enabled": True,
+                "priority": 100,
+                "action": "deny",
+                "patterns": [{"enabled": True, "executable": "^/usr/bin/true$", "command_line": ""}],
+            }],
+        },
+    },
+]
+path.write_text(json.dumps(patch, indent=2) + "\n", encoding="utf-8")
+PYCODE
+"$hyperhub" config patch "$hot_patch" --password-file "$password_file" \
+  >"$temporary/hot-update/patch.out"
+python3 - "$hyperhub" "$password_file" "$temporary/hot-update/approve.log" <<'PYCODE'
+import os, pathlib, pty, select, subprocess, sys, time
+binary, password, log_path = sys.argv[1:]
+master, slave = pty.openpty()
+process = subprocess.Popen(
+    [binary, "approve", "--password-file", password],
+    stdin=slave,
+    stdout=slave,
+    stderr=slave,
+    env=os.environ.copy(),
+    close_fds=True,
+)
+os.close(slave)
+os.write(master, b"a\na\n")
+output = bytearray()
+deadline = time.monotonic() + 30
+while process.poll() is None:
+    if time.monotonic() > deadline:
+        process.kill()
+        raise SystemExit("approve timed out")
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if ready:
+        try:
+            output.extend(os.read(master, 65536))
+        except OSError:
+            pass
+process.wait()
+pathlib.Path(log_path).write_bytes(output)
+os.close(master)
+if process.returncode != 0:
+    raise SystemExit(f"approve failed with {process.returncode}")
+PYCODE
+printf 'read\n' >&9
+wait_for_hot_line '^read:denied:' 1
+printf 'held-read\n' >&9
+wait_for_hot_line '^held-read:denied:' 1
+printf 'exec\n' >&9
+wait_for_hot_line '^exec:denied:' 1
+printf 'spawn\n' >&9
+wait_for_hot_line '^spawn:denied:' 1
+printf 'quit\n' >&9
+exec 9>&-
+wait "$hot_update_pid"
+hot_update_pid=
+hot_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
+[[ $(grep -c '"event":"sandbox_denied"' "$hot_audit" || true) -ge 4 ]] || {
+  cat "$hot_audit" >&2
+  echo 'ptrace hot-update denials were not audited' >&2
+  exit 1
+}
+record_check sandbox.ptrace_hot_update "same_pid open+held-fd+fork-exec+posix_spawn allow->deny"
 stop_serve
 
 # Trust-on-first-use regression: a self-signed TLS leaf is pinned to the exact
