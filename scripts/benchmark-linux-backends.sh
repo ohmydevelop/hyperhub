@@ -16,7 +16,7 @@ usage() {
 usage: scripts/benchmark-linux-backends.sh [options]
 
 Build HyperHub when needed, reuse versioned benchmark fixtures, and execute the
-complete Linux dynamic-Gum/static-ptrace functional and performance suite.
+complete Linux ptrace-baseline/explicit-Gum functional and performance suite.
 
 options:
   --iterations N       measured launches per workload (default: 1)
@@ -112,7 +112,9 @@ original_cargo_home=${CARGO_HOME:-"$original_home/.cargo"}
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/hyperhub-static-coverage.XXXXXX")
 serve_pid=
 echo_pid=
+credential_pid=
 cleanup() {
+  [[ -z $credential_pid ]] || { kill "$credential_pid" 2>/dev/null || true; wait "$credential_pid" 2>/dev/null || true; }
   [[ -z $echo_pid ]] || { kill "$echo_pid" 2>/dev/null || true; wait "$echo_pid" 2>/dev/null || true; }
   [[ -z $serve_pid ]] || { kill "$serve_pid" 2>/dev/null || true; wait "$serve_pid" 2>/dev/null || true; }
   python3 - "$temporary" <<'PY'
@@ -236,22 +238,26 @@ cp "$hyperhub" "$standalone_hyperhub"
 chmod 0755 "$standalone_hyperhub"
 (
   cd "$temporary"
+  "$standalone_hyperhub" run \
+    --password-file "$password_file" \
+    -- /bin/true >/dev/null
   if "$standalone_hyperhub" run \
+    --backend gum \
     --password-file "$password_file" \
     -- /bin/true >/dev/null 2>"$temporary/dynamic-no-runtime.stderr.log"; then
-    echo 'dynamic ELF unexpectedly started without a Gum Agent runtime' >&2
+    echo 'explicit Gum unexpectedly started without an Agent runtime' >&2
     exit 1
   fi
   if ! grep -q 'agent runtime was not found' "$temporary/dynamic-no-runtime.stderr.log"; then
     cat "$temporary/dynamic-no-runtime.stderr.log" >&2
-    echo 'dynamic ELF did not fail at Gum Agent runtime resolution' >&2
+    echo 'explicit Gum did not fail at Agent runtime resolution' >&2
     exit 1
   fi
   "$standalone_hyperhub" run \
     --password-file "$password_file" \
     -- "$fixture_dir/linux-static-c" --intent-read /etc/hosts >/dev/null
 )
-record_check backend.runtime_boundary "dynamic requires Gum; static runs without Agent"
+record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum requires Agent"
 
 pass_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
 [[ -n $pass_audit ]] || { echo 'static coverage audit was not created' >&2; exit 1; }
@@ -304,10 +310,18 @@ manifest["fixtures"].append(
 )
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PYCODE
+"$hyperhub" run \
+  --backend ptrace \
+  --password-file "$password_file" \
+  -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
+  >/dev/null 2>"$temporary/dynamic-ptrace.stderr.log"
+record_check dynamic.ptrace_descendants "fork+exec,posix_spawn,posix_spawnp"
+
 dynamic_hook_report="$result_dir/dynamic-hooks.json"
 HYPERHUB_AGENT_DEBUG=1 \
 HYPERHUB_DYNAMIC_HOOK_REPORT=$dynamic_hook_report \
   "$hyperhub" run \
+    --backend gum \
     --runtime "$runtime" \
     --password-file "$password_file" \
     -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
@@ -347,6 +361,61 @@ if report["missing_required"]:
     raise SystemExit(f"missing static hook points: {report['missing_required']}")
 PY
 record_check static.ptrace_manifest "report=$hook_report"
+stop_serve
+
+# Reproduce the dynamic ptrace route-refinement bug with a source fixture. The
+# client connects to localhost by IP at the syscall boundary; only the HTTP Host
+# and path reveal the credential route.
+export HOME="$temporary/credential-home"
+mkdir -p "$HOME"
+credential_ports="$temporary/credential-port"
+: > "$credential_ports"
+credential_secret=benchmark-local-secret
+python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  --server "$credential_ports" "$credential_secret" &
+credential_pid=$!
+for ((attempt = 0; attempt < 100; attempt++)); do
+  [[ -s $credential_ports ]] && break
+  sleep 0.05
+done
+[[ -s $credential_ports ]] || { echo 'HTTP credential fixture did not publish its port' >&2; exit 1; }
+credential_port=$(cat "$credential_ports")
+credential_config="$temporary/credential.toml"
+write_base_config "$credential_config" "$(free_port)"
+cat >> "$credential_config" <<TOML
+
+[[plugins]]
+id = "benchmark-http-bearer"
+kind = "credential"
+protocols = ["http"]
+http_scheme = "bearer"
+secret = { value = "$credential_secret" }
+
+[[routes]]
+id = "benchmark-http-route"
+enabled = true
+priority = 500
+endpoints = [{ target = "http://localhost/probe", port = $credential_port }]
+deny = false
+plugins = ["benchmark-http-bearer"]
+TOML
+"$hyperhub" import "$credential_config" --password-file "$password_file" >/dev/null
+start_serve "$temporary/credential-serve.stdout.log" "$temporary/credential-serve.stderr.log"
+"$hyperhub" run \
+  --backend ptrace \
+  --password-file "$password_file" \
+  -- python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
+  localhost "$credential_port"
+wait "$credential_pid"
+credential_pid=
+credential_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
+[[ -n $credential_audit ]] || { echo 'credential regression audit was not created' >&2; exit 1; }
+grep -q '"rule_id":"benchmark-http-route"' "$credential_audit" || {
+  cat "$credential_audit" >&2
+  echo 'ptrace protocol refinement did not select the HTTP credential route' >&2
+  exit 1
+}
+record_check dynamic.ptrace_http_credential "route=benchmark-http-route"
 stop_serve
 
 # Enable file and process sandbox rules and verify every configured intent is denied.
