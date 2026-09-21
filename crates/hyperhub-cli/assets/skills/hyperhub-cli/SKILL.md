@@ -30,22 +30,47 @@ hyperhub show
 
 新增或修改配置前，读取 [配置数据参考](references/configuration.md)，根据其中的对象结构和约束生成数据。
 
-1. 根据 `show` 输出生成 RFC 6902 风格 JSON Patch，只使用 `add`、`replace`、`remove`、`test`，数组追加使用 `/-`。
-2. 每个修改操作必须是可独立校验的完整配置请求。
-3. 现有配置对象的 `uuid` 是稳定身份，不得修改或复用；新增对象可省略 `uuid`，由 CLI 生成。
-4. 需要人工填写的敏感值使用占位符：
+1. 根据 `show` 输出和 [配置数据参考](references/configuration.md) 生成 RFC 6902 风格 JSON Patch，只使用 `add`、`replace`、`remove`、`test`，数组追加使用 `/-`。
+2. `config patch` 的第一个参数是 **Patch 文件路径**，不是内联 JSON；需要通过标准输入提交时使用 `-`：
+
+   ```sh
+   cat patch.json | hyperhub config patch - --password-file /path/to/password
+   ```
+
+3. 每个修改操作必须是可独立校验的完整配置请求。新增凭证后，再新增引用该凭证 ID 的路由；不要在同一个路由中绑定同协议的多个同类凭证。
+4. 现有配置对象的 `uuid` 是稳定身份，不得修改、复制或复用；新增对象必须省略 `uuid`，由 CLI 生成。修改或删除数组对象时，先用从 `show` 读取的 UUID 添加 `test` 操作，再对同一索引执行变更：
+
+   ```json
+   [
+     {"op":"test","path":"/routes/2/uuid","value":"show 中的现有 UUID"},
+     {"op":"replace","path":"/routes/2/priority","value":400}
+   ]
+   ```
+
+5. 需要人工填写的敏感值使用占位符：
 
    ```json
    {"value":{"value":"${APPROVE:github-api-key}"}}
    ```
 
-5. 提交审批队列：
+6. 提交审批队列：
 
    ```sh
-   hyperhub config patch patch.json --password-file /path/to/password
+   hyperhub config patch <patch-file> --password-file /path/to/password
    ```
 
-该命令只写入加密审批队列，不直接应用配置。已有未完成队列时，不得用不同 patch 覆盖。
+   例如，新增 Bearer 凭证和路由时，Patch 的核心对象应类似：
+
+   ```json
+   [
+     {"op":"add","path":"/plugins/-","value":{"id":"devboard-bearer","kind":"credential","protocols":["http"],"http_scheme":"bearer","secret":{"value":"${APPROVE:devboard-token}"}}},
+     {"op":"add","path":"/routes/-","value":{"id":"devboard-api","enabled":true,"priority":300,"endpoints":[{"target":"https://devboard.example/api","port":443}],"deny":false,"rewrite_host":null,"rewrite_port":null,"upstream":null,"plugins":["devboard-bearer"]}}
+   ]
+   ```
+
+   真实 token 只在人工 `approve` 时由用户输入；不得放入 Patch、命令行参数、日志或 Agent 回复。
+
+该命令只写入加密审批队列，不直接应用配置。已有未完成队列时，不得用不同 patch 覆盖；不要把 `config patch` 当作直接生效命令。向用户汇报时必须同时说明“Agent 已提交 Patch，用户需要在真实终端运行 `hyperhub approve`”，不得只给出审批命令而省略 Patch 提交步骤。
 
 ## 人工审批边界
 

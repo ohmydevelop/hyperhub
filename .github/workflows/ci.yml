@@ -56,6 +56,9 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked
 
+      - name: Check HyperHub Skill benchmark contract
+        run: ./scripts/benchmark-skill-subagent.sh --contract-only
+
       - name: Test Linux Gum Agent
         if: runner.os == 'Linux'
         run: cargo test -p hyperhub-agent-core --features gum-agent --locked
