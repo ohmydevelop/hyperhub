@@ -2088,6 +2088,8 @@ mod tests {
                 port: None,
             }],
             legacy: Default::default(),
+            protection: None,
+            prefilter_policy: crate::config::PrefilterPolicy::None,
         });
         let endpoint = format!(r"\\.\pipe\hyperhub-auto-auth-test-{}", std::process::id());
         let service = ControlService::new(
@@ -2314,6 +2316,8 @@ mod tests {
                 port: Some(443),
             }],
             legacy: Default::default(),
+            protection: None,
+            prefilter_policy: crate::config::PrefilterPolicy::None,
         });
         #[cfg(windows)]
         let endpoint = format!(r"\\.\pipe\hyperhub-test-{}", std::process::id());
@@ -2628,6 +2632,8 @@ mod tests {
                     port: Some(443),
                 }],
                 legacy: Default::default(),
+                protection: None,
+                prefilter_policy: crate::config::PrefilterPolicy::None,
             });
             let config_json = serde_json::to_string(&updated).unwrap();
             let proof = crate::session::config_update_proof(&[0; 32], &config_json).unwrap();

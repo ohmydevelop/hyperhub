@@ -1,4 +1,4 @@
-use crate::config::{parse_route_target, Config, FirewallAction, RouteTarget};
+use crate::config::{parse_route_target, Config, FirewallAction, PrefilterPolicy, RouteTarget};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -18,6 +18,10 @@ pub struct FirewallSnapshotRule {
     pub id: String,
     pub action: FirewallAction,
     pub endpoints: Vec<FirewallSnapshotEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub prefilter_policy: PrefilterPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +164,8 @@ pub fn compile_snapshot(config: &Config, version: u64) -> Result<Option<Firewall
                 id: rule.id.clone(),
                 action: rule.action,
                 endpoints,
+                protection: rule.protection.clone(),
+                prefilter_policy: rule.prefilter_policy,
             },
         ));
     }
@@ -189,6 +195,8 @@ mod tests {
                 target: format!("{id}.example"),
                 port: None,
             }],
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         }
     }
@@ -239,6 +247,8 @@ mod tests {
                 target: "*.example.com".into(),
                 port: Some(443),
             }],
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
 
@@ -264,6 +274,8 @@ mod tests {
             rules: vec![FirewallSnapshotRule {
                 id: "allow-example".into(),
                 action: FirewallAction::Pass,
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
                 endpoints: vec![FirewallSnapshotEndpoint {
                     target: FirewallTarget::Domain {
                         host: "example.com".into(),

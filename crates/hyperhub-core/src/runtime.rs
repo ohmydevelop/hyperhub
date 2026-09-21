@@ -160,7 +160,6 @@ mod tests {
             rewrite_port: None,
             upstream: None,
             plugins: vec![],
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
             legacy: Default::default(),

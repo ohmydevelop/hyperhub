@@ -58,13 +58,13 @@ const NAV_ITEMS: &[NavNode] = &[
     NavNode::Proxy,
     NavNode::Credential,
     NavNode::Audit,
-    NavNode::Protection,
     NavNode::Route,
     NavNode::Certificate,
     NavNode::Sandbox,
     NavNode::Network,
     NavNode::Files,
     NavNode::SandboxProcess,
+    NavNode::Protection,
     NavNode::Environment,
 ];
 
@@ -127,7 +127,6 @@ impl NavNode {
                 | Self::Proxy
                 | Self::Credential
                 | Self::Audit
-                | Self::Protection
                 | Self::Route
                 | Self::Certificate
                 | Self::Network
@@ -330,10 +329,18 @@ enum ReferenceKind {
     Protection,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReferenceTarget {
+    DefaultRoute,
+    Route(usize),
+    Firewall(usize),
+    Process(usize),
+    File(usize),
+}
+
 #[derive(Clone, Copy)]
 struct ReferencePicker {
-    /// `Some` = 用户路由，`None` = 默认路由。
-    route: Option<usize>,
+    target: ReferenceTarget,
     kind: ReferenceKind,
     /// Zero represents “not configured”; configured objects start at one.
     selected: usize,
@@ -907,10 +914,7 @@ fn handle_reference_picker_key(app: &mut App, key: KeyEvent) {
                 ReferenceKind::Proxy | ReferenceKind::Protection => None,
             };
             if picker.kind == ReferenceKind::Protection {
-                match picker.route {
-                    Some(route) => app.config.rules[route].protection = selected,
-                    None => app.config.default_route.protection = selected,
-                }
+                apply_protection_reference(app, picker.target, selected);
             } else if let Some(kind) = kind {
                 let ids: Vec<String> = app
                     .config
@@ -919,15 +923,20 @@ fn handle_reference_picker_key(app: &mut App, key: KeyEvent) {
                     .filter(|plugin| plugin.kind == kind)
                     .map(|plugin| plugin.id.clone())
                     .collect();
-                let plugins = match picker.route {
-                    Some(route) => &mut app.config.rules[route].plugins,
-                    None => &mut app.config.default_route.plugins,
+                let plugins = match picker.target {
+                    ReferenceTarget::Route(route) => &mut app.config.rules[route].plugins,
+                    ReferenceTarget::DefaultRoute => &mut app.config.default_route.plugins,
+                    _ => {
+                        app.status = "该对象不支持插件引用".into();
+                        app.reference_picker = None;
+                        return;
+                    }
                 };
                 plugins.retain(|id| !ids.contains(id));
                 if let Some(id) = selected {
                     plugins.push(id);
                 }
-            } else if let Some(route) = picker.route {
+            } else if let ReferenceTarget::Route(route) = picker.target {
                 app.config.rules[route].upstream = selected;
             }
             app.reference_picker = None;
@@ -1392,7 +1401,6 @@ fn selected_is_toggle(app: &App) -> bool {
         (CATEGORY_BASIC, 0 | 3) => true,
         (CATEGORY_SANDBOX_PROCESS, 0..=2) => true,
         (CATEGORY_FILES, 0..=2) => true,
-        (CATEGORY_PROTECTION, field) if field < app.config.protections.len() => true,
         (CATEGORY_CERTIFICATE, field) => {
             field >= app.config.root_certificates.len()
                 && field < app.config.root_certificates.len() + app.config.ssh_host_keys.len()
@@ -1413,8 +1421,8 @@ fn object_field_is_toggle(app: &App, editor: ObjectEditor, field: usize) -> bool
         }
         ObjectEditor::AuditProfile(_) => matches!(field, 1..=10),
         ObjectEditor::Protection(_) => matches!(field, 1 | 2 | 3 | 5..=9 | 13 | 15 | 16),
-        ObjectEditor::DefaultRoute => matches!(field, 1 | 2 | 5),
-        ObjectEditor::Route(_) => matches!(field, 1 | 4 | 8 | 10),
+        ObjectEditor::DefaultRoute => matches!(field, 1 | 2),
+        ObjectEditor::Route(_) => matches!(field, 1 | 4 | 9),
         ObjectEditor::FirewallRule(_) => matches!(field, 1 | 3),
         ObjectEditor::SandboxProcessRule(_) => matches!(field, 1 | 3),
         ObjectEditor::FileSandboxRule(_) => matches!(field, 1 | 3 | 4..=8),
@@ -1425,14 +1433,14 @@ fn object_field_is_toggle(app: &App, editor: ObjectEditor, field: usize) -> bool
 fn toggle_selected(app: &mut App) {
     if let Some(editor) = app.editor {
         match editor {
-            ObjectEditor::SandboxProcessRule(rule) if app.field >= 4 => {
-                let pattern = &mut app.config.sandbox.process.rules[rule].patterns[app.field - 4];
+            ObjectEditor::SandboxProcessRule(rule) if app.field >= 6 => {
+                let pattern = &mut app.config.sandbox.process.rules[rule].patterns[app.field - 6];
                 pattern.enabled = !pattern.enabled;
                 changed(app);
                 return;
             }
-            ObjectEditor::FileSandboxRule(rule) if app.field >= 9 => {
-                let pattern = &mut app.config.sandbox.file.rules[rule].patterns[app.field - 9];
+            ObjectEditor::FileSandboxRule(rule) if app.field >= 11 => {
+                let pattern = &mut app.config.sandbox.file.rules[rule].patterns[app.field - 11];
                 pattern.enabled = !pattern.enabled;
                 changed(app);
                 return;
@@ -1957,18 +1965,19 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             app.config.default_route.deny = !app.config.default_route.deny;
             changed(app);
         }
-        (ObjectEditor::DefaultRoute, 3) => {
-            open_reference_picker(app, None, ReferenceKind::Credential)
+        (ObjectEditor::DefaultRoute, 3) => open_reference_picker(
+            app,
+            ReferenceTarget::DefaultRoute,
+            ReferenceKind::Credential,
+        ),
+        (ObjectEditor::DefaultRoute, 4) => {
+            open_reference_picker(app, ReferenceTarget::DefaultRoute, ReferenceKind::Audit)
         }
-        (ObjectEditor::DefaultRoute, 4) => open_reference_picker(app, None, ReferenceKind::Audit),
-        (ObjectEditor::DefaultRoute, 5) => {
-            app.config.default_route.protection_enabled =
-                !app.config.default_route.protection_enabled;
-            changed(app);
-        }
-        (ObjectEditor::DefaultRoute, 6) => {
-            open_reference_picker(app, None, ReferenceKind::Protection)
-        }
+        (ObjectEditor::DefaultRoute, 5) => open_reference_picker(
+            app,
+            ReferenceTarget::DefaultRoute,
+            ReferenceKind::Protection,
+        ),
 
         (ObjectEditor::Route(index), 0) => open_text(
             app,
@@ -1992,23 +2001,22 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             changed(app);
         }
         (ObjectEditor::Route(index), 5) => {
-            open_reference_picker(app, Some(index), ReferenceKind::Proxy)
+            open_reference_picker(app, ReferenceTarget::Route(index), ReferenceKind::Proxy)
         }
-        (ObjectEditor::Route(index), 6) => {
-            open_reference_picker(app, Some(index), ReferenceKind::Credential)
-        }
+        (ObjectEditor::Route(index), 6) => open_reference_picker(
+            app,
+            ReferenceTarget::Route(index),
+            ReferenceKind::Credential,
+        ),
         (ObjectEditor::Route(index), 7) => {
-            open_reference_picker(app, Some(index), ReferenceKind::Audit)
+            open_reference_picker(app, ReferenceTarget::Route(index), ReferenceKind::Audit)
         }
-        (ObjectEditor::Route(index), 8) => {
-            app.config.rules[index].protection_enabled =
-                !app.config.rules[index].protection_enabled;
-            changed(app);
-        }
+        (ObjectEditor::Route(index), 8) => open_reference_picker(
+            app,
+            ReferenceTarget::Route(index),
+            ReferenceKind::Protection,
+        ),
         (ObjectEditor::Route(index), 9) => {
-            open_reference_picker(app, Some(index), ReferenceKind::Protection)
-        }
-        (ObjectEditor::Route(index), 10) => {
             app.config.rules[index].allow_sensitive_upload =
                 !app.config.rules[index].allow_sensitive_upload;
             changed(app);
@@ -2035,8 +2043,17 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             rule.action = opposite_firewall_action(rule.action);
             changed(app);
         }
-        (ObjectEditor::FirewallRule(index), field) if field >= 4 => {
-            let value = app.config.firewall.rules[index].endpoints[field - 4]
+        (ObjectEditor::FirewallRule(index), 4) => open_reference_picker(
+            app,
+            ReferenceTarget::Firewall(index),
+            ReferenceKind::Protection,
+        ),
+        (ObjectEditor::FirewallRule(index), 5) => {
+            cycle_prefilter_policy(&mut app.config.firewall.rules[index].prefilter_policy);
+            changed(app);
+        }
+        (ObjectEditor::FirewallRule(index), field) if field >= 6 => {
+            let value = app.config.firewall.rules[index].endpoints[field - 6]
                 .target
                 .clone();
             open_input(
@@ -2044,7 +2061,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
                 "目标（域名、IP 或 CIDR）",
                 &value,
                 false,
-                InputAction::FirewallTarget(index, Some(field - 4)),
+                InputAction::FirewallTarget(index, Some(field - 6)),
             )
         }
 
@@ -2070,8 +2087,17 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
                 opposite_sandbox_action(app.config.sandbox.process.rules[index].action);
             changed(app);
         }
-        (ObjectEditor::SandboxProcessRule(index), field) if field >= 4 => {
-            let value = app.config.sandbox.process.rules[index].patterns[field - 4]
+        (ObjectEditor::SandboxProcessRule(index), 4) => open_reference_picker(
+            app,
+            ReferenceTarget::Process(index),
+            ReferenceKind::Protection,
+        ),
+        (ObjectEditor::SandboxProcessRule(index), 5) => {
+            cycle_prefilter_policy(&mut app.config.sandbox.process.rules[index].prefilter_policy);
+            changed(app);
+        }
+        (ObjectEditor::SandboxProcessRule(index), field) if field >= 6 => {
+            let value = app.config.sandbox.process.rules[index].patterns[field - 6]
                 .executable
                 .clone();
             open_input(
@@ -2079,7 +2105,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
                 "可执行文件正则（可留空）",
                 &value,
                 false,
-                InputAction::ProcessExecutable(index, Some(field - 4)),
+                InputAction::ProcessExecutable(index, Some(field - 6)),
             )
         }
         (ObjectEditor::FileSandboxRule(index), 0) => open_text(
@@ -2120,8 +2146,15 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             }
             changed(app);
         }
-        (ObjectEditor::FileSandboxRule(index), field) if field >= 9 => {
-            let value = app.config.sandbox.file.rules[index].patterns[field - 9]
+        (ObjectEditor::FileSandboxRule(index), 9) => {
+            open_reference_picker(app, ReferenceTarget::File(index), ReferenceKind::Protection)
+        }
+        (ObjectEditor::FileSandboxRule(index), 10) => {
+            cycle_prefilter_policy(&mut app.config.sandbox.file.rules[index].prefilter_policy);
+            changed(app);
+        }
+        (ObjectEditor::FileSandboxRule(index), field) if field >= 11 => {
+            let value = app.config.sandbox.file.rules[index].patterns[field - 11]
                 .pattern
                 .clone();
             open_input(
@@ -2129,7 +2162,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
                 "路径正则",
                 &value,
                 false,
-                InputAction::FilePattern(index, Some(field - 9)),
+                InputAction::FilePattern(index, Some(field - 11)),
             )
         }
 
@@ -2742,22 +2775,79 @@ fn open_target_editor(app: &mut App, route: usize) {
     open_list_editor(app, ListEditorKind::RouteTargets(route));
 }
 
-fn open_reference_picker(app: &mut App, route: Option<usize>, kind: ReferenceKind) {
+fn default_prefilter(target: ReferenceTarget) -> PrefilterPolicy {
+    match target {
+        ReferenceTarget::Firewall(_) => PrefilterPolicy::NetworkEgress,
+        ReferenceTarget::Process(_) => PrefilterPolicy::NetworkUpload,
+        ReferenceTarget::File(_) => PrefilterPolicy::SensitiveRead,
+        ReferenceTarget::DefaultRoute | ReferenceTarget::Route(_) => PrefilterPolicy::None,
+    }
+}
+
+fn apply_protection_reference(app: &mut App, target: ReferenceTarget, selected: Option<String>) {
+    let default_policy = default_prefilter(target);
+    match target {
+        ReferenceTarget::DefaultRoute => app.config.default_route.protection = selected,
+        ReferenceTarget::Route(index) => app.config.rules[index].protection = selected,
+        ReferenceTarget::Firewall(index) => {
+            app.config.firewall.rules[index].protection = selected;
+            app.config.firewall.rules[index].prefilter_policy =
+                if app.config.firewall.rules[index].protection.is_some() {
+                    default_policy
+                } else {
+                    PrefilterPolicy::None
+                };
+        }
+        ReferenceTarget::Process(index) => {
+            app.config.sandbox.process.rules[index].protection = selected;
+            app.config.sandbox.process.rules[index].prefilter_policy =
+                if app.config.sandbox.process.rules[index].protection.is_some() {
+                    default_policy
+                } else {
+                    PrefilterPolicy::None
+                };
+        }
+        ReferenceTarget::File(index) => {
+            app.config.sandbox.file.rules[index].protection = selected;
+            app.config.sandbox.file.rules[index].prefilter_policy =
+                if app.config.sandbox.file.rules[index].protection.is_some() {
+                    default_policy
+                } else {
+                    PrefilterPolicy::None
+                };
+        }
+    }
+}
+
+fn protection_reference(app: &App, target: ReferenceTarget) -> Option<String> {
+    match target {
+        ReferenceTarget::DefaultRoute => app.config.default_route.protection.clone(),
+        ReferenceTarget::Route(index) => app.config.rules[index].protection.clone(),
+        ReferenceTarget::Firewall(index) => app.config.firewall.rules[index].protection.clone(),
+        ReferenceTarget::Process(index) => {
+            app.config.sandbox.process.rules[index].protection.clone()
+        }
+        ReferenceTarget::File(index) => app.config.sandbox.file.rules[index].protection.clone(),
+    }
+}
+
+fn open_reference_picker(app: &mut App, target: ReferenceTarget, kind: ReferenceKind) {
     let target_kind = match kind {
         ReferenceKind::Credential => Some(PluginKind::Credential),
         ReferenceKind::Audit => Some(PluginKind::Audit),
         ReferenceKind::Proxy | ReferenceKind::Protection => None,
     };
     let current = match kind {
-        ReferenceKind::Proxy => route.and_then(|route| app.config.rules[route].upstream.clone()),
-        ReferenceKind::Protection => match route {
-            Some(route) => app.config.rules[route].protection.clone(),
-            None => app.config.default_route.protection.clone(),
+        ReferenceKind::Proxy => match target {
+            ReferenceTarget::Route(route) => app.config.rules[route].upstream.clone(),
+            _ => None,
         },
+        ReferenceKind::Protection => protection_reference(app, target),
         ReferenceKind::Credential | ReferenceKind::Audit => {
-            let plugins = match route {
-                Some(route) => &app.config.rules[route].plugins,
-                None => &app.config.default_route.plugins,
+            let plugins: &[String] = match target {
+                ReferenceTarget::Route(route) => &app.config.rules[route].plugins,
+                ReferenceTarget::DefaultRoute => &app.config.default_route.plugins,
+                _ => &[],
             };
             plugins
                 .iter()
@@ -2778,7 +2868,7 @@ fn open_reference_picker(app: &mut App, route: Option<usize>, kind: ReferenceKin
         })
         .unwrap_or(0);
     app.reference_picker = Some(ReferencePicker {
-        route,
+        target,
         kind,
         selected,
     });
@@ -4021,6 +4111,8 @@ fn add_selected(app: &mut App) {
                 action: FirewallAction::Deny,
                 endpoints: Vec::new(),
                 legacy: Default::default(),
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
             });
             changed(app);
             enter_editor(
@@ -4045,7 +4137,6 @@ fn add_selected(app: &mut App) {
                 priority: 0,
                 action: SandboxAction::Deny,
                 patterns: Vec::new(),
-                protection_enabled: false,
                 protection: None,
                 prefilter_policy: PrefilterPolicy::None,
                 legacy: Default::default(),
@@ -4069,7 +4160,6 @@ fn add_selected(app: &mut App) {
                 action: SandboxAction::Deny,
                 patterns: Vec::new(),
                 operations: vec![FileSandboxOperation::Read],
-                protection_enabled: false,
                 protection: None,
                 prefilter_policy: PrefilterPolicy::None,
                 legacy: Default::default(),
@@ -4097,7 +4187,6 @@ fn add_selected(app: &mut App) {
                 upstream: None,
                 plugins: Vec::new(),
                 legacy: Default::default(),
-                protection_enabled: false,
                 protection: None,
                 allow_sensitive_upload: false,
             });
@@ -4147,22 +4236,22 @@ fn add_editor_pattern(app: &mut App) {
 
 fn delete_editor_pattern(app: &mut App) {
     match app.editor {
-        Some(ObjectEditor::FirewallRule(rule)) if app.field >= 4 => {
+        Some(ObjectEditor::FirewallRule(rule)) if app.field >= 6 => {
             app.config.firewall.rules[rule]
                 .endpoints
-                .remove(app.field - 4);
+                .remove(app.field - 6);
             changed(app);
         }
-        Some(ObjectEditor::SandboxProcessRule(rule)) if app.field >= 4 => {
+        Some(ObjectEditor::SandboxProcessRule(rule)) if app.field >= 6 => {
             app.config.sandbox.process.rules[rule]
                 .patterns
-                .remove(app.field - 4);
+                .remove(app.field - 6);
             changed(app);
         }
-        Some(ObjectEditor::FileSandboxRule(rule)) if app.field >= 9 => {
+        Some(ObjectEditor::FileSandboxRule(rule)) if app.field >= 11 => {
             app.config.sandbox.file.rules[rule]
                 .patterns
-                .remove(app.field - 9);
+                .remove(app.field - 11);
             changed(app);
         }
         _ => {
@@ -4913,10 +5002,6 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 )
             ),
             format!(
-                "智能防护启用    {}",
-                yes_no(app.config.default_route.protection_enabled)
-            ),
-            format!(
                 "智能防护          {}  （Enter 打开选择）",
                 optional_summary(app.config.default_route.protection.as_deref())
             ),
@@ -5147,7 +5232,6 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                             .map(|id| id.as_str())
                     )
                 ),
-                format!("智能防护启用    {}", yes_no(item.protection_enabled)),
                 format!(
                     "智能防护          {}  （Enter 打开选择）",
                     optional_summary(item.protection.as_deref())
@@ -5162,6 +5246,14 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!("启用              {}", yes_no(item.enabled)),
                 format!("优先级            {}", item.priority),
                 format!("动作              {}", firewall_action_label(item.action)),
+                format!(
+                    "智能防护          {}  （Enter 打开选择）",
+                    optional_summary(item.protection.as_deref())
+                ),
+                format!(
+                    "预筛选策略        {}",
+                    prefilter_policy_label(item.prefilter_policy)
+                ),
             ];
             lines.extend(item.endpoints.iter().map(|endpoint| {
                 format!(
@@ -5182,6 +5274,14 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!("启用              {}", yes_no(r.enabled)),
                 format!("优先级            {}", r.priority),
                 format!("动作              {}", sandbox_action_label(r.action)),
+                format!(
+                    "智能防护          {}  （Enter 打开选择）",
+                    optional_summary(r.protection.as_deref())
+                ),
+                format!(
+                    "预筛选策略        {}",
+                    prefilter_policy_label(r.prefilter_policy)
+                ),
             ];
             lines.extend(r.patterns.iter().map(|p| {
                 format!(
@@ -5214,6 +5314,14 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!("创建              {}", has(FileSandboxOperation::Create)),
                 format!("删除              {}", has(FileSandboxOperation::Delete)),
                 format!("重命名            {}", has(FileSandboxOperation::Rename)),
+                format!(
+                    "智能防护          {}  （Enter 打开选择）",
+                    optional_summary(r.protection.as_deref())
+                ),
+                format!(
+                    "预筛选策略        {}",
+                    prefilter_policy_label(r.prefilter_policy)
+                ),
             ];
             lines.extend(r.patterns.iter().map(|p| {
                 format!(
@@ -5346,7 +5454,7 @@ fn detail_title(app: &App) -> String {
             format!("网关 / 审计 / {}", app.config.plugins[idx].id)
         }
         Some(ObjectEditor::Protection(index)) => {
-            format!("网关 / 智能防护 / {}", app.config.protections[index].id)
+            format!("智能防护 / {}", app.config.protections[index].id)
         }
         Some(ObjectEditor::Route(index)) => {
             format!("网关 / 路由 / {}", app.config.rules[index].id)
@@ -5389,6 +5497,26 @@ fn firewall_default_label(default: Option<&FirewallDefaultRule>) -> &'static str
 fn sandbox_action_label(action: SandboxAction) -> &'static str {
     allow_deny_label(action == SandboxAction::Deny)
 }
+fn prefilter_policy_label(policy: PrefilterPolicy) -> &'static str {
+    match policy {
+        PrefilterPolicy::None => "未设置",
+        PrefilterPolicy::NetworkUpload => "网络上传",
+        PrefilterPolicy::SensitiveRead => "敏感读取",
+        PrefilterPolicy::ArchiveOrEncode => "归档/编码",
+        PrefilterPolicy::NetworkEgress => "网络出站",
+    }
+}
+
+fn cycle_prefilter_policy(policy: &mut PrefilterPolicy) {
+    *policy = match *policy {
+        PrefilterPolicy::None => PrefilterPolicy::NetworkUpload,
+        PrefilterPolicy::NetworkUpload => PrefilterPolicy::SensitiveRead,
+        PrefilterPolicy::SensitiveRead => PrefilterPolicy::ArchiveOrEncode,
+        PrefilterPolicy::ArchiveOrEncode => PrefilterPolicy::NetworkEgress,
+        PrefilterPolicy::NetworkEgress => PrefilterPolicy::None,
+    };
+}
+
 fn opposite_sandbox_action(action: SandboxAction) -> SandboxAction {
     match action {
         SandboxAction::Pass => SandboxAction::Deny,
@@ -6544,13 +6672,13 @@ mod tests {
                 "  代理",
                 "  凭证",
                 "  审计",
-                "  智能防护",
                 "  路由",
                 "  证书",
                 "沙盒",
                 "  网络",
                 "  文件",
                 "  子进程",
+                "智能防护",
                 "环境变量",
             ]
         );
@@ -6560,6 +6688,7 @@ mod tests {
         assert_eq!(CATEGORY_ROUTE.breadcrumb(), "网关 / 路由");
         assert_eq!(CATEGORY_FIREWALL.breadcrumb(), "沙盒 / 网络");
         assert_eq!(CATEGORY_PROCESS.breadcrumb(), "进程");
+        assert_eq!(CATEGORY_PROTECTION.breadcrumb(), "智能防护");
     }
 
     #[test]
@@ -6664,13 +6793,13 @@ mod tests {
                 CATEGORY_PROXY,
                 CATEGORY_CREDENTIAL,
                 CATEGORY_AUDIT,
-                CATEGORY_PROTECTION,
                 CATEGORY_ROUTE,
                 CATEGORY_CERTIFICATE,
                 CATEGORY_SANDBOX,
                 CATEGORY_FIREWALL,
                 CATEGORY_FILES,
                 CATEGORY_SANDBOX_PROCESS,
+                CATEGORY_PROTECTION,
                 CATEGORY_ENVIRONMENT,
             ]
         );
@@ -6875,7 +7004,7 @@ mod tests {
         assert_eq!(app.config.firewall.rules.len(), 1);
         assert!(!app.config.firewall.rules[0].enabled);
         assert!(matches!(app.editor, Some(ObjectEditor::FirewallRule(0))));
-        assert_eq!(editor_lines(&app, ObjectEditor::FirewallRule(0)).len(), 4);
+        assert_eq!(editor_lines(&app, ObjectEditor::FirewallRule(0)).len(), 6);
 
         app.field = 3;
         edit_object_field(&mut app, ObjectEditor::FirewallRule(0));
@@ -6905,6 +7034,8 @@ mod tests {
             action: FirewallAction::Deny,
             endpoints: Vec::new(),
             legacy: Default::default(),
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
         });
 
         apply_list_value(
@@ -6985,7 +7116,7 @@ mod tests {
         edit_selected(&mut app);
         assert!(matches!(app.editor, Some(ObjectEditor::DefaultRoute)));
         let form = editor_lines(&app, ObjectEditor::DefaultRoute);
-        assert_eq!(form.len(), 7);
+        assert_eq!(form.len(), 6);
         assert!(form[0].contains("不可修改"));
 
         app.field = 1;
@@ -7074,11 +7205,11 @@ mod tests {
         .unwrap();
         assert_eq!(app.config.rules[0].priority, 42);
         let lines = editor_lines(&app, ObjectEditor::Route(0));
-        assert_eq!(lines.len(), 11);
+        assert_eq!(lines.len(), 10);
         assert!(lines[0].starts_with("ID"));
         assert!(lines[1].starts_with("启用"));
         assert!(lines[7].starts_with("审计"));
-        assert!(lines[8].starts_with("智能防护启用"));
+        assert!(lines[8].starts_with("智能防护"));
         app.field = 1;
         let enabled = app.config.rules[0].enabled;
         toggle_selected(&mut app);
@@ -7146,7 +7277,7 @@ mod tests {
         });
         app.category = CATEGORY_ROUTE;
         add_selected(&mut app);
-        open_reference_picker(&mut app, Some(0), ReferenceKind::Proxy);
+        open_reference_picker(&mut app, ReferenceTarget::Route(0), ReferenceKind::Proxy);
         handle_reference_picker_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let picker = app.reference_picker.unwrap();
         let preview = reference_preview(&app, picker);
@@ -7160,7 +7291,7 @@ mod tests {
         );
 
         app.config.rules[0].upstream = None;
-        open_reference_picker(&mut app, Some(0), ReferenceKind::Proxy);
+        open_reference_picker(&mut app, ReferenceTarget::Route(0), ReferenceKind::Proxy);
         handle_reference_picker_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         handle_reference_picker_key(
             &mut app,
@@ -8403,10 +8534,23 @@ mod tests {
         assert!(matches!(app.editor, Some(ObjectEditor::Protection(0))));
         assert!(!app.config.protections[0].data.enabled);
         app.editor = None;
+        app.field = 0;
+        let enabled = app.config.protections[0].enabled;
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        assert!(matches!(app.editor, Some(ObjectEditor::Protection(0))));
+        assert_eq!(app.config.protections[0].enabled, enabled);
+        app.editor = None;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        )
+        .unwrap();
+        assert_eq!(app.config.protections[0].enabled, !enabled);
+        app.editor = None;
         app.category = CATEGORY_ROUTE;
         add_selected(&mut app);
         app.editor = Some(ObjectEditor::Route(0));
-        app.field = 9;
+        app.field = 8;
         edit_selected(&mut app);
         assert!(matches!(
             app.reference_picker,

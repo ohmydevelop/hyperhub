@@ -59,9 +59,8 @@ and operation structure are preserved.
 Sandbox snapshot 现在可以携带：
 
 ```toml
-protection_enabled = true
 protection = "agent-egress"
 prefilter_policy = "network_upload"
 ```
 
-Agent 侧预筛选器已经提供本地 score/hard-deny/query 判定和脱敏 argv；网关查询协议将在下一阶段接入。默认规则保持 `protection_enabled = false`，不会改变既有 sandbox 行为。
+Agent 侧预筛选器已经提供本地 score/hard-deny/query 判定和脱敏 argv；网关查询协议将在下一阶段接入。默认规则不设置 `protection`，不会改变既有 sandbox 行为。

@@ -41,14 +41,15 @@ impl ConfigSection {
 
     pub(crate) fn breadcrumb(self) -> String {
         match self {
-            Self::Gateway | Self::Sandbox | Self::Process | Self::Environment => {
-                self.label().into()
-            }
+            Self::Gateway
+            | Self::Sandbox
+            | Self::Protection
+            | Self::Process
+            | Self::Environment => self.label().into(),
             Self::Basic
             | Self::Proxy
             | Self::Credential
             | Self::Audit
-            | Self::Protection
             | Self::Route
             | Self::Certificate => format!("网关 / {}", self.label()),
             Self::Network | Self::SandboxProcess | Self::Files => {
@@ -608,7 +609,6 @@ fn field_label(tokens: &[String]) -> Option<String> {
         "rewrite_port" => "重写端口",
         "upstream" => "代理",
         "plugins" => "插件绑定",
-        "protection_enabled" => "智能防护启用状态",
         "protection" => "智能防护配置",
         "allow_sensitive_upload" => "允许敏感数据上传",
         "data/enabled" => "数据保护",

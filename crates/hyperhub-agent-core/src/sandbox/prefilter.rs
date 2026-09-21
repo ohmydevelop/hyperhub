@@ -52,7 +52,9 @@ pub(crate) fn evaluate(
 
     if matches!(
         policy,
-        PrefilterPolicy::NetworkUpload | PrefilterPolicy::ArchiveOrEncode
+        PrefilterPolicy::NetworkUpload
+            | PrefilterPolicy::ArchiveOrEncode
+            | PrefilterPolicy::NetworkEgress
     ) && network
         .iter()
         .any(|tool| lower.split_whitespace().any(|part| part == *tool))
@@ -62,7 +64,9 @@ pub(crate) fn evaluate(
     }
     if matches!(
         policy,
-        PrefilterPolicy::NetworkUpload | PrefilterPolicy::ArchiveOrEncode
+        PrefilterPolicy::NetworkUpload
+            | PrefilterPolicy::ArchiveOrEncode
+            | PrefilterPolicy::NetworkEgress
     ) && upload.iter().any(|marker| lower.contains(marker))
     {
         score += 20;
@@ -250,7 +254,7 @@ pub(crate) fn process_prefilter(
                     .is_none_or(|regex| regex.is_match(command_line))
         })
     })?;
-    if !rule.protection_enabled {
+    if rule.protection.is_none() {
         return None;
     }
     let argv = command_line
@@ -273,7 +277,7 @@ pub(crate) fn file_prefilter(
         rule.operations.contains(&operation)
             && rule.patterns.iter().any(|pattern| pattern.is_match(path))
     })?;
-    if !rule.protection_enabled {
+    if rule.protection.is_none() {
         return None;
     }
     Some((

@@ -1499,7 +1499,6 @@ mod tests {
             upstream: None,
             plugins: Vec::new(),
             legacy: Default::default(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
         });

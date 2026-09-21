@@ -218,6 +218,7 @@ impl<'de> Deserialize<'de> for Config {
             rules: wire.rules,
             legacy: wire.legacy,
         };
+        config.migrate_legacy_protection_bindings();
         config.ensure_item_uuids();
         Ok(config)
     }
@@ -316,6 +317,41 @@ impl Config {
             }
         }
         config
+    }
+
+    fn migrate_legacy_protection_bindings(&mut self) {
+        migrate_legacy_protection_flag(
+            &mut self.default_route.legacy,
+            &mut self.default_route.protection,
+        );
+        for rule in &mut self.rules {
+            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
+        }
+        for rule in &mut self.firewall.rules {
+            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
+        }
+        for rule in &mut self.sandbox.process.rules {
+            let legacy = rule.legacy.contains_key("protection_enabled");
+            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
+            if legacy {
+                if rule.protection.is_none() {
+                    rule.prefilter_policy = PrefilterPolicy::None;
+                } else if rule.prefilter_policy == PrefilterPolicy::None {
+                    rule.prefilter_policy = PrefilterPolicy::NetworkUpload;
+                }
+            }
+        }
+        for rule in &mut self.sandbox.file.rules {
+            let legacy = rule.legacy.contains_key("protection_enabled");
+            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
+            if legacy {
+                if rule.protection.is_none() {
+                    rule.prefilter_policy = PrefilterPolicy::None;
+                } else if rule.prefilter_policy == PrefilterPolicy::None {
+                    rule.prefilter_policy = PrefilterPolicy::SensitiveRead;
+                }
+            }
+        }
     }
 
     pub fn ensure_item_uuids(&mut self) {
@@ -655,23 +691,17 @@ impl Config {
                 "default_route cannot allow sensitive uploads".into(),
             ));
         }
-        if self.default_route.deny && self.default_route.protection_enabled {
+        if self.default_route.deny && self.default_route.protection.is_some() {
             return Err(ConfigError::Validation(
-                "default_route cannot enable protection while deny is true".into(),
+                "default_route cannot configure protection while deny is true".into(),
             ));
         }
-        if self.default_route.protection_enabled {
-            let id = self.default_route.protection.as_deref().ok_or_else(|| {
-                ConfigError::Validation(
-                    "default_route protection_enabled requires protection".into(),
-                )
-            })?;
-            if !protection_ids.contains(id) {
-                return Err(ConfigError::Validation(format!(
-                    "default_route references unknown protection '{id}'"
-                )));
-            }
-        }
+        validate_optional_protection(
+            &protection_ids,
+            self.default_route.protection.as_deref(),
+            "default_route",
+            None,
+        )?;
 
         let mut certificate_fingerprints = HashSet::new();
         for certificate in &self.root_certificates {
@@ -735,11 +765,11 @@ impl Config {
             if !rule.enabled {
                 continue;
             }
-            validate_sandbox_protection(
+            validate_optional_protection(
                 &protection_ids,
-                rule.protection_enabled,
                 rule.protection.as_deref(),
                 &format!("process sandbox rule '{}'", rule.id),
+                Some(rule.prefilter_policy),
             )?;
             if !rule.patterns.iter().any(|pattern| pattern.enabled) {
                 return Err(ConfigError::Validation(format!(
@@ -777,11 +807,11 @@ impl Config {
             if !rule.enabled {
                 continue;
             }
-            validate_sandbox_protection(
+            validate_optional_protection(
                 &protection_ids,
-                rule.protection_enabled,
                 rule.protection.as_deref(),
                 &format!("file sandbox rule '{}'", rule.id),
+                Some(rule.prefilter_policy),
             )?;
             if !rule.patterns.iter().any(|pattern| pattern.enabled) {
                 return Err(ConfigError::Validation(format!(
@@ -859,6 +889,18 @@ impl Config {
             }
         }
 
+        for rule in &self.firewall.rules {
+            if !rule.enabled {
+                continue;
+            }
+            validate_optional_protection(
+                &protection_ids,
+                rule.protection.as_deref(),
+                &format!("firewall rule '{}'", rule.id),
+                Some(rule.prefilter_policy),
+            )?;
+        }
+
         let mut rule_ids = HashSet::new();
         for rule in &self.rules {
             if rule.id.trim() == DEFAULT_ROUTE_ID {
@@ -895,20 +937,12 @@ impl Config {
                     ))
                 })?;
             }
-            if rule.protection_enabled {
-                let id = rule.protection.as_deref().ok_or_else(|| {
-                    ConfigError::Validation(format!(
-                        "route '{}' protection_enabled requires protection",
-                        rule.id
-                    ))
-                })?;
-                if !protection_ids.contains(id) {
-                    return Err(ConfigError::Validation(format!(
-                        "route '{}' references unknown protection '{id}'",
-                        rule.id
-                    )));
-                }
-            }
+            validate_optional_protection(
+                &protection_ids,
+                rule.protection.as_deref(),
+                &format!("route '{}'", rule.id),
+                None,
+            )?;
             if rule.allow_sensitive_upload {
                 for endpoint in &rule.endpoints {
                     match parse_route_target(&endpoint.target).map_err(ConfigError::Validation)? {
@@ -927,7 +961,7 @@ impl Config {
             if rule.deny
                 && (rule.upstream.is_some()
                     || !rule.plugins.is_empty()
-                    || rule.protection_enabled
+                    || rule.protection.is_some()
                     || rule.allow_sensitive_upload
                     || rule.rewrite_host.is_some()
                     || rule.rewrite_port.is_some())
@@ -1030,6 +1064,7 @@ impl Config {
 
     fn validate_legacy(&self) -> Result<(), ConfigError> {
         reject_removed_fields(&self.legacy, "top level")?;
+        reject_removed_fields(&self.default_route.legacy, "default route")?;
         for rule in &self.firewall.rules {
             reject_removed_fields(&rule.legacy, &format!("firewall rule '{}'", rule.id))?;
         }
@@ -1056,18 +1091,43 @@ impl Config {
     }
 }
 
-fn validate_sandbox_protection(
+fn migrate_legacy_protection_flag(
+    legacy: &mut HashMap<String, serde_json::Value>,
+    protection: &mut Option<String>,
+) {
+    let Some(value) = legacy.remove("protection_enabled") else {
+        return;
+    };
+    match value.as_bool() {
+        Some(false) => *protection = None,
+        Some(true) => {}
+        None => {
+            legacy.insert("protection_enabled".into(), value);
+        }
+    }
+}
+
+fn validate_optional_protection(
     protection_ids: &HashSet<String>,
-    enabled: bool,
     protection: Option<&str>,
     owner: &str,
+    prefilter_policy: Option<PrefilterPolicy>,
 ) -> Result<(), ConfigError> {
-    if !enabled {
-        return Ok(());
+    match (protection, prefilter_policy) {
+        (None, Some(PrefilterPolicy::None)) | (None, None) => return Ok(()),
+        (None, Some(_)) => {
+            return Err(ConfigError::Validation(format!(
+                "{owner} cannot configure prefilter_policy without protection"
+            )))
+        }
+        (Some(_), Some(PrefilterPolicy::None)) => {
+            return Err(ConfigError::Validation(format!(
+                "{owner} requires a non-none prefilter_policy when protection is configured"
+            )))
+        }
+        (Some(_), _) => {}
     }
-    let id = protection.ok_or_else(|| {
-        ConfigError::Validation(format!("{owner} protection_enabled requires protection"))
-    })?;
+    let id = protection.expect("checked as Some");
     if !protection_ids.contains(id) {
         return Err(ConfigError::Validation(format!(
             "{owner} references unknown protection '{id}'"
@@ -1590,6 +1650,7 @@ pub enum PrefilterPolicy {
     NetworkUpload,
     SensitiveRead,
     ArchiveOrEncode,
+    NetworkEgress,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1618,8 +1679,6 @@ pub struct ProcessSandboxRule {
     pub action: SandboxAction,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patterns: Vec<ProcessSandboxPattern>,
-    #[serde(default)]
-    pub protection_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
     #[serde(default)]
@@ -1677,8 +1736,6 @@ pub struct FileSandboxRule {
     pub patterns: Vec<FileSandboxPattern>,
     #[serde(default)]
     pub operations: Vec<FileSandboxOperation>,
-    #[serde(default)]
-    pub protection_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
     #[serde(default)]
@@ -1731,6 +1788,10 @@ pub struct FirewallRule {
     pub action: FirewallAction,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<FirewallEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub prefilter_policy: PrefilterPolicy,
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
 }
@@ -1879,12 +1940,12 @@ pub struct DefaultRoute {
     pub deny: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
-    #[serde(default)]
-    pub protection_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
     #[serde(default)]
     pub allow_sensitive_upload: bool,
+    #[serde(default, flatten)]
+    pub legacy: HashMap<String, serde_json::Value>,
 }
 
 impl Default for DefaultRoute {
@@ -1893,9 +1954,9 @@ impl Default for DefaultRoute {
             enabled: true,
             deny: false,
             plugins: Vec::new(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
+            legacy: HashMap::new(),
         }
     }
 }
@@ -1954,8 +2015,6 @@ pub struct RouteRule {
     pub upstream: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
-    #[serde(default)]
-    pub protection_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
     #[serde(default)]
@@ -2463,7 +2522,6 @@ targets = ["example.com"]"#,
             upstream: None,
             plugins: Vec::new(),
             legacy: Default::default(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
         });
@@ -2589,7 +2647,6 @@ targets = ["example.com"]"#,
             upstream: None,
             plugins: Vec::new(),
             legacy: Default::default(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
         });
@@ -2905,7 +2962,6 @@ targets = ["example.com"]"#,
             upstream: Some("missing".into()),
             plugins: vec!["missing".into()],
             legacy: Default::default(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
         });
@@ -3079,7 +3135,6 @@ aktion = "deny""#,
             priority: 0,
             action: SandboxAction::Deny,
             patterns: Vec::new(),
-            protection_enabled: false,
             protection: None,
             prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
@@ -3105,7 +3160,6 @@ aktion = "deny""#,
             action: SandboxAction::Deny,
             patterns: Vec::new(),
             operations: vec![FileSandboxOperation::Read],
-            protection_enabled: false,
             protection: None,
             prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
@@ -3181,6 +3235,8 @@ aktion = "deny""#,
                     port: None,
                 }],
                 legacy: Default::default(),
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
             },
             FirewallRule {
                 uuid: new_config_uuid(),
@@ -3193,6 +3249,8 @@ aktion = "deny""#,
                     port: None,
                 }],
                 legacy: Default::default(),
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
             },
         ];
         assert!(config
@@ -3225,6 +3283,8 @@ aktion = "deny""#,
                 port: None,
             }],
             legacy: Default::default(),
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
         });
         assert!(config
             .validate()
@@ -3280,8 +3340,8 @@ aktion = "deny""#,
             "#,
         )
         .unwrap();
-        assert!(!config.default_route.protection_enabled);
-        assert!(!config.rules[0].protection_enabled);
+        assert!(config.default_route.protection.is_none());
+        assert!(config.rules[0].protection.is_none());
         assert!(!config.rules[0].allow_sensitive_upload);
         config.validate().unwrap();
     }
@@ -3303,7 +3363,6 @@ aktion = "deny""#,
             rewrite_port: None,
             upstream: None,
             plugins: vec![],
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: true,
             legacy: Default::default(),

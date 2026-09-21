@@ -1512,7 +1512,6 @@ mod tests {
             upstream: None,
             plugins: vec!["credential".into()],
             legacy: Default::default(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
         });

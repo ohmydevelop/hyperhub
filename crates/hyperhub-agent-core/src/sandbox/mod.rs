@@ -36,6 +36,7 @@ pub(crate) enum PrefilterPolicy {
     NetworkUpload,
     SensitiveRead,
     ArchiveOrEncode,
+    NetworkEgress,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -59,8 +60,6 @@ pub(crate) struct ProcessSandboxSnapshotRule {
     pub(crate) id: String,
     pub(crate) action: SandboxAction,
     pub(crate) patterns: Vec<ProcessSandboxPattern>,
-    #[serde(default)]
-    pub(crate) protection_enabled: bool,
     #[serde(default)]
     pub(crate) protection: Option<String>,
     #[serde(default)]
@@ -88,8 +87,6 @@ pub(crate) struct FileSandboxSnapshotRule {
     pub(crate) patterns: Vec<String>,
     pub(crate) operations: Vec<FileSandboxOperation>,
     #[serde(default)]
-    pub(crate) protection_enabled: bool,
-    #[serde(default)]
     pub(crate) protection: Option<String>,
     #[serde(default)]
     pub(crate) prefilter_policy: PrefilterPolicy,
@@ -106,7 +103,6 @@ struct CompiledProcessSandboxRule {
     id: String,
     action: SandboxAction,
     patterns: Vec<CompiledProcessSandboxPattern>,
-    protection_enabled: bool,
     protection: Option<String>,
     prefilter_policy: PrefilterPolicy,
 }
@@ -127,7 +123,6 @@ struct CompiledFileSandboxRule {
     action: SandboxAction,
     patterns: Vec<regex::Regex>,
     operations: Vec<FileSandboxOperation>,
-    protection_enabled: bool,
     protection: Option<String>,
     prefilter_policy: PrefilterPolicy,
 }
@@ -179,7 +174,7 @@ pub(crate) fn file_sandbox_decision(
             && rule.patterns.iter().any(|pattern| pattern.is_match(path))
         {
             let rule_id = Some(rule.id.clone());
-            if rule.action == SandboxAction::Pass && rule.protection_enabled {
+            if rule.action == SandboxAction::Pass && rule.protection.is_some() {
                 let prefilter = prefilter::evaluate(
                     rule.prefilter_policy,
                     path,
@@ -221,7 +216,7 @@ pub(crate) fn process_sandbox_decision(
             continue;
         }
         let rule_id = Some(rule.id.clone());
-        if rule.action == SandboxAction::Pass && rule.protection_enabled {
+        if rule.action == SandboxAction::Pass && rule.protection.is_some() {
             let argv = cmd
                 .split_whitespace()
                 .map(str::to_owned)
@@ -273,7 +268,7 @@ pub(crate) fn process_protection_id(
     command_line: &str,
 ) -> Option<(String, String)> {
     snapshot.rules.iter().find_map(|rule| {
-        if !rule.protection_enabled
+        if rule.protection.is_none()
             || !rule.patterns.iter().any(|pattern| {
                 pattern
                     .executable
@@ -298,7 +293,7 @@ pub(crate) fn file_protection_id(
     operation: FileSandboxOperation,
 ) -> Option<(String, String)> {
     snapshot.rules.iter().find_map(|rule| {
-        if !rule.protection_enabled
+        if rule.protection.is_none()
             || !rule.operations.contains(&operation)
             || !rule.patterns.iter().any(|pattern| pattern.is_match(path))
         {
@@ -355,7 +350,6 @@ mod tests {
                 action: SandboxAction::Deny,
                 patterns: vec![r"^C:/secret(?:/|$)".into()],
                 operations: vec![FileSandboxOperation::Read],
-                protection_enabled: false,
                 protection: None,
                 prefilter_policy: PrefilterPolicy::None,
             }],
@@ -383,7 +377,6 @@ mod tests {
                     executable: r"(?i)tool\.exe$".into(),
                     command_line: r"--danger(?:\s|$)".into(),
                 }],
-                protection_enabled: false,
                 protection: None,
                 prefilter_policy: PrefilterPolicy::None,
             }],
@@ -481,7 +474,6 @@ pub(crate) fn compile_process_snapshot(
                 id: rule.id,
                 action: rule.action,
                 patterns,
-                protection_enabled: rule.protection_enabled,
                 protection: rule.protection,
                 prefilter_policy: rule.prefilter_policy,
             })
@@ -511,7 +503,6 @@ pub(crate) fn compile_file_snapshot(
                     .map(|pattern| regex::Regex::new(&pattern))
                     .collect::<Result<_, _>>()?,
                 operations: rule.operations,
-                protection_enabled: rule.protection_enabled,
                 protection: rule.protection,
                 prefilter_policy: rule.prefilter_policy,
             })

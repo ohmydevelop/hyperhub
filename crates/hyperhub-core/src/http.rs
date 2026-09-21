@@ -746,12 +746,11 @@ where
     let mitm = inner.decision.plugins.iter().any(|plugin| {
         plugin.protocols.contains(&PluginProtocol::Http)
             || plugin.protocols.contains(&PluginProtocol::Ws)
-    }) || (inner.decision.protection_enabled
-        && inner
-            .decision
-            .protection
-            .as_deref()
-            .is_some_and(|id| inner.protection.profile_enabled(id)));
+    }) || inner
+        .decision
+        .protection
+        .as_deref()
+        .is_some_and(|id| inner.protection.profile_enabled(id));
     if mitm {
         proxy_https(client, upstream, 0, inner).await
     } else {
@@ -1417,7 +1416,6 @@ where
             let protection_profile = decision
                 .protection
                 .as_deref()
-                .filter(|_| decision.protection_enabled)
                 .filter(|id| protection.profile_enabled(id))
                 .map(str::to_owned);
             let mut protection_scan = ScanResult::default();
@@ -2451,7 +2449,6 @@ mod tests {
             upstream: None,
             plugins: vec!["audit".into()],
             legacy: Default::default(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
         });
@@ -3694,7 +3691,6 @@ mod tests {
                 upstream: None,
                 plugins: vec!["http-header".into()],
                 legacy: Default::default(),
-                protection_enabled: false,
                 protection: None,
                 allow_sensitive_upload: false,
             });
@@ -3906,7 +3902,6 @@ mod tests {
                 upstream: None,
                 plugins: vec!["path-token".into()],
                 legacy: Default::default(),
-                protection_enabled: false,
                 protection: None,
                 allow_sensitive_upload: false,
             });
@@ -4008,7 +4003,6 @@ mod tests {
                 upstream: None,
                 plugins: vec![],
                 legacy: Default::default(),
-                protection_enabled: false,
                 protection: None,
                 allow_sensitive_upload: false,
             });
@@ -4113,7 +4107,6 @@ mod tests {
                 rewrite_port: None,
                 upstream: None,
                 plugins: vec![],
-                protection_enabled: true,
                 protection: Some("egress".into()),
                 allow_sensitive_upload: false,
                 legacy: Default::default(),
@@ -4243,7 +4236,6 @@ mod tests {
                 upstream: None,
                 plugins: vec!["websocket".into()],
                 legacy: Default::default(),
-                protection_enabled: false,
                 protection: None,
                 allow_sensitive_upload: false,
             });
@@ -4457,7 +4449,6 @@ mod tests {
                 upstream: None,
                 plugins: vec!["body".into()],
                 legacy: Default::default(),
-                protection_enabled: false,
                 protection: None,
                 allow_sensitive_upload: false,
             });
@@ -4992,7 +4983,6 @@ mod tests {
             upstream: None,
             plugins: vec!["shared".into()],
             legacy: Default::default(),
-            protection_enabled: false,
             protection: None,
             allow_sensitive_upload: false,
         });

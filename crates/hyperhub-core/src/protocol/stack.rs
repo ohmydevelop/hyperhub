@@ -134,13 +134,13 @@ pub(crate) async fn run_stack(
         inner.context.protocol = inspection.protocol;
     }
     // 连接级决策门控：命中 MITM 能力层但该路由未绑定 http/ws 插件时出栈透传。
-    let protection_enabled = inner.decision.protection_enabled
-        && inner
+    if layer.kind().audited(&inner.decision.plugins) == Some(false)
+        && !inner
             .decision
             .protection
             .as_deref()
-            .is_some_and(|id| inner.protection.profile_enabled(id));
-    if layer.kind().audited(&inner.decision.plugins) == Some(false) && !protection_enabled {
+            .is_some_and(|id| inner.protection.profile_enabled(id))
+    {
         return RawLayer
             .serve(LayerContext {
                 inner,

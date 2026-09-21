@@ -1205,7 +1205,6 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                 upstream,
                 plugins: credential.into_iter().collect(),
                 legacy: HashMap::new(),
-                protection_enabled: false,
                 protection: None,
                 allow_sensitive_upload: false,
             };
@@ -1327,6 +1326,10 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                     port,
                 }],
                 legacy: HashMap::new(),
+                protection: optional_arg(args, "protection").map(str::to_owned),
+                prefilter_policy: prefilter_policy(
+                    optional_arg(args, "prefilter_policy").unwrap_or("none"),
+                )?,
             };
             upsert_by(&mut config.firewall.rules, |item| item.id == id, rule);
             Ok(format!("已设置网络规则 {id}"))
@@ -1380,7 +1383,6 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                     pattern: required_arg(args, "pattern")?.to_owned(),
                 }],
                 operations,
-                protection_enabled: boolean_arg(args, "protection_enabled").unwrap_or(false),
                 protection: optional_arg(args, "protection").map(str::to_owned),
                 prefilter_policy: prefilter_policy(
                     optional_arg(args, "prefilter_policy").unwrap_or("none"),
@@ -1429,7 +1431,6 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                     executable: optional_arg(args, "executable").unwrap_or("").to_owned(),
                     command_line: optional_arg(args, "command_line").unwrap_or("").to_owned(),
                 }],
-                protection_enabled: boolean_arg(args, "protection_enabled").unwrap_or(false),
                 protection: optional_arg(args, "protection").map(str::to_owned),
                 prefilter_policy: prefilter_policy(
                     optional_arg(args, "prefilter_policy").unwrap_or("none"),
@@ -1560,6 +1561,7 @@ fn prefilter_policy(value: &str) -> Result<PrefilterPolicy, String> {
         "network_upload" => Ok(PrefilterPolicy::NetworkUpload),
         "sensitive_read" => Ok(PrefilterPolicy::SensitiveRead),
         "archive_or_encode" => Ok(PrefilterPolicy::ArchiveOrEncode),
+        "network_egress" => Ok(PrefilterPolicy::NetworkEgress),
         other => Err(format!("未知智能防护预筛选策略 {other}")),
     }
 }
