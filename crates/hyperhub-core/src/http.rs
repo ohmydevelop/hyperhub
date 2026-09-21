@@ -1490,6 +1490,9 @@ where
                     body_complete,
                     unscannable,
                     scan: protection_scan.clone(),
+                    stage: "http_request".into(),
+                    command: Vec::new(),
+                    features: Vec::new(),
                 };
                 if protection_scan.high_confidence_secret() {
                     audit.connection(

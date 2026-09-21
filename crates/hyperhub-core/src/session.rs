@@ -1366,6 +1366,17 @@ pub enum ControlRequest {
         token: String,
         event: crate::sandbox::SandboxAuditEvent,
     },
+    SmartProtectionCheck {
+        session_id: String,
+        token: String,
+        protection_id: String,
+        rule_id: Option<String>,
+        stage: String,
+        executable: String,
+        argv: Vec<String>,
+        features: Vec<String>,
+        context: serde_json::Value,
+    },
     ReportStaticSandboxAudit {
         session_id: String,
         token: String,
@@ -1463,6 +1474,13 @@ pub enum ControlResponse {
         generated_at_ms: u64,
         sessions: Vec<SessionSnapshot>,
         connections: Vec<ConnectionSnapshot>,
+    },
+    SmartProtectionDecision {
+        action: crate::config::SandboxAction,
+        reason: String,
+        risk_level: Option<String>,
+        confidence: Option<f64>,
+        cache_hit: bool,
     },
     Error {
         message: String,

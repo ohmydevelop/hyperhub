@@ -266,6 +266,81 @@ pub(crate) fn file_prefilter(
     prefilter::file_prefilter(snapshot, path, operation, context)
 }
 
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn process_protection_id(
+    snapshot: &CompiledProcessSandboxSnapshot,
+    executable: &str,
+    command_line: &str,
+) -> Option<(String, String)> {
+    snapshot.rules.iter().find_map(|rule| {
+        if !rule.protection_enabled
+            || !rule.patterns.iter().any(|pattern| {
+                pattern
+                    .executable
+                    .as_ref()
+                    .is_none_or(|regex| regex.is_match(executable))
+                    && pattern
+                        .command_line
+                        .as_ref()
+                        .is_none_or(|regex| regex.is_match(command_line))
+            })
+        {
+            return None;
+        }
+        Some((rule.id.clone(), rule.protection.clone()?))
+    })
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn file_protection_id(
+    snapshot: &CompiledFileSandboxSnapshot,
+    path: &str,
+    operation: FileSandboxOperation,
+) -> Option<(String, String)> {
+    snapshot.rules.iter().find_map(|rule| {
+        if !rule.protection_enabled
+            || !rule.operations.contains(&operation)
+            || !rule.patterns.iter().any(|pattern| pattern.is_match(path))
+        {
+            return None;
+        }
+        Some((rule.id.clone(), rule.protection.clone()?))
+    })
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn query_prefilter_gateway(
+    protection_id: &str,
+    rule_id: Option<&str>,
+    stage: &str,
+    executable: &str,
+    argv: &[String],
+    features: &[String],
+    context: &PrefilterContext,
+) -> Result<bool, i32> {
+    let (endpoint, session_id, token) = {
+        let runtime = crate::state().lock().map_err(|_| crate::HH_ERR_PROTOCOL)?;
+        (
+            runtime.session.control_endpoint.clone(),
+            runtime.session.session_id.clone(),
+            runtime.session.token.clone(),
+        )
+    };
+    let context = serde_json::to_value(context).map_err(|_| crate::HH_ERR_PROTOCOL)?;
+    crate::smart_protection_check(
+        &endpoint,
+        &session_id,
+        &token,
+        protection_id,
+        rule_id,
+        stage,
+        executable,
+        argv,
+        features,
+        &context,
+    )
+}
+
 #[cfg(all(test, any(windows, unix), feature = "gum-agent"))]
 mod tests {
     use super::*;

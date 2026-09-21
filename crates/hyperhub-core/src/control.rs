@@ -1118,6 +1118,56 @@ impl ControlService {
                     }
                 }
             }
+            ControlRequest::SmartProtectionCheck {
+                session_id,
+                token,
+                protection_id,
+                rule_id: _rule_id,
+                stage,
+                executable,
+                argv,
+                features,
+                context,
+            } => {
+                if peer_pid.is_none() {
+                    ControlResponse::Error {
+                        message: "invalid smart protection reporter".into(),
+                    }
+                } else if !self
+                    .sessions
+                    .authenticate_member(&session_id, &token, peer_pid.unwrap())
+                {
+                    ControlResponse::Error {
+                        message: "invalid smart protection reporter".into(),
+                    }
+                } else {
+                    let outcome = runtime
+                        .protection
+                        .evaluate_agent(
+                            &protection_id,
+                            &session_id,
+                            peer_pid.unwrap(),
+                            &executable,
+                            &stage,
+                            argv,
+                            features,
+                            context,
+                        )
+                        .await;
+                    let provider = outcome.providers.iter().find(|item| item.error.is_none());
+                    ControlResponse::SmartProtectionDecision {
+                        action: if outcome.deny {
+                            crate::config::SandboxAction::Deny
+                        } else {
+                            crate::config::SandboxAction::Pass
+                        },
+                        reason: outcome.reason.unwrap_or_else(|| "prefilter_pass".into()),
+                        risk_level: provider.and_then(|item| item.risk_level.clone()),
+                        confidence: provider.and_then(|item| item.confidence),
+                        cache_hit: provider.is_some_and(|item| item.cache_hit),
+                    }
+                }
+            }
             ControlRequest::UpdateConfig { proof, config_json } => {
                 if !verify_config_update_proof(&self.session_auth_key, &config_json, &proof) {
                     ControlResponse::Error {
