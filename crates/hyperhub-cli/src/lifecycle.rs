@@ -43,10 +43,15 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
     }
 
     let config_path = default_config_path().map_err(|error| error.to_string())?;
-    if !config_path.is_file() {
-        return Err("configuration is missing; run `hyperhub config` first".into());
+    let first_run = !config_path.is_file();
+    let password = password::acquire(config.password_file.as_deref(), first_run)?;
+    if first_run {
+        crate::initialize_config_for_start(&config_path, password.as_bytes())?;
+        println!(
+            "HyperHub configuration initialized: {}",
+            config_path.display()
+        );
     }
-    let password = password::acquire(config.password_file.as_deref(), false)?;
     let log_path = default_log_path()?;
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {

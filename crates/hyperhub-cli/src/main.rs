@@ -227,7 +227,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         password::acquire(run.password_file.as_deref(), first_run)?
     };
     let initial = if first_run {
-        initialize_config(&path, password.as_bytes())?
+        initialize_config_for_start(&path, password.as_bytes())?
     } else {
         load_encrypted(&path, password.as_bytes())
             .map_err(|error| error.to_string())?
@@ -328,7 +328,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     Ok(0)
 }
 
-fn initialize_config(path: &Path, password: &[u8]) -> Result<Config, String> {
+pub(crate) fn initialize_config_for_start(path: &Path, password: &[u8]) -> Result<Config, String> {
     let mut config = Config::default();
     config.apply_managed_audit_paths(path);
     config.environment = default_environment();
@@ -1450,7 +1450,7 @@ mod tests {
         ));
         let path = directory.join("config.bin");
         let password = b"test-password";
-        let config = initialize_config(&path, password).unwrap();
+        let config = initialize_config_for_start(&path, password).unwrap();
         assert_eq!(config.listener.socks_listen, "127.0.0.1:18444");
         assert_eq!(config.listener.pending_session_ttl_secs, 60);
         assert_eq!(
