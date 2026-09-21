@@ -46,7 +46,7 @@ HYPERHUB_SKILL_AGENT_CMD='my-agent-adapter'
 
 ## 覆盖场景
 
-- 新增 Bearer 凭证和 HTTP 路由，并使用 `${APPROVE:name}` 占位符；
+- 新增 Schema v2 Bearer 凭证和 HTTP 路由，并使用 `${APPROVE:name}` 占位符；
 - 通过 UUID + `test` 安全修改现有配置；
 - 通过 UUID + `test` 安全删除现有对象；
 - 生成 RFC 6902 patch，而不是猜测内联 CLI 参数；

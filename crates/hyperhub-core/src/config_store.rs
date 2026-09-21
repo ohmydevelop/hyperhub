@@ -1,4 +1,5 @@
 use crate::config::{Config, ConfigError};
+use crate::config_document::ConfigDocument;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -115,7 +116,7 @@ pub fn redacted_config_path(config_path: &Path) -> PathBuf {
 }
 
 pub fn save_redacted_json(config_path: &Path, config: &Config) -> Result<(), StoreError> {
-    let mut bytes = serde_json::to_vec_pretty(&config.redacted())?;
+    let mut bytes = serde_json::to_vec_pretty(&ConfigDocument::from_config(&config.redacted()))?;
     bytes.push(b'\n');
     atomic_write(&redacted_config_path(config_path), &bytes)
 }
@@ -175,7 +176,7 @@ pub fn load_encrypted_with_keyring(
     }
     ensure_keyring_descriptor(keyring, &header.descriptor)?;
     let plaintext = decrypt_payload_with_keyring(&bytes, keyring, CONFIG_LABEL)?;
-    let config = parse_toml(&plaintext, path)?;
+    let config = parse_document_toml(&plaintext, path)?;
     let session_auth_key = keyring.session_auth_key()?;
     Ok(UnlockedConfig {
         config,
@@ -243,9 +244,9 @@ pub fn import(path: &Path, password: Option<&[u8]>) -> Result<Config, StoreError
         } else {
             Zeroizing::new(verify_plain_payload(&bytes, &header)?)
         };
-        parse_toml(&plaintext, path)
+        parse_document_toml(&plaintext, path)
     } else {
-        parse_toml(&bytes, path)
+        parse_document_toml(&bytes, path)
     }
 }
 
@@ -268,7 +269,8 @@ pub fn save_encrypted_with_keyring(
     config: &Config,
     keyring: &ConfigKeyring,
 ) -> Result<(), StoreError> {
-    let plaintext = Zeroizing::new(toml::to_string_pretty(config)?.into_bytes());
+    let document = ConfigDocument::from_config(config);
+    let plaintext = Zeroizing::new(toml::to_string_pretty(&document)?.into_bytes());
     let bytes = encrypt_payload_with_keyring(&plaintext, keyring, CONFIG_LABEL)?;
     atomic_write(path, &bytes)?;
     save_redacted_json(path, config)
@@ -280,25 +282,19 @@ pub fn export(
     format: ExportFormat,
     password: Option<&[u8]>,
 ) -> Result<(), StoreError> {
+    let document = ConfigDocument::from_config(config);
+    let payload = toml::to_string_pretty(&document)?.into_bytes();
     let bytes = match format {
-        ExportFormat::EncryptedBin => encode_encrypted(
-            config,
+        ExportFormat::EncryptedBin => encrypt_payload(
+            &payload,
             password.ok_or(StoreError::Authentication)?,
             &new_descriptor(),
+            CONFIG_LABEL,
         )?,
-        ExportFormat::PlainBin => encode_plain(config)?,
-        ExportFormat::Toml => toml::to_string_pretty(config)?.into_bytes(),
+        ExportFormat::PlainBin => encode_plain_payload(&payload),
+        ExportFormat::Toml => payload,
     };
     atomic_write(path, &bytes)
-}
-
-fn encode_encrypted(
-    config: &Config,
-    password: &[u8],
-    descriptor: &KdfDescriptor,
-) -> Result<Vec<u8>, StoreError> {
-    let plaintext = Zeroizing::new(toml::to_string_pretty(config)?.into_bytes());
-    encrypt_payload(&plaintext, password, descriptor, CONFIG_LABEL)
 }
 
 fn encrypt_payload(
@@ -336,13 +332,12 @@ fn encrypt_payload_with_keyring(
     Ok(output)
 }
 
-fn encode_plain(config: &Config) -> Result<Vec<u8>, StoreError> {
-    let payload = toml::to_string_pretty(config)?.into_bytes();
-    let digest: [u8; 32] = Sha256::digest(&payload).into();
+fn encode_plain_payload(payload: &[u8]) -> Vec<u8> {
+    let digest: [u8; 32] = Sha256::digest(payload).into();
     let descriptor = new_descriptor();
     let mut output = build_header(false, &descriptor, [0; 24], payload.len() as u64, digest);
-    output.extend_from_slice(&payload);
-    Ok(output)
+    output.extend_from_slice(payload);
+    output
 }
 
 struct ParsedHeader {
@@ -516,17 +511,13 @@ fn verify_plain_payload(bytes: &[u8], header: &ParsedHeader) -> Result<Vec<u8>, 
     Ok(payload)
 }
 
-fn parse_toml(bytes: &[u8], path: &Path) -> Result<Config, StoreError> {
+fn parse_document_toml(bytes: &[u8], path: &Path) -> Result<Config, StoreError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| StoreError::Format("configuration TOML is not UTF-8".into()))?;
-    let mut config: Config = toml::from_str(text).map_err(|source| {
-        StoreError::from(ConfigError::Parse {
-            path: path.to_owned(),
-            source,
-        })
-    })?;
+    let document: ConfigDocument = toml::from_str(text)
+        .map_err(|error| StoreError::Format(format!("invalid configuration schema v2: {error}")))?;
+    let mut config = document.into_config().map_err(StoreError::Format)?;
     config.apply_managed_audit_paths(path);
-    config.validate()?;
     Ok(config)
 }
 
@@ -938,8 +929,11 @@ mod tests {
         let text = fs::read_to_string(&view_path).unwrap();
         assert!(!text.contains("actual-secret"));
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["environment"][0]["name"], "TOKEN");
-        assert_eq!(value["environment"][0]["value"]["value"], "<redacted>");
+        assert_eq!(value["environment_variables"][0]["name"], "TOKEN");
+        assert_eq!(
+            value["environment_variables"][0]["value"]["value"],
+            "<redacted>"
+        );
         fs::remove_file(path).unwrap();
         fs::remove_file(view_path).unwrap();
     }

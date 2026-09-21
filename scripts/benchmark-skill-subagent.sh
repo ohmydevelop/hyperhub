@@ -114,9 +114,9 @@ require(skill, "${APPROVE:", "approval placeholder")
 require(skill, "uuid", "UUID identity")
 require(skill, "test", "UUID guard")
 require(skill, "不得代替用户运行", "approval boundary")
-require(reference, '"http_scheme":"bearer"', "Bearer schema")
-require(skill, '"path":"/plugins/-"', "credential append example")
-require(reference, '"path":"/routes/-"', "route append example")
+require(reference, '"type":"http_bearer"', "Bearer schema")
+require(skill, '"path":"/gateway/credentials/-"', "credential append example")
+require(reference, '"path":"/gateway/routing/routes/-"', "route append example")
 require(reference, '"op":"test"', "UUID test example")
 require(reference, "ssh_host_keys", "SSH trust guidance")
 if "config patch <patch-file>" not in skill:
@@ -222,47 +222,45 @@ if not isinstance(patch, list):
 else:
     mutations = [item for item in patch if isinstance(item, dict) and item.get("op") != "test"]
     tests = [item for item in patch if isinstance(item, dict) and item.get("op") == "test"]
-    credential_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/plugins/-"), None)
-    route_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/routes/-"), None)
+    credential_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/gateway/credentials/-"), None)
+    route_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/gateway/routing/routes/-"), None)
     if not credential_add:
-        errors.append("missing /plugins/- credential addition")
+        errors.append("missing /gateway/credentials/- credential addition")
     else:
         value = credential_add.get("value", {})
-        if value.get("kind") != "credential" or value.get("http_scheme") != "bearer":
-            errors.append("new plugin is not an HTTP Bearer credential")
-        if value.get("protocols") != ["http"]:
-            errors.append("Bearer credential must declare protocols=[http]")
+        if value.get("type") != "http_bearer":
+            errors.append("new credential is not Schema v2 HTTP Bearer")
         secret = value.get("secret", {}).get("value")
         if not isinstance(secret, str) or not re.fullmatch(r"\$\{APPROVE:[^}]+\}", secret):
             errors.append("Bearer secret must use ${APPROVE:name}")
         if "uuid" in value:
             errors.append("new credential must omit uuid so CLI can generate it")
     if not route_add:
-        errors.append("missing /routes/- route addition")
+        errors.append("missing /gateway/routing/routes/- route addition")
     else:
         value = route_add.get("value", {})
         endpoints = value.get("endpoints", [])
         if not any(e.get("target") == "https://api.example.test/v1" and e.get("port") == 443 for e in endpoints if isinstance(e, dict)):
             errors.append("new route does not target https://api.example.test/v1:443")
-        if not value.get("plugins"):
+        if not value.get("decision", {}).get("credentials"):
             errors.append("new route does not reference the new credential")
         if "uuid" in value:
             errors.append("new route must omit uuid so CLI can generate it")
-        if credential_add and credential_add.get("value", {}).get("id") not in value.get("plugins", []):
+        if credential_add and credential_add.get("value", {}).get("id") not in value.get("decision", {}).get("credentials", []):
             errors.append("new route does not reference the added credential by id")
     route_uuid = "22222222-2222-4222-8222-222222222222"
-    plugin_uuid = "11111111-1111-4111-8111-111111111111"
-    route_test = any(item.get("path") == "/routes/0/uuid" and item.get("value") == route_uuid for item in tests)
-    plugin_test = any(item.get("path") == "/plugins/0/uuid" and item.get("value") == plugin_uuid for item in tests)
+    credential_uuid = "11111111-1111-4111-8111-111111111111"
+    route_test = any(item.get("path") == "/gateway/routing/routes/0/uuid" and item.get("value") == route_uuid for item in tests)
+    credential_test = any(item.get("path") == "/gateway/credentials/0/uuid" and item.get("value") == credential_uuid for item in tests)
     if not route_test:
         errors.append("existing route mutation lacks a UUID test guard")
-    if not plugin_test:
-        errors.append("existing plugin deletion lacks a UUID test guard")
-    if not any(item.get("op") in ("replace", "add") and str(item.get("path", "")).startswith("/routes/0/") for item in mutations):
+    if not credential_test:
+        errors.append("existing credential deletion lacks a UUID test guard")
+    if not any(item.get("op") in ("replace", "add") and str(item.get("path", "")).startswith("/gateway/routing/routes/0/") for item in mutations):
         errors.append("missing existing route modification")
-    if not any(item.get("op") == "remove" and item.get("path") == "/plugins/0" for item in mutations):
-        errors.append("missing existing plugin deletion")
-    if any(item.get("op") in ("replace", "add") and item.get("path") == "/routes/0/uuid" for item in mutations):
+    if not any(item.get("op") == "remove" and item.get("path") == "/gateway/credentials/0" for item in mutations):
+        errors.append("missing existing credential deletion")
+    if any(item.get("op") in ("replace", "add") and item.get("path") == "/gateway/routing/routes/0/uuid" for item in mutations):
         errors.append("existing route UUID must not be replaced")
 
 secret_text = json.dumps(answer, ensure_ascii=False)

@@ -228,12 +228,13 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        let mut config: Self = toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let document: crate::config_document::ConfigDocument =
+            toml::from_str(&text).map_err(|source| ConfigError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let mut config = document.into_config().map_err(ConfigError::Validation)?;
         config.apply_managed_audit_paths(path);
-        config.validate()?;
         Ok(config)
     }
 
@@ -1888,10 +1889,11 @@ targets = ["example.com"]"#,
 
     #[test]
     fn example_config_is_valid() {
-        let config: Config = toml::from_str(include_str!("../../../examples/hyperhub.toml"))
-            .expect("example configuration must parse");
-        config
-            .validate()
+        let document: crate::config_document::ConfigDocument =
+            toml::from_str(include_str!("../../../examples/hyperhub.toml"))
+                .expect("example configuration must parse");
+        document
+            .into_config()
             .expect("example configuration must validate");
     }
 

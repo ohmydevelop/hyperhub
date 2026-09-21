@@ -13,6 +13,7 @@ use hyperhub_core::config::{
     SecretValue, SshAccount, SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture,
     DEFAULT_ROUTE_ID,
 };
+use hyperhub_core::config_document::ConfigDocument;
 use hyperhub_core::config_store;
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
 use hyperhub_core::session::{
@@ -4043,7 +4044,8 @@ fn push_live_update(app: &App) -> Result<(), String> {
     let descriptor = config_store::read_descriptor(&app.path).map_err(|error| error.to_string())?;
     let key = config_store::derive_session_auth_key(app.password.as_bytes(), &descriptor)
         .map_err(|error| error.to_string())?;
-    let config_json = serde_json::to_string(&app.config).map_err(|error| error.to_string())?;
+    let config_json = serde_json::to_string(&ConfigDocument::from_config(&app.config))
+        .map_err(|error| error.to_string())?;
     let proof = config_update_proof(&key, &config_json)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     let response = runtime

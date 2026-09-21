@@ -1,5 +1,6 @@
 use crate::audit::AuditWriter;
 use crate::config::Config;
+use crate::config_document::ConfigDocument;
 use crate::firewall::compile_snapshot as compile_firewall_snapshot;
 use crate::framing::{read_frame, write_frame};
 use crate::runtime::{RuntimeSnapshot, RuntimeState};
@@ -1124,7 +1125,10 @@ impl ControlService {
                         message: "invalid config update proof".into(),
                     }
                 } else {
-                    match serde_json::from_str::<Config>(&config_json) {
+                    match serde_json::from_str::<ConfigDocument>(&config_json)
+                        .map_err(|error| error.to_string())
+                        .and_then(|document| document.into_config())
+                    {
                         Ok(config) => self.update_config(config).await,
                         Err(error) => ControlResponse::Error {
                             message: format!("invalid config: {error}"),
@@ -2579,7 +2583,8 @@ mod tests {
                 }],
                 legacy: Default::default(),
             });
-            let config_json = serde_json::to_string(&updated).unwrap();
+            let config_json =
+                serde_json::to_string(&ConfigDocument::from_config(&updated)).unwrap();
             let proof = crate::session::config_update_proof(&[0; 32], &config_json).unwrap();
             let response = control_request(
                 &endpoint,
@@ -2690,7 +2695,7 @@ mod tests {
         let mut next = config.clone();
         next.default_route.deny = true;
         next.debug = true;
-        let config_json = serde_json::to_string(&next).unwrap();
+        let config_json = serde_json::to_string(&ConfigDocument::from_config(&next)).unwrap();
         let proof = crate::session::config_update_proof(&[0; 32], &config_json).unwrap();
 
         async fn send_update(
@@ -2730,7 +2735,8 @@ mod tests {
         );
 
         next.debug = false;
-        let debug_disabled_json = serde_json::to_string(&next).unwrap();
+        let debug_disabled_json =
+            serde_json::to_string(&ConfigDocument::from_config(&next)).unwrap();
         let proof = crate::session::config_update_proof(&[0; 32], &debug_disabled_json).unwrap();
         let response = send_update(service.clone(), debug_disabled_json.clone(), proof).await;
         assert!(matches!(response, ControlResponse::Ok));
@@ -2802,7 +2808,7 @@ mod tests {
 
         let mut next = config;
         next.listener.socks_listen = occupied_address.to_string();
-        let config_json = serde_json::to_string(&next).unwrap();
+        let config_json = serde_json::to_string(&ConfigDocument::from_config(&next)).unwrap();
         let proof = crate::session::config_update_proof(&[0; 32], &config_json).unwrap();
         let (client, server) = tokio::io::duplex(64 * 1024);
         let control_task = tokio::spawn(async move {

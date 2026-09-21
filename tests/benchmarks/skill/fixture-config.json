@@ -1,30 +1,38 @@
 {
-  "mode": "enforce",
-  "debug": false,
-  "plugins": [
-    {
-      "uuid": "11111111-1111-4111-8111-111111111111",
-      "id": "old-bearer",
-      "kind": "credential",
-      "enabled": true,
-      "protocols": ["http"],
-      "http_scheme": "bearer",
-      "secret": {"value": "<redacted>"}
-    }
-  ],
-  "routes": [
-    {
-      "uuid": "22222222-2222-4222-8222-222222222222",
-      "id": "old-api-route",
-      "enabled": true,
-      "priority": 200,
-      "endpoints": [{"target": "https://old.example.test/api", "port": 443}],
-      "deny": false,
-      "rewrite_host": null,
-      "rewrite_port": null,
-      "upstream": null,
-      "plugins": ["old-bearer"]
-    }
-  ],
-  "environment": []
+  "schema_version": 2,
+  "gateway": {
+    "mode": "enforce",
+    "debug": false,
+    "listener": {"socks_address":"127.0.0.1:18444","pending_session_ttl_seconds":60},
+    "proxies": [],
+    "credentials": [
+      {
+        "uuid": "11111111-1111-4111-8111-111111111111",
+        "id": "old-bearer",
+        "type": "http_bearer",
+        "secret": {"value": "<redacted>"}
+      }
+    ],
+    "audit": {"settings":{"retention_days":7,"connections":true,"header_allowlist":[]},"profiles":[]},
+    "routing": {
+      "default": {"enabled":true,"decision":{"action":"allow"}},
+      "routes": [
+        {
+          "uuid": "22222222-2222-4222-8222-222222222222",
+          "id": "old-api-route",
+          "enabled": true,
+          "priority": 200,
+          "endpoints": [{"target": "https://old.example.test/api", "port": 443}],
+          "decision": {"action":"allow","credentials":["old-bearer"]}
+        }
+      ]
+    },
+    "trust": {"tls_certificates":[],"ssh_host_keys":[]}
+  },
+  "sandbox": {
+    "network":{"enabled":false,"default_action":"allow","error_action":"allow","rules":[]},
+    "file":{"enabled":false,"default_action":"allow","error_action":"allow","rules":[]},
+    "process":{"enabled":false,"default_action":"allow","error_action":"allow","rules":[]}
+  },
+  "environment_variables": []
 }

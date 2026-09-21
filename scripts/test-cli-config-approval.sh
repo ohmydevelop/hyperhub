@@ -35,9 +35,9 @@ chmod 0600 "$password_file"
 patch_file="$temporary/initial-patch.json"
 cat > "$patch_file" <<'JSON'
 [
-  {"op":"replace","path":"/debug","value":true},
-  {"op":"add","path":"/environment/-","value":{"name":"LLM_TEST_SECRET","value":{"value":"${APPROVE:github-api-key}"}}},
-  {"op":"add","path":"/routes/-","value":{"id":"llm-deny-example","enabled":true,"priority":100,"endpoints":[{"target":"example.com","port":443}],"deny":true,"rewrite_host":null,"rewrite_port":null,"upstream":null,"plugins":[]}}
+  {"op":"replace","path":"/gateway/debug","value":true},
+  {"op":"add","path":"/environment_variables/-","value":{"name":"LLM_TEST_SECRET","value":{"value":"${APPROVE:github-api-key}"}}},
+  {"op":"add","path":"/gateway/routing/routes/-","value":{"id":"llm-deny-example","enabled":true,"priority":100,"endpoints":[{"target":"example.com","port":443}],"decision":{"action":"deny"}}}
 ]
 JSON
 chmod 0600 "$patch_file"
@@ -84,7 +84,7 @@ assert pending["completed"] == 0
 assert pending["remaining"] == 3
 PY
 other_patch="$temporary/other-patch.json"
-printf '[{"op":"replace","path":"/debug","value":false}]\n' > "$other_patch"
+printf '[{"op":"replace","path":"/gateway/debug","value":false}]\n' > "$other_patch"
 chmod 0600 "$other_patch"
 if "$hyperhub" config patch "$other_patch" --password-file "$password_file" >/dev/null 2>&1; then
   echo 'a different patch unexpectedly replaced the pending approval queue' >&2
@@ -221,10 +221,10 @@ import json
 import pathlib
 import sys
 shown = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert shown["debug"] is False
-assert shown["environment"][-1]["name"] == "LLM_TEST_SECRET"
-assert shown["environment"][-1]["value"]["value"] == "<redacted>"
-assert not shown["routes"]
+assert shown["gateway"]["debug"] is False
+assert shown["environment_variables"][-1]["name"] == "LLM_TEST_SECRET"
+assert shown["environment_variables"][-1]["value"]["value"] == "<redacted>"
+assert not shown["gateway"]["routing"]["routes"]
 PY
 
 resume_transcript="$temporary/approve-resumed.transcript"
@@ -258,10 +258,10 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 plan = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 assert "real-github-api-key" not in text
 shown = json.loads(text)
-assert shown["debug"] is False
-assert shown["environment"][-1]["value"]["value"] == "<redacted>"
-assert shown["environment"][-1]["uuid"] == plan["requests"][1]["config_item_uuid"]
-route = shown["routes"][-1]
+assert shown["gateway"]["debug"] is False
+assert shown["environment_variables"][-1]["value"]["value"] == "<redacted>"
+assert shown["environment_variables"][-1]["uuid"] == plan["requests"][1]["config_item_uuid"]
+route = shown["gateway"]["routing"]["routes"][-1]
 assert route["uuid"] == plan["requests"][2]["config_item_uuid"]
 assert route["id"] == "llm-deny-example"
 assert route["priority"] == 120
@@ -308,7 +308,7 @@ PY
   serve_pid=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"])' <<<"$status")
 
   live_patch="$temporary/live-patch.json"
-  printf '[{"op":"replace","path":"/debug","value":true}]\n' > "$live_patch"
+  printf '[{"op":"replace","path":"/gateway/debug","value":true}]\n' > "$live_patch"
   chmod 0600 "$live_patch"
   "$hyperhub" config patch "$live_patch" --password-file "$password_file" > "$temporary/live-plan.json"
   live_transcript="$temporary/live-approve.transcript"

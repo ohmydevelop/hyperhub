@@ -185,22 +185,48 @@ stop_serve() {
 write_base_config() {
   local path=$1 port=$2
   cat > "$path" <<TOML
+schema_version = 2
+environment_variables = []
+
+[gateway]
 mode = "enforce"
+debug = false
 
-[listener]
-socks_listen = "127.0.0.1:$port"
-pending_session_ttl_secs = 60
+[gateway.listener]
+socks_address = "127.0.0.1:$port"
+pending_session_ttl_seconds = 60
 
-[audit]
+[gateway.audit.settings]
+retention_days = 7
 connections = true
+header_allowlist = []
 
-[firewall]
-enabled = false
-
-[default_route]
+[gateway.routing.default]
 enabled = true
-deny = false
-plugins = []
+[gateway.routing.default.decision]
+action = "allow"
+
+[gateway.trust]
+tls_certificates = []
+ssh_host_keys = []
+
+[sandbox.network]
+enabled = false
+default_action = "allow"
+error_action = "allow"
+rules = []
+
+[sandbox.file]
+enabled = false
+default_action = "allow"
+error_action = "allow"
+rules = []
+
+[sandbox.process]
+enabled = false
+default_action = "allow"
+error_action = "allow"
+rules = []
 TOML
 }
 
@@ -388,20 +414,19 @@ credential_config="$temporary/credential.toml"
 write_base_config "$credential_config" "$(free_port)"
 cat >> "$credential_config" <<TOML
 
-[[plugins]]
+[[gateway.credentials]]
 id = "benchmark-http-bearer"
-kind = "credential"
-protocols = ["http"]
-http_scheme = "bearer"
+type = "http_bearer"
 secret = { value = "$credential_secret" }
 
-[[routes]]
+[[gateway.routing.routes]]
 id = "benchmark-http-route"
 enabled = true
 priority = 500
 endpoints = [{ target = "http://localhost/probe", port = $credential_port }]
-deny = false
-plugins = ["benchmark-http-bearer"]
+[gateway.routing.routes.decision]
+action = "allow"
+credentials = ["benchmark-http-bearer"]
 TOML
 "$hyperhub" import "$credential_config" --password-file "$password_file" >/dev/null
 start_serve "$temporary/credential-serve.stdout.log" "$temporary/credential-serve.stderr.log"
@@ -477,7 +502,7 @@ patch = [
         "path": "/sandbox/file",
         "value": {
             "enabled": True,
-            "default": {"action": "pass"},
+            "default_action": "allow",
             "error_action": "deny",
             "rules": [{
                 "uuid": "11111111-1111-4111-8111-111111111111",
@@ -495,7 +520,7 @@ patch = [
         "path": "/sandbox/process",
         "value": {
             "enabled": True,
-            "default": {"action": "pass"},
+            "default_action": "allow",
             "error_action": "deny",
             "rules": [{
                 "uuid": "22222222-2222-4222-8222-222222222222",
@@ -589,27 +614,35 @@ trust_config="$temporary/trust.toml"
 write_base_config "$trust_config" "$(free_port)"
 cat >> "$trust_config" <<TOML
 
-[[plugins]]
+[[gateway.audit.profiles]]
 id = "trust-http-audit"
-kind = "audit"
 protocols = ["http"]
-capture_body = false
+[gateway.audit.profiles.capture]
+http_body = false
+body_limit_bytes = 1048576
+git_transcript = false
+ssh_transcript = false
+websocket = "off"
+[gateway.audit.profiles.capture.directions]
+client_upload = true
+server_response = true
 
-[[routes]]
+[[gateway.routing.routes]]
 id = "trust-tls-route"
 enabled = true
 priority = 600
 endpoints = [{ target = "https://localhost/probe", port = $trust_tls_port }]
-deny = false
-plugins = ["trust-http-audit"]
+[gateway.routing.routes.decision]
+action = "allow"
+audit_profiles = ["trust-http-audit"]
 
-[[routes]]
+[[gateway.routing.routes]]
 id = "trust-ssh-route"
 enabled = true
 priority = 600
 endpoints = [{ target = "localhost", port = $trust_ssh_port }]
-deny = false
-plugins = []
+[gateway.routing.routes.decision]
+action = "allow"
 TOML
 "$hyperhub" import "$trust_config" --password-file "$password_file" >/dev/null
 start_serve "$temporary/trust-serve.stdout.log" "$temporary/trust-serve.stderr.log"
@@ -631,7 +664,8 @@ python3 - "$temporary/trust-show.json" "$trust_tls_port" <<'PYCODE'
 import json, pathlib, sys
 config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 authority = f"localhost:{sys.argv[2]}"
-assert any(item.get("host") == authority and item.get("enabled") for item in config["root_certificates"]), (authority, config["root_certificates"])
+certificates = config["gateway"]["trust"]["tls_certificates"]
+assert any(item.get("scope", {}).get("authority") == authority and item.get("enabled") for item in certificates), (authority, certificates)
 PYCODE
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost' \
@@ -725,14 +759,15 @@ for name in read write delete rename-old; do
 done
 sandbox_config="$temporary/sandbox.toml"
 write_base_config "$sandbox_config" "$(free_port)"
+python3 - "$sandbox_config" <<'PYCODE'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace("[sandbox.file]\nenabled = false\ndefault_action = \"allow\"\nerror_action = \"allow\"\nrules = []", "[sandbox.file]\nenabled = true\ndefault_action = \"allow\"\nerror_action = \"deny\"")
+text = text.replace("[sandbox.process]\nenabled = false\ndefault_action = \"allow\"\nerror_action = \"allow\"\nrules = []", "[sandbox.process]\nenabled = true\ndefault_action = \"allow\"\nerror_action = \"deny\"")
+path.write_text(text, encoding="utf-8")
+PYCODE
 cat >> "$sandbox_config" <<TOML
-
-[sandbox.file]
-enabled = true
-error_action = "deny"
-
-[sandbox.file.default]
-action = "pass"
 
 [[sandbox.file.rules]]
 id = "deny-read"
@@ -768,13 +803,6 @@ priority = 100
 action = "deny"
 operations = ["rename"]
 patterns = [{ pattern = "^$temporary/intents/rename-new$" }]
-
-[sandbox.process]
-enabled = true
-error_action = "deny"
-
-[sandbox.process.default]
-action = "pass"
 
 [[sandbox.process.rules]]
 id = "deny-true"

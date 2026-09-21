@@ -1,6 +1,6 @@
 ---
 name: hyperhub-cli
-description: Use when an Agent needs to inspect, plan, submit, or verify HyperHub configuration through the installed CLI, including routes, credentials, firewall, sandbox, environment, Serve lifecycle, status, logs, and backend diagnostics. Configuration changes require HyperHub's encrypted human-approval queue.
+description: Use when an Agent needs to inspect, plan, submit, or verify HyperHub configuration through the installed CLI, including routes, credentials, audit profiles, trust, sandbox, environment variables, Serve lifecycle, status, logs, and backend diagnostics. Configuration changes require HyperHub's encrypted human-approval queue.
 ---
 
 # HyperHub CLI 操作
@@ -42,8 +42,8 @@ hyperhub show
 
    ```json
    [
-     {"op":"test","path":"/routes/2/uuid","value":"show 中的现有 UUID"},
-     {"op":"replace","path":"/routes/2/priority","value":400}
+     {"op":"test","path":"/gateway/routing/routes/2/uuid","value":"show 中的现有 UUID"},
+     {"op":"replace","path":"/gateway/routing/routes/2/priority","value":400}
    ]
    ```
 
@@ -63,8 +63,8 @@ hyperhub show
 
    ```json
    [
-     {"op":"add","path":"/plugins/-","value":{"id":"devboard-bearer","kind":"credential","protocols":["http"],"http_scheme":"bearer","secret":{"value":"${APPROVE:devboard-token}"}}},
-     {"op":"add","path":"/routes/-","value":{"id":"devboard-api","enabled":true,"priority":300,"endpoints":[{"target":"https://devboard.example/api","port":443}],"deny":false,"rewrite_host":null,"rewrite_port":null,"upstream":null,"plugins":["devboard-bearer"]}}
+     {"op":"add","path":"/gateway/credentials/-","value":{"id":"devboard-bearer","type":"http_bearer","secret":{"value":"${APPROVE:devboard-token}"}}},
+     {"op":"add","path":"/gateway/routing/routes/-","value":{"id":"devboard-api","enabled":true,"priority":300,"endpoints":[{"target":"https://devboard.example/api","port":443}],"decision":{"action":"allow","credentials":["devboard-bearer"]}}}
    ]
    ```
 

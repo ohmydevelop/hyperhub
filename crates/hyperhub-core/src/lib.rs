@@ -2,6 +2,7 @@ pub mod audit;
 pub mod certificate;
 mod client_proxy;
 pub mod config;
+pub mod config_document;
 pub mod config_store;
 pub mod connector;
 pub mod control;

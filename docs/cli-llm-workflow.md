@@ -28,15 +28,15 @@ Skill 源码属于 CLI 构建资源，不依赖仓库工作目录。CLI 版本�
 hyperhub show
 ```
 
-输出直接是完整配置 JSON，不增加包装字段；它与导出配置使用同一份 `Config` 数据，唯一变化是所有 inline secret 的真实值被替换为 `<redacted>`。读取不需要密码。
+输出直接是完整的 Schema v2 JSON，不增加额外包装字段；它与导出配置 1:1 对应，唯一变化是所有 inline secret 的真实值被替换为 `<redacted>`。根结构按 `gateway`、`sandbox` 和 `environment_variables` 分类，读取不需要密码。
 
-加密配置每次保存时都会原子写入权限为当前用户独占的 `config.redacted.json`。从旧版本升级且该文件尚不存在时，先执行一次 `hyperhub validate --password-file ./password` 生成脱敏视图。
+加密配置每次保存时都会原子写入权限为当前用户独占的 `config.redacted.json`。v0.2 不读取或迁移旧 Schema；检测到旧配置或旧脱敏视图时会明确拒绝，用户需要重新创建配置。
 
 ## 2. 提交配置请求
 
 LLM 使用 JSON Patch 描述意图。支持 `add`、`replace`、`remove`、`test`，数组追加使用 `/-`。每个修改操作对应一条人工审批请求，应当包含完整对象并可独立通过配置校验。
 
-可独立增删改的配置对象持久化 `uuid`，包括代理、插件、路由、环境变量、根证书、SSH 主机密钥、网络规则、文件规则和子进程规则。现有对象的 UUID 必须保持不变且不能复用；新增对象省略 UUID 时由 CLI 生成 RFC 4122 UUID。旧配置缺少 UUID 时按对象类型和业务 ID 生成稳定的迁移 UUID，因此重复读取不会改变身份。
+可独立增删改的配置对象持久化 `uuid`，包括代理、凭证、审计 Profile、路由、环境变量、TLS 证书、SSH 主机密钥、网络规则、文件规则和子进程规则。现有对象的 UUID 必须保持不变且不能复用；新增对象省略 UUID 时由 CLI 生成 RFC 4122 UUID。Patch 路径必须来自当前 `show` 输出，不得使用旧 `/plugins`、`/routes` 或 `/firewall` 路径。
 
 需要真实凭证的位置使用审批占位符：
 
@@ -44,7 +44,7 @@ LLM 使用 JSON Patch 描述意图。支持 `add`、`replace`、`remove`、`test
 [
   {
     "op": "add",
-    "path": "/environment/-",
+    "path": "/environment_variables/-",
     "value": {
       "name": "GH_TOKEN",
       "value": { "value": "${APPROVE:github-token}" }

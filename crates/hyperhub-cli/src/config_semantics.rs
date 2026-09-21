@@ -203,39 +203,61 @@ struct ItemContext {
 fn item_context(current: &Value, mutation: &Value, tokens: &[String]) -> ItemContext {
     let value = mutation.get("value");
     match tokens {
-        [root, _, rest @ ..] if root == "upstreams" => collection_context(
-            current,
-            value,
-            tokens,
-            2,
-            ConfigSection::Proxy,
-            "代理",
-            "id",
-            rest,
-        ),
-        [root, _, rest @ ..] if root == "plugins" => {
-            let item = collection_item(current, value, tokens, 2);
-            let kind = item
-                .and_then(|item| item.get("kind"))
-                .and_then(Value::as_str);
-            let (section, label) = match kind {
-                Some("credential") => (ConfigSection::Credential, "凭证"),
-                Some("audit") => (ConfigSection::Audit, "审计插件"),
-                _ => (ConfigSection::Gateway, "插件"),
-            };
-            context_from_item(item, section, label, "id", rest)
+        [gateway, collection, _, rest @ ..] if gateway == "gateway" && collection == "proxies" => {
+            collection_context(
+                current,
+                value,
+                tokens,
+                3,
+                ConfigSection::Proxy,
+                "代理",
+                "id",
+                rest,
+            )
         }
-        [root, _, rest @ ..] if root == "routes" => collection_context(
-            current,
-            value,
-            tokens,
-            2,
-            ConfigSection::Route,
-            "路由",
-            "id",
-            rest,
-        ),
-        [root, _, rest @ ..] if root == "environment" => collection_context(
+        [gateway, collection, _, rest @ ..]
+            if gateway == "gateway" && collection == "credentials" =>
+        {
+            collection_context(
+                current,
+                value,
+                tokens,
+                3,
+                ConfigSection::Credential,
+                "凭证",
+                "id",
+                rest,
+            )
+        }
+        [gateway, audit, profiles, _, rest @ ..]
+            if gateway == "gateway" && audit == "audit" && profiles == "profiles" =>
+        {
+            collection_context(
+                current,
+                value,
+                tokens,
+                4,
+                ConfigSection::Audit,
+                "审计配置",
+                "id",
+                rest,
+            )
+        }
+        [gateway, routing, routes, _, rest @ ..]
+            if gateway == "gateway" && routing == "routing" && routes == "routes" =>
+        {
+            collection_context(
+                current,
+                value,
+                tokens,
+                4,
+                ConfigSection::Route,
+                "路由",
+                "id",
+                rest,
+            )
+        }
+        [root, _, rest @ ..] if root == "environment_variables" => collection_context(
             current,
             value,
             tokens,
@@ -245,40 +267,50 @@ fn item_context(current: &Value, mutation: &Value, tokens: &[String]) -> ItemCon
             "name",
             rest,
         ),
-        [root, _, rest @ ..] if root == "root_certificates" => collection_context(
-            current,
-            value,
-            tokens,
-            2,
-            ConfigSection::Certificate,
-            "根证书",
-            "fingerprint",
-            rest,
-        ),
-        [root, _, rest @ ..] if root == "ssh_host_keys" => collection_context(
-            current,
-            value,
-            tokens,
-            2,
-            ConfigSection::Certificate,
-            "SSH 主机密钥",
-            "host",
-            rest,
-        ),
-        [root, rules, _, rest @ ..] if root == "firewall" && rules == "rules" => {
+        [gateway, trust, certificates, _, rest @ ..]
+            if gateway == "gateway" && trust == "trust" && certificates == "tls_certificates" =>
+        {
             collection_context(
                 current,
                 value,
                 tokens,
-                3,
+                4,
+                ConfigSection::Certificate,
+                "TLS 证书",
+                "fingerprint",
+                rest,
+            )
+        }
+        [gateway, trust, keys, _, rest @ ..]
+            if gateway == "gateway" && trust == "trust" && keys == "ssh_host_keys" =>
+        {
+            collection_context(
+                current,
+                value,
+                tokens,
+                4,
+                ConfigSection::Certificate,
+                "SSH 主机密钥",
+                "host",
+                rest,
+            )
+        }
+        [sandbox, area, rules, _, rest @ ..]
+            if sandbox == "sandbox" && area == "network" && rules == "rules" =>
+        {
+            collection_context(
+                current,
+                value,
+                tokens,
+                4,
                 ConfigSection::Network,
                 "网络规则",
                 "id",
                 rest,
             )
         }
-        [root, area, rules, _, rest @ ..]
-            if root == "sandbox" && area == "process" && rules == "rules" =>
+        [sandbox, area, rules, _, rest @ ..]
+            if sandbox == "sandbox" && area == "process" && rules == "rules" =>
         {
             collection_context(
                 current,
@@ -291,8 +323,8 @@ fn item_context(current: &Value, mutation: &Value, tokens: &[String]) -> ItemCon
                 rest,
             )
         }
-        [root, area, rules, _, rest @ ..]
-            if root == "sandbox" && area == "file" && rules == "rules" =>
+        [sandbox, area, rules, _, rest @ ..]
+            if sandbox == "sandbox" && area == "file" && rules == "rules" =>
         {
             collection_context(
                 current,
@@ -385,12 +417,17 @@ fn context_from_item(
 }
 
 fn singleton_context(root: &str, rest: &[String]) -> ItemContext {
-    let (section, item_kind) = match root {
-        "mode" | "debug" | "listener" => (ConfigSection::Basic, "基础设置"),
-        "default_route" => (ConfigSection::Route, "默认路由"),
-        "audit" => (ConfigSection::Audit, "审计设置"),
-        "firewall" => (ConfigSection::Network, "网络沙盒"),
-        "sandbox" => (ConfigSection::Sandbox, "沙盒设置"),
+    let second = rest.first().map(String::as_str);
+    let third = rest.get(1).map(String::as_str);
+    let (section, item_kind) = match (root, second, third) {
+        ("gateway", Some("mode" | "debug" | "listener"), _) => (ConfigSection::Basic, "基础设置"),
+        ("gateway", Some("routing"), Some("default")) => (ConfigSection::Route, "默认路由"),
+        ("gateway", Some("audit"), Some("settings")) => (ConfigSection::Audit, "审计设置"),
+        ("gateway", Some("trust"), _) => (ConfigSection::Certificate, "信任设置"),
+        ("sandbox", Some("network"), _) => (ConfigSection::Network, "网络沙盒"),
+        ("sandbox", Some("file"), _) => (ConfigSection::Files, "文件沙盒"),
+        ("sandbox", Some("process"), _) => (ConfigSection::SandboxProcess, "子进程沙盒"),
+        ("environment_variables", _, _) => (ConfigSection::Environment, "环境变量"),
         _ => (ConfigSection::Gateway, "配置"),
     };
     let mut field_tokens = vec![root.to_owned()];
@@ -418,20 +455,16 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
             item.get("address")
                 .and_then(Value::as_str)
                 .unwrap_or("未设置"),
-            item.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0)
+            item.get("timeout_milliseconds")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
         )],
         ConfigSection::Credential => {
-            let protocols = item
-                .get("protocols")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let ssh_only = protocols.iter().any(|value| value.as_str() == Some("ssh"))
-                && !protocols.iter().any(|value| value.as_str() == Some("http"));
-            if ssh_only {
+            let credential_type = item.get("type").and_then(Value::as_str).unwrap_or("未设置");
+            if credential_type == "ssh" {
                 vec![format!(
                     "SSH 凭证，账号={} 个，敏感值=已脱敏",
-                    item.get("ssh_accounts")
+                    item.get("accounts")
                         .and_then(Value::as_array)
                         .map(Vec::len)
                         .unwrap_or(0)
@@ -439,10 +472,8 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
             } else {
                 vec![format!(
                     "HTTP 认证={}，协议={}，敏感值={}",
-                    item.get("http_scheme")
-                        .and_then(Value::as_str)
-                        .unwrap_or("未设置"),
-                    string_array(item.get("protocols")),
+                    credential_type,
+                    "http",
                     if item.get("secret").is_some() || item.get("password").is_some() {
                         "已设置（脱敏）"
                     } else {
@@ -455,12 +486,14 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
             "协议={}，HTTP 内容转录={}，SSH 内容转录={}",
             string_array(item.get("protocols")),
             yes_no(
-                item.get("capture_body")
+                item.get("capture")
+                    .and_then(|capture| capture.get("http_body"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
             ),
             yes_no(
-                item.get("ssh_transcript")
+                item.get("capture")
+                    .and_then(|capture| capture.get("ssh_transcript"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
             )
@@ -471,8 +504,9 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
                 enabled.unwrap_or("启用"),
                 item.get("priority").and_then(Value::as_i64).unwrap_or(0),
                 route_behavior_label(
-                    item.get("deny").and_then(Value::as_bool).unwrap_or(false),
-                    item.get("upstream").is_some_and(|value| !value.is_null())
+                    item.pointer("/decision/action").and_then(Value::as_str) == Some("deny"),
+                    item.pointer("/decision/proxy")
+                        .is_some_and(|value| !value.is_null())
                 )
             )];
             let targets = item
@@ -493,16 +527,21 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
                 })
                 .unwrap_or_else(|| "未设置".into());
             details.push(format!("目标={targets}"));
-            let plugins = string_array(item.get("plugins"));
-            if plugins != "未设置" {
-                details.push(format!("插件={plugins}"));
+            let credentials = string_array(item.pointer("/decision/credentials"));
+            if credentials != "未设置" {
+                details.push(format!("凭证={credentials}"));
+            }
+            let audit_profiles = string_array(item.pointer("/decision/audit_profiles"));
+            if audit_profiles != "未设置" {
+                details.push(format!("审计={audit_profiles}"));
             }
             details
         }
         ConfigSection::Environment => vec!["变量值=已脱敏".into()],
         ConfigSection::Certificate => vec![format!(
             "范围={}，状态={}",
-            item.get("host")
+            item.pointer("/scope/authority")
+                .or_else(|| item.get("host"))
                 .and_then(Value::as_str)
                 .unwrap_or("全局根证书"),
             enabled.unwrap_or("启用")
@@ -559,29 +598,35 @@ fn field_label(tokens: &[String]) -> Option<String> {
     }
     let joined = tokens.join("/");
     let label = match joined.as_str() {
-        "mode" => "运行模式",
-        "debug" => "调试事件",
-        "listener/socks_listen" => "SOCKS5 监听地址",
-        "listener/pending_session_ttl_secs" => "待激活会话有效期",
+        "mode" | "gateway/mode" => "运行模式",
+        "debug" | "gateway/debug" => "调试事件",
+        "listener/socks_address" | "gateway/listener/socks_address" => "SOCKS5 监听地址",
+        "listener/pending_session_ttl_seconds" | "gateway/listener/pending_session_ttl_seconds" => {
+            "待激活会话有效期"
+        }
         "enabled" => "启用状态",
         "priority" => "优先级",
         "endpoints" => "目标",
-        "deny" => "拒绝动作",
-        "rewrite_host" => "重写主机",
-        "rewrite_port" => "重写端口",
-        "upstream" => "代理",
-        "plugins" => "插件绑定",
-        "http_scheme" => "HTTP 认证方式",
+        "decision/action" => "路由动作",
+        "decision/rewrite/host" => "重写主机",
+        "decision/rewrite/port" => "重写端口",
+        "decision/proxy" => "代理",
+        "decision/credentials" => "凭证绑定",
+        "decision/audit_profiles" => "审计绑定",
+        "type" => "凭证类型",
         "secret/value" => "认证值",
         "username" => "用户名",
         "password/value" => "密码",
         "headers" => "Headers",
         "address" => "代理地址",
-        "timeout_ms" => "超时",
+        "timeout_milliseconds" => "超时",
         "value/value" => "变量值",
-        "retention_days" | "audit/retention_days" => "审计保留天数",
-        "connections" | "audit/connections" => "连接审计",
-        "default/action" => "默认动作",
+        "retention_days" | "gateway/audit/settings/retention_days" => "审计保留天数",
+        "connections" | "gateway/audit/settings/connections" => "连接审计",
+        "default_action"
+        | "sandbox/network/default_action"
+        | "sandbox/file/default_action"
+        | "sandbox/process/default_action" => "默认动作",
         "error_action" => "出错动作",
         "patterns" => "匹配模式",
         "operations" => "允许操作",
@@ -590,7 +635,8 @@ fn field_label(tokens: &[String]) -> Option<String> {
                 Some("enabled") => "启用状态",
                 Some("priority") => "优先级",
                 Some("endpoints") => "目标",
-                Some("plugins") => "插件绑定",
+                Some("credentials") => "凭证绑定",
+                Some("audit_profiles") => "审计绑定",
                 Some("headers") => "Headers",
                 Some("secret") => "认证值",
                 Some("password") => "密码",
@@ -651,16 +697,17 @@ mod tests {
     #[test]
     fn describes_add_modify_and_delete_with_tui_vocabulary() {
         let current = json!({
-            "debug": false,
-            "plugins": [{"uuid": "11111111-1111-4111-8111-111111111111", "id": "existing", "kind": "credential", "secret": {"value": "x"}}],
-            "routes": [{"uuid": "22222222-2222-4222-8222-222222222222", "id": "old-route", "priority": 10}]
+            "gateway": {
+                "credentials": [{"uuid": "11111111-1111-4111-8111-111111111111", "id": "existing", "type": "http_bearer", "secret": {"value": "x"}}],
+                "routing": {"routes": [{"uuid": "22222222-2222-4222-8222-222222222222", "id": "old-route", "priority": 10, "decision": {"action": "allow"}}]}
+            }
         });
         let added = describe_request(
             &current,
             &[json!({
                 "op": "add",
-                "path": "/plugins/-",
-                "value": {"uuid": "33333333-3333-4333-8333-333333333333", "id": "devboard", "kind": "credential"}
+                "path": "/gateway/credentials/-",
+                "value": {"uuid": "33333333-3333-4333-8333-333333333333", "id": "devboard", "type": "http_bearer"}
             })],
         )
         .unwrap();
@@ -674,15 +721,18 @@ mod tests {
 
         let modified = describe_request(
             &current,
-            &[json!({"op": "replace", "path": "/routes/0/priority", "value": 20})],
+            &[json!({"op": "replace", "path": "/gateway/routing/routes/0/priority", "value": 20})],
         )
         .unwrap();
         assert_eq!(modified.action, ConfigChangeAction::Modify);
         assert_eq!(modified.summary, "修改 网关 / 路由「old-route」：优先级");
         assert!(modified.details[0].contains("行为=直连"));
 
-        let deleted =
-            describe_request(&current, &[json!({"op": "remove", "path": "/plugins/0"})]).unwrap();
+        let deleted = describe_request(
+            &current,
+            &[json!({"op": "remove", "path": "/gateway/credentials/0"})],
+        )
+        .unwrap();
         assert_eq!(deleted.action, ConfigChangeAction::Delete);
         assert_eq!(deleted.summary, "删除 网关 / 凭证「existing」");
     }

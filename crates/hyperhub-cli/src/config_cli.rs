@@ -2,6 +2,7 @@ use crate::config_semantics::{
     describe_request, new_uuid, unique_valid_uuids, ConfigChangeDescription,
 };
 use hyperhub_core::config::Config;
+use hyperhub_core::config_document::ConfigDocument;
 use hyperhub_core::config_store::{
     self, default_config_path, load_approval_state_with_keyring, load_encrypted_with_keyring,
     read_descriptor, read_redacted_json, save_approval_state_with_keyring,
@@ -210,13 +211,18 @@ fn show() -> Result<i32, String> {
         let mut config = Config::default();
         config.apply_managed_audit_paths(&path);
         config.environment = crate::default_environment();
-        let mut bytes =
-            serde_json::to_vec_pretty(&config.redacted()).map_err(|error| error.to_string())?;
+        let mut bytes = serde_json::to_vec_pretty(&ConfigDocument::from_config(&config.redacted()))
+            .map_err(|error| error.to_string())?;
         bytes.push(b'\n');
         bytes
     };
     let text = String::from_utf8(bytes)
         .map_err(|_| "redacted configuration JSON is not UTF-8".to_string())?;
+    let view: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("redacted configuration JSON is invalid: {error}"))?;
+    if view.get("schema_version").and_then(Value::as_u64) != Some(2) {
+        return Err("unsupported legacy configuration view; HyperHub v0.2 requires schema_version 2 and does not migrate old configurations".into());
+    }
     print!("{text}");
     Ok(0)
 }
@@ -335,8 +341,7 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
         let patch = Value::Array(request.operations.clone());
         let preview = prepare_patch(&path, &active.config, &patch);
         let placeholders = collect_placeholders(&patch)?;
-        let current_value =
-            serde_json::to_value(&active.config).map_err(|error| error.to_string())?;
+        let current_value = config_value(&active.config)?;
         let description = describe_request(&current_value, &request.operations)?;
         display_request(
             index,
@@ -586,7 +591,7 @@ fn validate_queue(queue: &ApprovalQueue) -> Result<(), String> {
 }
 
 fn normalize_config_item_uuids(current: &Config, patch: &mut Value) -> Result<(), String> {
-    let current = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    let current = config_value(current)?;
     let operations = patch
         .as_array_mut()
         .ok_or("JSON patch must be an array of operations")?;
@@ -645,26 +650,19 @@ fn normalize_config_item_uuids(current: &Config, patch: &mut Value) -> Result<()
 }
 
 fn is_config_item_path(tokens: &[String]) -> bool {
-    matches!(
-        tokens,
-        [root, _]
-            if matches!(
-                root.as_str(),
-                "upstreams"
-                    | "plugins"
-                    | "routes"
-                    | "environment"
-                    | "root_certificates"
-                    | "ssh_host_keys"
-            )
-    ) || matches!(tokens, [root, rules, _] if root == "firewall" && rules == "rules")
-        || matches!(
-            tokens,
-            [root, area, rules, _]
-                if root == "sandbox"
-                    && matches!(area.as_str(), "process" | "file")
-                    && rules == "rules"
-        )
+    matches!(tokens, [root, _] if root == "environment_variables")
+        || matches!(tokens, [gateway, collection, _] if gateway == "gateway" && matches!(collection.as_str(), "proxies" | "credentials"))
+        || matches!(tokens, [gateway, section, collection, _]
+            if gateway == "gateway"
+                && matches!((section.as_str(), collection.as_str()),
+                    ("audit", "profiles")
+                        | ("routing", "routes")
+                        | ("trust", "tls_certificates")
+                        | ("trust", "ssh_host_keys")))
+        || matches!(tokens, [sandbox, area, rules, _]
+            if sandbox == "sandbox"
+                && matches!(area.as_str(), "network" | "file" | "process")
+                && rules == "rules")
 }
 
 fn build_approval_requests(patch: &Value) -> Result<Vec<ApprovalRequest>, String> {
@@ -716,7 +714,7 @@ fn describe_request_sequence(
     let mut config = current.clone();
     let mut descriptions = Vec::with_capacity(requests.len());
     for (index, request) in requests.iter().enumerate() {
-        let current_value = serde_json::to_value(&config).map_err(|error| error.to_string())?;
+        let current_value = config_value(&config)?;
         descriptions.push(describe_request(&current_value, &request.operations)?);
         let prepared = prepare_patch(path, &config, &Value::Array(request.operations.clone()))
             .map_err(|error| {
@@ -824,8 +822,7 @@ fn display_request(
         .unwrap_or("unknown");
     let rendered_description = match preview {
         Ok(prepared) if operation != "remove" => {
-            let resulting =
-                serde_json::to_value(&prepared.config).map_err(|error| error.to_string())?;
+            let resulting = config_value(&prepared.config)?;
             describe_request(&resulting, &request.operations)
                 .unwrap_or_else(|_| description.clone())
         }
@@ -1031,11 +1028,12 @@ fn value_digest(label: &[u8], value: &Value) -> Result<String, String> {
     Ok(hex(&hash.finalize()))
 }
 
+fn config_value(config: &Config) -> Result<Value, String> {
+    ConfigDocument::to_value(config).map_err(|error| error.to_string())
+}
+
 fn config_digest(config: &Config) -> Result<String, String> {
-    value_digest(
-        b"hyperhub/config-state/v1\0",
-        &serde_json::to_value(config).map_err(|error| error.to_string())?,
-    )
+    value_digest(b"hyperhub/config-state/v1\0", &config_value(config)?)
 }
 
 fn collect_placeholders(value: &Value) -> Result<Vec<String>, String> {
@@ -1108,14 +1106,14 @@ fn replace_placeholder(value: &mut Value, name: &str, replacement: &str) {
 }
 
 fn prepare_patch(path: &Path, current: &Config, patch: &Value) -> Result<PreparedPatch, String> {
-    let current_value = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    let current_value = config_value(current)?;
     let mut next_value = current_value.clone();
     apply_json_patch(&mut next_value, patch)?;
-    let mut config: Config = serde_json::from_value(next_value.clone())
+    let mut config = ConfigDocument::from_value(next_value.clone())
         .map_err(|error| format!("patched configuration has invalid shape: {error}"))?;
     config.apply_managed_audit_paths(path);
     config.validate().map_err(|error| error.to_string())?;
-    next_value = serde_json::to_value(&config).map_err(|error| error.to_string())?;
+    next_value = config_value(&config)?;
 
     let mut hash = Sha256::new();
     hash.update(b"hyperhub/config-approval/v1\0");
@@ -1126,8 +1124,8 @@ fn prepare_patch(path: &Path, current: &Config, patch: &Value) -> Result<Prepare
     hash.update(serde_json::to_vec(&next_value).map_err(|error| error.to_string())?);
     let approval_token = hex(&hash.finalize());
 
-    let before = serde_json::to_value(current.redacted()).map_err(|error| error.to_string())?;
-    let after = serde_json::to_value(config.redacted()).map_err(|error| error.to_string())?;
+    let before = config_value(&current.redacted())?;
+    let after = config_value(&config.redacted())?;
     let mut changes = Vec::new();
     collect_changes("", &before, &after, &mut changes);
     Ok(PreparedPatch {
@@ -1355,7 +1353,8 @@ fn push_live_update(config: &Config, keyring: &ConfigKeyring) -> Result<(), Stri
     let key = keyring
         .session_auth_key()
         .map_err(|error| error.to_string())?;
-    let config_json = serde_json::to_string(config).map_err(|error| error.to_string())?;
+    let config_json = serde_json::to_string(&ConfigDocument::from_config(config))
+        .map_err(|error| error.to_string())?;
     let proof = config_update_proof(&key, &config_json)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     match runtime
@@ -1394,7 +1393,7 @@ mod tests {
             source_index: 0,
             operations: vec![json!({
                 "op": "add",
-                "path": "/routes/-",
+                "path": "/gateway/routing/routes/-",
                 "value": {
                     "uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                     "id": "devboard-api",
@@ -1404,18 +1403,21 @@ mod tests {
                         "target": "https://devboard.chaitin.net/devboard/api",
                         "port": 443
                     }],
-                    "deny": false,
-                    "plugins": ["devboard-token"]
+                    "decision": {"action": "allow", "credentials": ["devboard-token"]}
                 }
             })],
             edited: false,
         };
-        let description = describe_request(&json!({"routes": []}), &request.operations).unwrap();
+        let description = describe_request(
+            &json!({"gateway": {"routing": {"routes": []}}}),
+            &request.operations,
+        )
+        .unwrap();
         let rendered = render_approval_review(
             &request,
             &description,
             "add",
-            "/routes/-",
+            "/gateway/routing/routes/-",
             &["devboard-token".into()],
             None,
         );
@@ -1433,18 +1435,22 @@ mod tests {
 
     #[test]
     fn json_patch_add_replace_remove_and_test() {
-        let mut value = json!({"routes": [{"id": "one"}], "debug": false});
+        let mut value =
+            json!({"gateway": {"debug": false, "routing": {"routes": [{"id": "one"}]}}});
         apply_json_patch(
             &mut value,
             &json!([
-                {"op": "test", "path": "/debug", "value": false},
-                {"op": "replace", "path": "/debug", "value": true},
-                {"op": "add", "path": "/routes/-", "value": {"id": "two"}},
-                {"op": "remove", "path": "/routes/0"}
+                {"op": "test", "path": "/gateway/debug", "value": false},
+                {"op": "replace", "path": "/gateway/debug", "value": true},
+                {"op": "add", "path": "/gateway/routing/routes/-", "value": {"id": "two"}},
+                {"op": "remove", "path": "/gateway/routing/routes/0"}
             ]),
         )
         .unwrap();
-        assert_eq!(value, json!({"routes": [{"id": "two"}], "debug": true}));
+        assert_eq!(
+            value,
+            json!({"gateway": {"debug": true, "routing": {"routes": [{"id": "two"}]}}})
+        );
     }
 
     #[test]
@@ -1455,13 +1461,13 @@ mod tests {
         let first = prepare_patch(
             &path,
             &config,
-            &json!([{"op": "replace", "path": "/debug", "value": true}]),
+            &json!([{"op": "replace", "path": "/gateway/debug", "value": true}]),
         )
         .unwrap();
         let second = prepare_patch(
             &path,
             &config,
-            &json!([{"op": "replace", "path": "/debug", "value": false}]),
+            &json!([{"op": "replace", "path": "/gateway/debug", "value": false}]),
         )
         .unwrap();
         assert_ne!(first.approval_token, second.approval_token);
@@ -1499,8 +1505,8 @@ mod tests {
         });
         let existing = config.rules[0].uuid.clone();
         let mut patch = json!([
-            {"op": "add", "path": "/routes/-", "value": {"id": "new"}},
-            {"op": "replace", "path": "/routes/0", "value": {"id": "existing-renamed"}}
+            {"op": "add", "path": "/gateway/routing/routes/-", "value": {"id": "new"}},
+            {"op": "replace", "path": "/gateway/routing/routes/0", "value": {"id": "existing-renamed"}}
         ]);
         normalize_config_item_uuids(&config, &mut patch).unwrap();
         let added = patch[0]["value"]["uuid"].as_str().unwrap();
@@ -1512,9 +1518,9 @@ mod tests {
     #[test]
     fn approval_requests_attach_tests_to_the_next_mutation() {
         let requests = build_approval_requests(&json!([
-            {"op": "test", "path": "/debug", "value": false},
-            {"op": "replace", "path": "/debug", "value": true},
-            {"op": "add", "path": "/routes/-", "value": {"id": "two"}}
+            {"op": "test", "path": "/gateway/debug", "value": false},
+            {"op": "replace", "path": "/gateway/debug", "value": true},
+            {"op": "add", "path": "/gateway/routing/routes/-", "value": {"id": "two"}}
         ]))
         .unwrap();
         assert_eq!(requests.len(), 2);
@@ -1532,7 +1538,7 @@ mod tests {
         let request: ApprovalRequest = serde_json::from_value(json!({
             "source_index": 0,
             "operations": [
-                {"op": "replace", "path": "/debug", "value": true}
+                {"op": "replace", "path": "/gateway/debug", "value": true}
             ],
             "edited": false
         }))
@@ -1545,7 +1551,7 @@ mod tests {
         let request = ApprovalRequest {
             uuid: new_uuid(),
             source_index: 0,
-            operations: vec![json!({"op": "replace", "path": "/debug", "value": true})],
+            operations: vec![json!({"op": "replace", "path": "/gateway/debug", "value": true})],
             edited: false,
         };
         let mut queue = ApprovalQueue {
