@@ -6,12 +6,13 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use hyperhub_core::config::{
-    parse_route_target, Config, EnforcementMode, EnvironmentVariable, FileSandboxOperation,
-    FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallDefaultRule, FirewallEndpoint,
-    FirewallRule, HttpAuthScheme, PluginConfig, PluginKind, PluginProtocol, ProcessSandboxPattern,
-    ProcessSandboxRule, RootCertificate, RouteEndpoint, RouteRule, RouteTarget, SandboxAction,
-    SecretValue, SshAccount, SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture,
-    DEFAULT_ROUTE_ID,
+    parse_route_target, Config, DataProtectionConfig, EnforcementMode, EnvironmentVariable,
+    FileSandboxOperation, FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallDefaultRule,
+    FirewallEndpoint, FirewallRule, HttpAuthScheme, IntelligenceProtectionConfig,
+    IntelligenceProviderConfig, IntelligenceProviderKind, PluginConfig, PluginKind, PluginProtocol,
+    ProcessSandboxPattern, ProcessSandboxRule, ProtectionMode, ProtectionProfile, RootCertificate,
+    RouteEndpoint, RouteRule, RouteTarget, SandboxAction, SecretValue, SshAccount, SshHostKey,
+    SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture, DEFAULT_ROUTE_ID,
 };
 use hyperhub_core::config_store;
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
@@ -39,6 +40,7 @@ enum NavNode {
     Proxy,
     Credential,
     Audit,
+    Protection,
     Route,
     Certificate,
     Sandbox,
@@ -56,6 +58,7 @@ const NAV_ITEMS: &[NavNode] = &[
     NavNode::Proxy,
     NavNode::Credential,
     NavNode::Audit,
+    NavNode::Protection,
     NavNode::Route,
     NavNode::Certificate,
     NavNode::Sandbox,
@@ -70,6 +73,7 @@ const CATEGORY_BASIC: NavNode = NavNode::Basic;
 const CATEGORY_PROXY: NavNode = NavNode::Proxy;
 const CATEGORY_CREDENTIAL: NavNode = NavNode::Credential;
 const CATEGORY_AUDIT: NavNode = NavNode::Audit;
+const CATEGORY_PROTECTION: NavNode = NavNode::Protection;
 const CATEGORY_ROUTE: NavNode = NavNode::Route;
 const CATEGORY_CERTIFICATE: NavNode = NavNode::Certificate;
 const CATEGORY_SANDBOX: NavNode = NavNode::Sandbox;
@@ -88,6 +92,7 @@ impl NavNode {
             Self::Proxy => ConfigSection::Proxy,
             Self::Credential => ConfigSection::Credential,
             Self::Audit => ConfigSection::Audit,
+            Self::Protection => ConfigSection::Protection,
             Self::Route => ConfigSection::Route,
             Self::Certificate => ConfigSection::Certificate,
             Self::Sandbox => ConfigSection::Sandbox,
@@ -122,6 +127,7 @@ impl NavNode {
                 | Self::Proxy
                 | Self::Credential
                 | Self::Audit
+                | Self::Protection
                 | Self::Route
                 | Self::Certificate
                 | Self::Network
@@ -157,6 +163,7 @@ enum ObjectEditor {
     Upstream(usize),
     Credential(usize),
     AuditProfile(usize),
+    Protection(usize),
     Route(usize),
     FirewallRule(usize),
     SandboxProcessRule(usize),
@@ -179,6 +186,13 @@ enum TextField {
     AuditId(usize),
     AuditBodyLimit(usize),
     AuditRetentionDays,
+    ProtectionId(usize),
+    ProtectionMaxScanBytes(usize),
+    ProtectionTimeoutMs(usize),
+    ProtectionMinConfidence(usize),
+    ProtectionCacheTtlMs(usize),
+    ProtectionProviderEndpoint(usize),
+    ProtectionProviderModel(usize),
     RouteId(usize),
     RoutePriority(usize),
     FirewallId(usize),
@@ -195,6 +209,7 @@ enum SecretField {
     UpstreamPassword(usize),
     CredentialPassword(usize),
     CredentialHttpSecret(usize),
+    ProtectionProviderApiKey(usize),
     SshPassword(usize, usize, Option<usize>),
 }
 
@@ -312,6 +327,7 @@ enum ReferenceKind {
     Proxy,
     Credential,
     Audit,
+    Protection,
 }
 
 #[derive(Clone, Copy)]
@@ -888,9 +904,14 @@ fn handle_reference_picker_key(app: &mut App, key: KeyEvent) {
             let kind = match picker.kind {
                 ReferenceKind::Credential => Some(PluginKind::Credential),
                 ReferenceKind::Audit => Some(PluginKind::Audit),
-                ReferenceKind::Proxy => None,
+                ReferenceKind::Proxy | ReferenceKind::Protection => None,
             };
-            if let Some(kind) = kind {
+            if picker.kind == ReferenceKind::Protection {
+                match picker.route {
+                    Some(route) => app.config.rules[route].protection = selected,
+                    None => app.config.default_route.protection = selected,
+                }
+            } else if let Some(kind) = kind {
                 let ids: Vec<String> = app
                     .config
                     .plugins
@@ -1249,6 +1270,7 @@ fn reference_count(app: &App, kind: ReferenceKind) -> usize {
         ReferenceKind::Proxy => app.config.upstreams.len(),
         ReferenceKind::Credential => credential_plugin_indices(&app.config).len(),
         ReferenceKind::Audit => audit_plugin_indices(&app.config).len(),
+        ReferenceKind::Protection => app.config.protections.len(),
     }
 }
 
@@ -1265,6 +1287,11 @@ fn reference_id<'a>(app: &'a App, kind: ReferenceKind, selected: usize) -> Optio
             .get(index)
             .copied()
             .and_then(|index| app.config.plugins.get(index))
+            .map(|item| item.id.as_str()),
+        ReferenceKind::Protection => app
+            .config
+            .protections
+            .get(index)
             .map(|item| item.id.as_str()),
     }
 }
@@ -1365,6 +1392,7 @@ fn selected_is_toggle(app: &App) -> bool {
         (CATEGORY_BASIC, 0 | 3) => true,
         (CATEGORY_SANDBOX_PROCESS, 0..=2) => true,
         (CATEGORY_FILES, 0..=2) => true,
+        (CATEGORY_PROTECTION, field) if field < app.config.protections.len() => true,
         (CATEGORY_CERTIFICATE, field) => {
             field >= app.config.root_certificates.len()
                 && field < app.config.root_certificates.len() + app.config.ssh_host_keys.len()
@@ -1384,8 +1412,9 @@ fn object_field_is_toggle(app: &App, editor: ObjectEditor, field: usize) -> bool
                     ))
         }
         ObjectEditor::AuditProfile(_) => matches!(field, 1..=10),
-        ObjectEditor::DefaultRoute => matches!(field, 1 | 2),
-        ObjectEditor::Route(_) => matches!(field, 1 | 4),
+        ObjectEditor::Protection(_) => matches!(field, 1 | 2 | 3 | 5..=9 | 13 | 15 | 16),
+        ObjectEditor::DefaultRoute => matches!(field, 1 | 2 | 5),
+        ObjectEditor::Route(_) => matches!(field, 1 | 4 | 8 | 10),
         ObjectEditor::FirewallRule(_) => matches!(field, 1 | 3),
         ObjectEditor::SandboxProcessRule(_) => matches!(field, 1 | 3),
         ObjectEditor::FileSandboxRule(_) => matches!(field, 1 | 3 | 4..=8),
@@ -1498,6 +1527,10 @@ fn toggle_selected(app: &mut App) {
                 !app.config.sandbox.file.rules[field - 3].enabled;
             changed(app);
         }
+        (CATEGORY_PROTECTION, field) if field < app.config.protections.len() => {
+            app.config.protections[field].enabled = !app.config.protections[field].enabled;
+            changed(app);
+        }
         (CATEGORY_ROUTE, 0) => {
             app.config.default_route.enabled = !app.config.default_route.enabled;
             changed(app);
@@ -1594,6 +1627,9 @@ fn edit_selected(app: &mut App) {
             if field >= 3 && field - 3 < app.config.sandbox.file.rules.len() =>
         {
             enter_editor(app, ObjectEditor::FileSandboxRule(field - 3))
+        }
+        (CATEGORY_PROTECTION, field) if field < app.config.protections.len() => {
+            enter_editor(app, ObjectEditor::Protection(field))
         }
         (CATEGORY_ROUTE, 0) => enter_editor(app, ObjectEditor::DefaultRoute),
         (CATEGORY_ROUTE, field) if field - 1 < app.config.rules.len() => {
@@ -1700,6 +1736,176 @@ fn enter_editor(app: &mut App, editor: ObjectEditor) {
     app.status = "↑↓ 选择字段，Enter/e 编辑或切换，Space 也可切换，Esc 返回列表".into();
 }
 
+fn edit_protection_field(app: &mut App, index: usize, field: usize) {
+    match field {
+        0 => {
+            let value = app.config.protections[index].id.clone();
+            open_text(app, "智能防护 ID", value, TextField::ProtectionId(index));
+        }
+        1 => {
+            app.config.protections[index].enabled = !app.config.protections[index].enabled;
+            changed(app);
+        }
+        2 => {
+            let value = app.config.protections[index].mode;
+            app.config.protections[index].mode = match value {
+                ProtectionMode::Observe => ProtectionMode::Enforce,
+                ProtectionMode::Enforce => ProtectionMode::Observe,
+            };
+            changed(app);
+        }
+        3 => {
+            app.config.protections[index].data.enabled =
+                !app.config.protections[index].data.enabled;
+            changed(app);
+        }
+        4 => {
+            let value = app.config.protections[index]
+                .data
+                .max_scan_bytes
+                .to_string();
+            open_text(
+                app,
+                "最大扫描字节数",
+                value,
+                TextField::ProtectionMaxScanBytes(index),
+            );
+        }
+        5 => {
+            let value = app.config.protections[index].data.detect_managed_secrets;
+            app.config.protections[index].data.detect_managed_secrets = !value;
+            changed(app);
+        }
+        6 => {
+            let value = app.config.protections[index].data.detect_known_tokens;
+            app.config.protections[index].data.detect_known_tokens = !value;
+            changed(app);
+        }
+        7 => {
+            let value = app.config.protections[index].data.detect_private_keys;
+            app.config.protections[index].data.detect_private_keys = !value;
+            changed(app);
+        }
+        8 => {
+            let value = app.config.protections[index].data.detect_prompt_injection;
+            app.config.protections[index].data.detect_prompt_injection = !value;
+            changed(app);
+        }
+        9 => {
+            let value = app.config.protections[index].intelligence.enabled;
+            app.config.protections[index].intelligence.enabled = !value;
+            changed(app);
+        }
+        10 => {
+            let value = app.config.protections[index]
+                .intelligence
+                .timeout_ms
+                .to_string();
+            open_text(
+                app,
+                "智能判定超时（ms）",
+                value,
+                TextField::ProtectionTimeoutMs(index),
+            );
+        }
+        11 => {
+            let value = app.config.protections[index]
+                .intelligence
+                .min_confidence
+                .to_string();
+            open_text(
+                app,
+                "最低置信度（0-1）",
+                value,
+                TextField::ProtectionMinConfidence(index),
+            );
+        }
+        12 => {
+            let value = app.config.protections[index]
+                .intelligence
+                .cache_ttl_ms
+                .to_string();
+            open_text(
+                app,
+                "缓存时间（ms）",
+                value,
+                TextField::ProtectionCacheTtlMs(index),
+            );
+        }
+        13 => {
+            if let Some(provider) = app.config.protections[index]
+                .intelligence
+                .providers
+                .first_mut()
+            {
+                provider.enabled = !provider.enabled;
+                changed(app);
+            }
+        }
+        14 => {
+            if let Some(provider) = app.config.protections[index]
+                .intelligence
+                .providers
+                .first_mut()
+            {
+                provider.provider = match provider.provider {
+                    IntelligenceProviderKind::Typesafe => IntelligenceProviderKind::Openrouter,
+                    IntelligenceProviderKind::Openrouter => IntelligenceProviderKind::Custom,
+                    IntelligenceProviderKind::Custom => IntelligenceProviderKind::Typesafe,
+                };
+                changed(app);
+            }
+        }
+        15 => {
+            if let Some(provider) = app.config.protections[index]
+                .intelligence
+                .providers
+                .first_mut()
+            {
+                provider.mode = match provider.mode {
+                    ProtectionMode::Observe => ProtectionMode::Enforce,
+                    ProtectionMode::Enforce => ProtectionMode::Observe,
+                };
+                changed(app);
+            }
+        }
+        16 => {
+            let value = app.config.protections[index]
+                .intelligence
+                .providers
+                .first()
+                .and_then(|p| p.endpoint.clone())
+                .unwrap_or_default();
+            open_text(
+                app,
+                "Provider endpoint（官方可留空）",
+                value,
+                TextField::ProtectionProviderEndpoint(index),
+            );
+        }
+        17 => {
+            let value = app.config.protections[index]
+                .intelligence
+                .providers
+                .first()
+                .and_then(|p| p.model.clone())
+                .unwrap_or_default();
+            open_text(
+                app,
+                "Provider model（官方可留空）",
+                value,
+                TextField::ProtectionProviderModel(index),
+            );
+        }
+        18 => open_secret(
+            app,
+            "Provider API Key",
+            SecretField::ProtectionProviderApiKey(index),
+        ),
+        _ => app.status = "当前字段不可编辑".into(),
+    }
+}
+
 fn edit_object_field(app: &mut App, editor: ObjectEditor) {
     match (editor, app.field) {
         (ObjectEditor::Upstream(index), 0) => open_text(
@@ -1738,6 +1944,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
         (ObjectEditor::Credential(index), field) => edit_credential_field(app, index, field),
 
         (ObjectEditor::AuditProfile(index), field) => edit_audit_field(app, index, field),
+        (ObjectEditor::Protection(index), field) => edit_protection_field(app, index, field),
 
         (ObjectEditor::DefaultRoute, 0) => {
             app.status = "默认路由 ID 固定为 'default'，不能修改".into();
@@ -1754,6 +1961,14 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             open_reference_picker(app, None, ReferenceKind::Credential)
         }
         (ObjectEditor::DefaultRoute, 4) => open_reference_picker(app, None, ReferenceKind::Audit),
+        (ObjectEditor::DefaultRoute, 5) => {
+            app.config.default_route.protection_enabled =
+                !app.config.default_route.protection_enabled;
+            changed(app);
+        }
+        (ObjectEditor::DefaultRoute, 6) => {
+            open_reference_picker(app, None, ReferenceKind::Protection)
+        }
 
         (ObjectEditor::Route(index), 0) => open_text(
             app,
@@ -1784,6 +1999,19 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
         }
         (ObjectEditor::Route(index), 7) => {
             open_reference_picker(app, Some(index), ReferenceKind::Audit)
+        }
+        (ObjectEditor::Route(index), 8) => {
+            app.config.rules[index].protection_enabled =
+                !app.config.rules[index].protection_enabled;
+            changed(app);
+        }
+        (ObjectEditor::Route(index), 9) => {
+            open_reference_picker(app, Some(index), ReferenceKind::Protection)
+        }
+        (ObjectEditor::Route(index), 10) => {
+            app.config.rules[index].allow_sensitive_upload =
+                !app.config.rules[index].allow_sensitive_upload;
+            changed(app);
         }
 
         (ObjectEditor::FirewallRule(index), 0) => open_text(
@@ -2518,10 +2746,14 @@ fn open_reference_picker(app: &mut App, route: Option<usize>, kind: ReferenceKin
     let target_kind = match kind {
         ReferenceKind::Credential => Some(PluginKind::Credential),
         ReferenceKind::Audit => Some(PluginKind::Audit),
-        ReferenceKind::Proxy => None,
+        ReferenceKind::Proxy | ReferenceKind::Protection => None,
     };
     let current = match kind {
         ReferenceKind::Proxy => route.and_then(|route| app.config.rules[route].upstream.clone()),
+        ReferenceKind::Protection => match route {
+            Some(route) => app.config.rules[route].protection.clone(),
+            None => app.config.default_route.protection.clone(),
+        },
         ReferenceKind::Credential | ReferenceKind::Audit => {
             let plugins = match route {
                 Some(route) => &app.config.rules[route].plugins,
@@ -3243,6 +3475,58 @@ fn apply_text_field(app: &mut App, field: TextField, value: &str) -> Result<(), 
             app.config.audit.retention_days =
                 value.parse().map_err(|_| "保留天数必须是非负整数")?;
         }
+        TextField::ProtectionId(index) => {
+            let new_id = unique_id(
+                value,
+                "protection",
+                app.config
+                    .protections
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, item)| item.id.as_str()),
+            )?;
+            let old_id = std::mem::replace(&mut app.config.protections[index].id, new_id.clone());
+            if app.config.default_route.protection.as_deref() == Some(&old_id) {
+                app.config.default_route.protection = Some(new_id.clone());
+            }
+            for route in &mut app.config.rules {
+                if route.protection.as_deref() == Some(&old_id) {
+                    route.protection = Some(new_id.clone());
+                }
+            }
+        }
+        TextField::ProtectionMaxScanBytes(index) => {
+            let parsed: usize = value.parse().map_err(|_| "最大扫描字节数必须是正整数")?;
+            if parsed == 0 {
+                return Err("最大扫描字节数必须大于 0".into());
+            }
+            app.config.protections[index].data.max_scan_bytes = parsed;
+        }
+        TextField::ProtectionTimeoutMs(index) => {
+            let parsed: u64 = value.parse().map_err(|_| "超时必须是正整数")?;
+            if parsed == 0 {
+                return Err("超时必须大于 0".into());
+            }
+            app.config.protections[index].intelligence.timeout_ms = parsed;
+        }
+        TextField::ProtectionMinConfidence(index) => {
+            let parsed: f64 = value.parse().map_err(|_| "最低置信度必须是 0-1 数值")?;
+            if !(0.0..=1.0).contains(&parsed) {
+                return Err("最低置信度必须在 0-1 之间".into());
+            }
+            app.config.protections[index].intelligence.min_confidence = parsed;
+        }
+        TextField::ProtectionCacheTtlMs(index) => {
+            app.config.protections[index].intelligence.cache_ttl_ms =
+                value.parse().map_err(|_| "缓存时间必须是非负整数")?;
+        }
+        TextField::ProtectionProviderEndpoint(index) => {
+            app.config.protections[index].intelligence.providers[0].endpoint = optional();
+        }
+        TextField::ProtectionProviderModel(index) => {
+            app.config.protections[index].intelligence.providers[0].model = optional();
+        }
         TextField::RouteId(index) => {
             app.config.rules[index].id = unique_id(
                 value,
@@ -3313,6 +3597,9 @@ fn apply_secret_field(app: &mut App, field: SecretField, value: &str) -> Result<
         SecretField::CredentialHttpSecret(index) => {
             let idx = credential_plugin_index(&app.config, index);
             app.config.plugins[idx].secret = secret;
+        }
+        SecretField::ProtectionProviderApiKey(index) => {
+            app.config.protections[index].intelligence.providers[0].api_key = secret;
         }
         SecretField::SshPassword(credential, account, password_index) => {
             let idx = credential_plugin_index(&app.config, credential);
@@ -3686,6 +3973,37 @@ fn add_selected(app: &mut App) {
             changed(app);
             enter_editor(app, ObjectEditor::AuditProfile(ordinal));
         }
+        CATEGORY_PROTECTION => {
+            let id = next_id(
+                "protection",
+                app.config.protections.iter().map(|item| item.id.as_str()),
+            );
+            app.config.protections.push(ProtectionProfile {
+                uuid: hyperhub_core::config::new_config_uuid(),
+                id,
+                enabled: true,
+                mode: ProtectionMode::Observe,
+                data: DataProtectionConfig::default(),
+                intelligence: IntelligenceProtectionConfig {
+                    providers: vec![IntelligenceProviderConfig {
+                        uuid: hyperhub_core::config::new_config_uuid(),
+                        id: "jev-primary".into(),
+                        enabled: false,
+                        provider: IntelligenceProviderKind::Typesafe,
+                        endpoint: None,
+                        model: None,
+                        api_key: None,
+                        mode: ProtectionMode::Enforce,
+                    }],
+                    ..IntelligenceProtectionConfig::default()
+                },
+            });
+            changed(app);
+            enter_editor(
+                app,
+                ObjectEditor::Protection(app.config.protections.len() - 1),
+            );
+        }
         CATEGORY_FIREWALL => {
             let id = next_id(
                 "firewall",
@@ -3773,6 +4091,9 @@ fn add_selected(app: &mut App) {
                 upstream: None,
                 plugins: Vec::new(),
                 legacy: Default::default(),
+                protection_enabled: false,
+                protection: None,
+                allow_sensitive_upload: false,
             });
             changed(app);
             enter_editor(app, ObjectEditor::Route(app.config.rules.len() - 1));
@@ -3881,6 +4202,21 @@ fn delete_selected(app: &mut App) {
                 Err(format!("credential plugin '{id}' 仍被路由引用"))
             } else {
                 app.config.plugins.remove(idx);
+                Ok(())
+            }
+        }
+        CATEGORY_PROTECTION if app.field < app.config.protections.len() => {
+            let id = app.config.protections[app.field].id.clone();
+            if app.config.default_route.protection.as_deref() == Some(&id)
+                || app
+                    .config
+                    .rules
+                    .iter()
+                    .any(|rule| rule.protection.as_deref() == Some(&id))
+            {
+                Err(format!("protection '{id}' 仍被路由引用"))
+            } else {
+                app.config.protections.remove(app.field);
                 Ok(())
             }
         }
@@ -4225,6 +4561,7 @@ fn detail_lines(app: &App) -> Vec<String> {
                 format!("代理              {} 个", app.config.upstreams.len()),
                 format!("凭证              {credentials} 个"),
                 format!("审计              {audits} 个"),
+                format!("智能防护          {} 个", app.config.protections.len()),
                 format!("路由              {routes} 条（含已启用默认路由）"),
                 format!("证书              {certificates} 项"),
             ]
@@ -4296,6 +4633,22 @@ fn detail_lines(app: &App) -> Vec<String> {
         )
         .chain(std::iter::once("提示：按 a 增加审计插件".into()))
         .collect(),
+        CATEGORY_PROTECTION => nonempty(
+            app.config
+                .protections
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} {}  {:?}  数据保护={}  智能判定={}",
+                        if item.enabled { "[x]" } else { "[ ]" },
+                        item.id,
+                        item.mode,
+                        yes_no(item.data.enabled),
+                        yes_no(item.intelligence.enabled),
+                    )
+                })
+                .collect(),
+        ),
         CATEGORY_ROUTE => std::iter::once(format!(
             "{} {}  内置兜底  {}  （不可删除）",
             if app.config.default_route.enabled {
@@ -4553,6 +4906,14 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                     .as_deref()
                 )
             ),
+            format!(
+                "智能防护启用    {}",
+                yes_no(app.config.default_route.protection_enabled)
+            ),
+            format!(
+                "智能防护          {}  （Enter 打开选择）",
+                optional_summary(app.config.default_route.protection.as_deref())
+            ),
         ],
         ObjectEditor::Upstream(index) => {
             let item = &app.config.upstreams[index];
@@ -4685,6 +5046,63 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!("单项转录上限      {} 字节", item.body_limit),
             ]
         }
+        ObjectEditor::Protection(index) => {
+            let item = &app.config.protections[index];
+            let provider = item.intelligence.providers.first();
+            vec![
+                format!("ID                {}", item.id),
+                format!("启用              {}", yes_no(item.enabled)),
+                format!("模式              {:?}", item.mode),
+                format!("数据保护          {}", yes_no(item.data.enabled)),
+                format!("最大扫描          {} 字节", item.data.max_scan_bytes),
+                format!(
+                    "检测托管秘密      {}",
+                    yes_no(item.data.detect_managed_secrets)
+                ),
+                format!(
+                    "检测常见 Token    {}",
+                    yes_no(item.data.detect_known_tokens)
+                ),
+                format!(
+                    "检测私钥          {}",
+                    yes_no(item.data.detect_private_keys)
+                ),
+                format!(
+                    "检测提示注入      {}",
+                    yes_no(item.data.detect_prompt_injection)
+                ),
+                format!("智能判定          {}", yes_no(item.intelligence.enabled)),
+                format!("判定超时          {} ms", item.intelligence.timeout_ms),
+                format!("最低置信度        {:.2}", item.intelligence.min_confidence),
+                format!("缓存时间          {} ms", item.intelligence.cache_ttl_ms),
+                format!(
+                    "Provider 启用     {}",
+                    yes_no(provider.is_some_and(|p| p.enabled))
+                ),
+                format!(
+                    "Provider 类型     {:?}",
+                    provider
+                        .map(|p| p.provider)
+                        .unwrap_or(IntelligenceProviderKind::Typesafe)
+                ),
+                format!(
+                    "Provider 模式     {:?}",
+                    provider.map(|p| p.mode).unwrap_or(ProtectionMode::Observe)
+                ),
+                format!(
+                    "Endpoint          {}",
+                    optional_summary(provider.and_then(|p| p.endpoint.as_deref()))
+                ),
+                format!(
+                    "Model             {}",
+                    optional_summary(provider.and_then(|p| p.model.as_deref()))
+                ),
+                format!(
+                    "API Key           {}",
+                    secret_summary(provider.and_then(|p| p.api_key.as_ref()))
+                ),
+            ]
+        }
         ObjectEditor::Route(index) => {
             let item = &app.config.rules[index];
             vec![
@@ -4723,6 +5141,12 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                             .map(|id| id.as_str())
                     )
                 ),
+                format!("智能防护启用    {}", yes_no(item.protection_enabled)),
+                format!(
+                    "智能防护          {}  （Enter 打开选择）",
+                    optional_summary(item.protection.as_deref())
+                ),
+                format!("允许敏感上传      {}", yes_no(item.allow_sensitive_upload)),
             ]
         }
         ObjectEditor::FirewallRule(index) => {
@@ -4915,6 +5339,9 @@ fn detail_title(app: &App) -> String {
             let idx = audit_plugin_index(&app.config, index);
             format!("网关 / 审计 / {}", app.config.plugins[idx].id)
         }
+        Some(ObjectEditor::Protection(index)) => {
+            format!("网关 / 智能防护 / {}", app.config.protections[index].id)
+        }
         Some(ObjectEditor::Route(index)) => {
             format!("网关 / 路由 / {}", app.config.rules[index].id)
         }
@@ -5061,6 +5488,7 @@ fn object_editor_hint(editor: ObjectEditor) -> String {
         ObjectEditor::Upstream(_) => "代理：配置 ID、类型、地址与超时".to_string(),
         ObjectEditor::Credential(_) => "凭证：配置 HTTP 认证或 SSH 账号".to_string(),
         ObjectEditor::AuditProfile(_) => "审计插件：配置事件范围与内容转录".to_string(),
+        ObjectEditor::Protection(_) => "智能防护：本地数据保护与智能判定".to_string(),
         ObjectEditor::Route(_) => "路由：配置优先级、目标与动作".to_string(),
         ObjectEditor::FirewallRule(_) => "网络规则：配置优先级、动作、目标与端口".to_string(),
         ObjectEditor::SandboxProcessRule(_) => "子进程沙盒规则".into(),
@@ -5112,6 +5540,7 @@ fn selection_hint(app: &App) -> Option<String> {
             CATEGORY_PROXY => "代理：上游代理列表，供路由规则引用".to_string(),
             CATEGORY_CREDENTIAL => "凭证：HTTP 凭证与 SSH 账号、私钥、密码".to_string(),
             CATEGORY_AUDIT => "审计：保留策略与事件转录插件".to_string(),
+            CATEGORY_PROTECTION => "智能防护：本地数据保护与 Jev 动作判定".to_string(),
             CATEGORY_ROUTE => "路由：默认路由与用户路由规则".to_string(),
             CATEGORY_FIREWALL => "沙盒 / 网络：Agent 出站域名、IP/CIDR 与端口规则".to_string(),
             CATEGORY_SANDBOX => "沙盒：网络、文件与子进程沙盒能力概览".to_string(),
@@ -5212,6 +5641,21 @@ fn selection_hint(app: &App) -> Option<String> {
                 }
             }
         }
+        CATEGORY_PROTECTION => app
+            .config
+            .protections
+            .get(app.field)
+            .map(|item| {
+                format!(
+                    "智能防护 {}（UUID={}）：模式={:?}，数据保护={}，智能判定={}",
+                    item.id,
+                    item.uuid,
+                    item.mode,
+                    yes_no(item.data.enabled),
+                    yes_no(item.intelligence.enabled)
+                )
+            })
+            .or_else(|| Some("暂无智能防护，按 a 新增".to_string())),
         CATEGORY_ROUTE => {
             if app.field == 0 {
                 let default = &app.config.default_route;
@@ -5924,6 +6368,7 @@ fn reference_kind_name(kind: ReferenceKind) -> &'static str {
         ReferenceKind::Proxy => "代理",
         ReferenceKind::Credential => "凭证",
         ReferenceKind::Audit => "审计",
+        ReferenceKind::Protection => "智能防护",
     }
 }
 
@@ -5943,6 +6388,9 @@ fn reference_preview(app: &App, picker: ReferencePicker) -> String {
         }
         ReferenceKind::Audit if index < audit_plugin_indices(&app.config).len() => {
             editor_lines(app, ObjectEditor::AuditProfile(index))
+        }
+        ReferenceKind::Protection if index < app.config.protections.len() => {
+            editor_lines(app, ObjectEditor::Protection(index))
         }
         _ => vec!["配置不存在".into()],
     };
@@ -6090,6 +6538,7 @@ mod tests {
                 "  代理",
                 "  凭证",
                 "  审计",
+                "  智能防护",
                 "  路由",
                 "  证书",
                 "沙盒",
@@ -6209,6 +6658,7 @@ mod tests {
                 CATEGORY_PROXY,
                 CATEGORY_CREDENTIAL,
                 CATEGORY_AUDIT,
+                CATEGORY_PROTECTION,
                 CATEGORY_ROUTE,
                 CATEGORY_CERTIFICATE,
                 CATEGORY_SANDBOX,
@@ -6529,7 +6979,7 @@ mod tests {
         edit_selected(&mut app);
         assert!(matches!(app.editor, Some(ObjectEditor::DefaultRoute)));
         let form = editor_lines(&app, ObjectEditor::DefaultRoute);
-        assert_eq!(form.len(), 5);
+        assert_eq!(form.len(), 7);
         assert!(form[0].contains("不可修改"));
 
         app.field = 1;
@@ -6618,10 +7068,11 @@ mod tests {
         .unwrap();
         assert_eq!(app.config.rules[0].priority, 42);
         let lines = editor_lines(&app, ObjectEditor::Route(0));
-        assert_eq!(lines.len(), 8);
+        assert_eq!(lines.len(), 11);
         assert!(lines[0].starts_with("ID"));
         assert!(lines[1].starts_with("启用"));
         assert!(lines[7].starts_with("审计"));
+        assert!(lines[8].starts_with("智能防护启用"));
         app.field = 1;
         let enabled = app.config.rules[0].enabled;
         toggle_selected(&mut app);
@@ -7935,5 +8386,28 @@ mod tests {
             discarded: false,
             live: false,
         }
+    }
+
+    #[test]
+    fn protection_category_creates_and_binds_profiles() {
+        let mut app = test_app();
+        app.category = CATEGORY_PROTECTION;
+        add_selected(&mut app);
+        assert_eq!(app.config.protections.len(), 1);
+        assert!(matches!(app.editor, Some(ObjectEditor::Protection(0))));
+        assert!(!app.config.protections[0].data.enabled);
+        app.editor = None;
+        app.category = CATEGORY_ROUTE;
+        add_selected(&mut app);
+        app.editor = Some(ObjectEditor::Route(0));
+        app.field = 9;
+        edit_selected(&mut app);
+        assert!(matches!(
+            app.reference_picker,
+            Some(ReferencePicker {
+                kind: ReferenceKind::Protection,
+                ..
+            })
+        ));
     }
 }

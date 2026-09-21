@@ -1205,6 +1205,9 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                 upstream,
                 plugins: credential.into_iter().collect(),
                 legacy: HashMap::new(),
+                protection_enabled: false,
+                protection: None,
+                allow_sensitive_upload: false,
             };
             upsert_by(&mut config.rules, |item| item.id == id, route);
             Ok(format!("已设置路由 {id}"))

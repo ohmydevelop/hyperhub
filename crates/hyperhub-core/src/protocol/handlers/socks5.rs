@@ -123,6 +123,7 @@ impl ProtocolHandler for Socks5Layer {
                 ssh_mitm_key: inner.ssh_mitm_key,
                 config: inner.config,
                 policy: inner.policy,
+                protection: inner.protection,
                 audit: inner.audit,
                 context,
                 decision,

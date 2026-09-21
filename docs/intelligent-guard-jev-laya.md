@@ -191,3 +191,7 @@ Laya 项目公布的几十毫秒数据来自 T4 GPU；不能把 GPU 指标套用
 - **Jev：可行，建议先做 provider-neutral 的远程 observe PoC。** 最大风险是第三方数据边界、网络依赖和服务故障策略。
 - **Laya：协议兼容，但公开模型直接用于本地实时阻断目前不可行。** CPU 延迟、内存和漏判均不达标；可保留为本地 sidecar 研究后端，不进入默认发行物。
 - **HyperHub：接入点清晰，但需要异步 guard 层，不能直接改同步 `PolicySnapshot` 或复用现有审计/凭证钩子假装完成阻断。**
+
+## 实现状态（2026-09-20）
+
+首期实现已将本地数据保护与智能判定合并为可复用的 `ProtectionProfile`。普通路由与默认路由均可绑定防护，默认关闭；运行时先执行本地秘密与来源扫描，再把脱敏 findings 交给 System One Provider。远程 Provider 不接收正文、凭证、Header 值或 Query 值。本地 Laya 仍通过自定义回环 endpoint 接入，HyperHub 不负责其模型和进程生命周期。

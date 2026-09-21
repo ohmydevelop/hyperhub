@@ -93,3 +93,39 @@ port = 443
 [[routes.endpoints]]
 target = "chatgpt.com"
 port = 443
+
+# 智能防护默认不启用。创建防护配置后，在精确目标路由上设置：
+# protection_enabled = true
+# protection = "agent-egress"
+# allow_sensitive_upload = false
+#
+# [[protections]]
+# id = "agent-egress"
+# enabled = true
+# mode = "observe"
+#
+# [protections.data]
+# enabled = true
+# max_scan_bytes = 1048576
+# detect_managed_secrets = true
+# detect_known_tokens = true
+# detect_private_keys = true
+# detect_prompt_injection = true
+# provenance_window_bytes = 64
+# provenance_min_matches = 3
+#
+# [protections.intelligence]
+# enabled = false
+# timeout_ms = 2000
+# min_confidence = 0.60
+# error_action = "pass"
+# low_confidence_action = "pass"
+# cache_ttl_ms = 30000
+#
+# [[protections.intelligence.providers]]
+# id = "jev-primary"
+# enabled = false
+# provider = "typesafe"
+# model = "jev-latest"
+# mode = "enforce"
+# api_key = { env = "TYPESAFE_API_KEY" }

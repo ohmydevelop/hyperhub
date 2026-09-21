@@ -652,12 +652,15 @@ fn is_config_item_path(tokens: &[String]) -> bool {
                 root.as_str(),
                 "upstreams"
                     | "plugins"
+                    | "protections"
                     | "routes"
                     | "environment"
                     | "root_certificates"
                     | "ssh_host_keys"
             )
-    ) || matches!(tokens, [root, rules, _] if root == "firewall" && rules == "rules")
+    ) || matches!(tokens, [root, _, intelligence, providers, _]
+        if root == "protections" && intelligence == "intelligence" && providers == "providers")
+        || matches!(tokens, [root, rules, _] if root == "firewall" && rules == "rules")
         || matches!(
             tokens,
             [root, area, rules, _]
@@ -1496,6 +1499,9 @@ mod tests {
             upstream: None,
             plugins: Vec::new(),
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let existing = config.rules[0].uuid.clone();
         let mut patch = json!([

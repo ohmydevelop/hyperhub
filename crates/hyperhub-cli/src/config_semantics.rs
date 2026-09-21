@@ -8,6 +8,7 @@ pub(crate) enum ConfigSection {
     Proxy,
     Credential,
     Audit,
+    Protection,
     Route,
     Certificate,
     Sandbox,
@@ -26,6 +27,7 @@ impl ConfigSection {
             Self::Proxy => "代理",
             Self::Credential => "凭证",
             Self::Audit => "审计",
+            Self::Protection => "智能防护",
             Self::Route => "路由",
             Self::Certificate => "证书",
             Self::Sandbox => "沙盒",
@@ -46,6 +48,7 @@ impl ConfigSection {
             | Self::Proxy
             | Self::Credential
             | Self::Audit
+            | Self::Protection
             | Self::Route
             | Self::Certificate => format!("网关 / {}", self.label()),
             Self::Network | Self::SandboxProcess | Self::Files => {
@@ -225,6 +228,16 @@ fn item_context(current: &Value, mutation: &Value, tokens: &[String]) -> ItemCon
             };
             context_from_item(item, section, label, "id", rest)
         }
+        [root, _, rest @ ..] if root == "protections" => collection_context(
+            current,
+            value,
+            tokens,
+            2,
+            ConfigSection::Protection,
+            "智能防护",
+            "id",
+            rest,
+        ),
         [root, _, rest @ ..] if root == "routes" => collection_context(
             current,
             value,
@@ -451,6 +464,30 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
                 )]
             }
         }
+        ConfigSection::Protection => vec![format!(
+            "{}，模式={}，数据保护={}，智能判定={}，Provider={} 个",
+            enabled.unwrap_or("启用"),
+            item.get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("observe"),
+            yes_no(
+                item.get("data")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            ),
+            yes_no(
+                item.get("intelligence")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            ),
+            item.get("intelligence")
+                .and_then(|v| v.get("providers"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0)
+        )],
         ConfigSection::Audit => vec![format!(
             "协议={}，HTTP 内容转录={}，SSH 内容转录={}",
             string_array(item.get("protocols")),
@@ -571,6 +608,15 @@ fn field_label(tokens: &[String]) -> Option<String> {
         "rewrite_port" => "重写端口",
         "upstream" => "代理",
         "plugins" => "插件绑定",
+        "protection_enabled" => "智能防护启用状态",
+        "protection" => "智能防护配置",
+        "allow_sensitive_upload" => "允许敏感数据上传",
+        "data/enabled" => "数据保护",
+        "data/max_scan_bytes" => "最大扫描字节数",
+        "intelligence/enabled" => "智能判定",
+        "intelligence/min_confidence" => "最低置信度",
+        "intelligence/cache_ttl_ms" => "判定缓存时间",
+        "intelligence/providers" => "判定 Provider",
         "http_scheme" => "HTTP 认证方式",
         "secret/value" => "认证值",
         "username" => "用户名",

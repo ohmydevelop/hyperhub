@@ -22,6 +22,24 @@ fn default_timeout_ms() -> u64 {
 fn default_body_limit() -> usize {
     1024 * 1024
 }
+fn default_protection_scan_bytes() -> usize {
+    1024 * 1024
+}
+fn default_provenance_window_bytes() -> usize {
+    64
+}
+fn default_provenance_min_matches() -> usize {
+    3
+}
+fn default_guard_timeout_ms() -> u64 {
+    2_000
+}
+fn default_guard_min_confidence() -> f64 {
+    0.60
+}
+fn default_guard_cache_ttl_ms() -> u64 {
+    30_000
+}
 fn default_retention_days() -> u32 {
     7
 }
@@ -131,6 +149,8 @@ pub struct Config {
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
     #[serde(default)]
+    pub protections: Vec<ProtectionProfile>,
+    #[serde(default)]
     pub root_certificates: Vec<RootCertificate>,
     #[serde(default)]
     pub ssh_host_keys: Vec<SshHostKey>,
@@ -164,6 +184,8 @@ struct ConfigWire {
     #[serde(default)]
     plugins: Vec<PluginConfig>,
     #[serde(default)]
+    protections: Vec<ProtectionProfile>,
+    #[serde(default)]
     root_certificates: Vec<RootCertificate>,
     #[serde(default)]
     ssh_host_keys: Vec<SshHostKey>,
@@ -190,6 +212,7 @@ impl<'de> Deserialize<'de> for Config {
             environment: wire.environment,
             upstreams: wire.upstreams,
             plugins: wire.plugins,
+            protections: wire.protections,
             root_certificates: wire.root_certificates,
             ssh_host_keys: wire.ssh_host_keys,
             rules: wire.rules,
@@ -213,6 +236,7 @@ impl Default for Config {
             environment: Vec::new(),
             upstreams: Vec::new(),
             plugins: Vec::new(),
+            protections: Vec::new(),
             root_certificates: Vec::new(),
             ssh_host_keys: Vec::new(),
             rules: Vec::new(),
@@ -284,6 +308,13 @@ impl Config {
                 }
             }
         }
+        for protection in &mut config.protections {
+            for provider in &mut protection.intelligence.providers {
+                if let Some(api_key) = &mut provider.api_key {
+                    api_key.redact();
+                }
+            }
+        }
         config
     }
 
@@ -298,6 +329,16 @@ impl Config {
         }
         for item in &mut self.plugins {
             ensure(&mut item.uuid, "plugin", &item.id);
+        }
+        for protection in &mut self.protections {
+            ensure(&mut protection.uuid, "protection", &protection.id);
+            for provider in &mut protection.intelligence.providers {
+                ensure(
+                    &mut provider.uuid,
+                    "protection-provider",
+                    &format!("{}|{}", protection.id, provider.id),
+                );
+            }
         }
         for item in &mut self.rules {
             ensure(&mut item.uuid, "route", &item.id);
@@ -492,6 +533,143 @@ impl Config {
                         plugin.id
                     )));
                 }
+            }
+        }
+
+        let protection_ids = unique_ids(
+            "protection",
+            self.protections.iter().map(|value| value.id.as_str()),
+        )?;
+        for protection in &self.protections {
+            if protection.data.max_scan_bytes == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "protection '{}' max_scan_bytes must be positive",
+                    protection.id
+                )));
+            }
+            if !(16..=4096).contains(&protection.data.provenance_window_bytes) {
+                return Err(ConfigError::Validation(format!(
+                    "protection '{}' provenance_window_bytes must be between 16 and 4096",
+                    protection.id
+                )));
+            }
+            if protection.data.provenance_min_matches == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "protection '{}' provenance_min_matches must be positive",
+                    protection.id
+                )));
+            }
+            if protection.intelligence.timeout_ms == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "protection '{}' intelligence timeout_ms must be positive",
+                    protection.id
+                )));
+            }
+            if !(0.0..=1.0).contains(&protection.intelligence.min_confidence) {
+                return Err(ConfigError::Validation(format!(
+                    "protection '{}' intelligence min_confidence must be between 0 and 1",
+                    protection.id
+                )));
+            }
+            let _provider_ids = unique_ids(
+                "protection provider",
+                protection
+                    .intelligence
+                    .providers
+                    .iter()
+                    .map(|provider| provider.id.as_str()),
+            )?;
+            for provider in &protection.intelligence.providers {
+                if !provider.enabled {
+                    continue;
+                }
+                let (endpoint, model, requires_key) = match provider.provider {
+                    IntelligenceProviderKind::Typesafe => (
+                        provider
+                            .endpoint
+                            .as_deref()
+                            .unwrap_or("https://api.typesafe.ai/v1/systemone"),
+                        provider.model.as_deref().unwrap_or("jev-latest"),
+                        true,
+                    ),
+                    IntelligenceProviderKind::Openrouter => (
+                        provider
+                            .endpoint
+                            .as_deref()
+                            .unwrap_or("https://openrouter.ai/api/v1/systemone"),
+                        provider.model.as_deref().unwrap_or("typesafe/jev-1.13"),
+                        true,
+                    ),
+                    IntelligenceProviderKind::Custom => (
+                        provider.endpoint.as_deref().ok_or_else(|| {
+                            ConfigError::Validation(format!(
+                                "custom provider '{}' in protection '{}' requires endpoint",
+                                provider.id, protection.id
+                            ))
+                        })?,
+                        provider.model.as_deref().ok_or_else(|| {
+                            ConfigError::Validation(format!(
+                                "custom provider '{}' in protection '{}' requires model",
+                                provider.id, protection.id
+                            ))
+                        })?,
+                        false,
+                    ),
+                };
+                if model.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "provider '{}' in protection '{}' requires a non-empty model",
+                        provider.id, protection.id
+                    )));
+                }
+                if requires_key && provider.api_key.is_none() {
+                    return Err(ConfigError::Validation(format!(
+                        "provider '{}' in protection '{}' requires api_key",
+                        provider.id, protection.id
+                    )));
+                }
+                let url = reqwest::Url::parse(endpoint).map_err(|error| {
+                    ConfigError::Validation(format!(
+                        "provider '{}' in protection '{}' has invalid endpoint: {error}",
+                        provider.id, protection.id
+                    ))
+                })?;
+                let http_loopback = url.scheme() == "http"
+                    && url.host_str().is_some_and(|host| {
+                        host.eq_ignore_ascii_case("localhost")
+                            || host
+                                .parse::<std::net::IpAddr>()
+                                .is_ok_and(|ip| ip.is_loopback())
+                    });
+                if url.scheme() != "https" && !http_loopback {
+                    return Err(ConfigError::Validation(format!(
+                        "provider '{}' in protection '{}' must use HTTPS unless endpoint is loopback HTTP",
+                        provider.id, protection.id
+                    )));
+                }
+            }
+        }
+
+        if self.default_route.allow_sensitive_upload {
+            return Err(ConfigError::Validation(
+                "default_route cannot allow sensitive uploads".into(),
+            ));
+        }
+        if self.default_route.deny && self.default_route.protection_enabled {
+            return Err(ConfigError::Validation(
+                "default_route cannot enable protection while deny is true".into(),
+            ));
+        }
+        if self.default_route.protection_enabled {
+            let id = self.default_route.protection.as_deref().ok_or_else(|| {
+                ConfigError::Validation(
+                    "default_route protection_enabled requires protection".into(),
+                )
+            })?;
+            if !protection_ids.contains(id) {
+                return Err(ConfigError::Validation(format!(
+                    "default_route references unknown protection '{id}'"
+                )));
             }
         }
 
@@ -705,9 +883,40 @@ impl Config {
                     ))
                 })?;
             }
+            if rule.protection_enabled {
+                let id = rule.protection.as_deref().ok_or_else(|| {
+                    ConfigError::Validation(format!(
+                        "route '{}' protection_enabled requires protection",
+                        rule.id
+                    ))
+                })?;
+                if !protection_ids.contains(id) {
+                    return Err(ConfigError::Validation(format!(
+                        "route '{}' references unknown protection '{id}'",
+                        rule.id
+                    )));
+                }
+            }
+            if rule.allow_sensitive_upload {
+                for endpoint in &rule.endpoints {
+                    match parse_route_target(&endpoint.target).map_err(ConfigError::Validation)? {
+                        RouteTarget::Domain {
+                            wildcard: false, ..
+                        } => {}
+                        _ => {
+                            return Err(ConfigError::Validation(format!(
+                                "route '{}' can allow sensitive uploads only for exact domain targets",
+                                rule.id
+                            )));
+                        }
+                    }
+                }
+            }
             if rule.deny
                 && (rule.upstream.is_some()
                     || !rule.plugins.is_empty()
+                    || rule.protection_enabled
+                    || rule.allow_sensitive_upload
                     || rule.rewrite_host.is_some()
                     || rule.rewrite_port.is_some())
             {
@@ -777,6 +986,12 @@ impl Config {
         for item in &self.plugins {
             register("plugin", &item.id, &item.uuid)?;
         }
+        for protection in &self.protections {
+            register("protection", &protection.id, &protection.uuid)?;
+            for provider in &protection.intelligence.providers {
+                register("protection provider", &provider.id, &provider.uuid)?;
+            }
+        }
         for item in &self.rules {
             register("route", &item.id, &item.uuid)?;
         }
@@ -823,6 +1038,9 @@ impl Config {
     }
     pub fn plugin(&self, id: &str) -> Option<&PluginConfig> {
         self.plugins.iter().find(|v| v.id == id)
+    }
+    pub fn protection(&self, id: &str) -> Option<&ProtectionProfile> {
+        self.protections.iter().find(|value| value.id == id)
     }
 }
 
@@ -1471,6 +1689,134 @@ pub struct FirewallEndpoint {
     pub port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectionMode {
+    #[default]
+    Observe,
+    Enforce,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectionAction {
+    #[default]
+    Pass,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntelligenceProviderKind {
+    Typesafe,
+    Openrouter,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataProtectionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_protection_scan_bytes")]
+    pub max_scan_bytes: usize,
+    #[serde(default = "default_true")]
+    pub detect_managed_secrets: bool,
+    #[serde(default = "default_true")]
+    pub detect_known_tokens: bool,
+    #[serde(default = "default_true")]
+    pub detect_private_keys: bool,
+    #[serde(default = "default_true")]
+    pub detect_prompt_injection: bool,
+    #[serde(default = "default_provenance_window_bytes")]
+    pub provenance_window_bytes: usize,
+    #[serde(default = "default_provenance_min_matches")]
+    pub provenance_min_matches: usize,
+}
+
+impl Default for DataProtectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_scan_bytes: default_protection_scan_bytes(),
+            detect_managed_secrets: true,
+            detect_known_tokens: true,
+            detect_private_keys: true,
+            detect_prompt_injection: true,
+            provenance_window_bytes: default_provenance_window_bytes(),
+            provenance_min_matches: default_provenance_min_matches(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntelligenceProviderConfig {
+    #[serde(default)]
+    pub uuid: String,
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub provider: IntelligenceProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<SecretValue>,
+    #[serde(default)]
+    pub mode: ProtectionMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntelligenceProtectionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_guard_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_guard_min_confidence")]
+    pub min_confidence: f64,
+    #[serde(default)]
+    pub error_action: ProtectionAction,
+    #[serde(default)]
+    pub low_confidence_action: ProtectionAction,
+    #[serde(default = "default_guard_cache_ttl_ms")]
+    pub cache_ttl_ms: u64,
+    #[serde(default)]
+    pub providers: Vec<IntelligenceProviderConfig>,
+}
+
+impl Default for IntelligenceProtectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_ms: default_guard_timeout_ms(),
+            min_confidence: default_guard_min_confidence(),
+            error_action: ProtectionAction::Pass,
+            low_confidence_action: ProtectionAction::Pass,
+            cache_ttl_ms: default_guard_cache_ttl_ms(),
+            providers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectionProfile {
+    #[serde(default)]
+    pub uuid: String,
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: ProtectionMode,
+    #[serde(default)]
+    pub data: DataProtectionConfig,
+    #[serde(default)]
+    pub intelligence: IntelligenceProtectionConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefaultRoute {
     #[serde(default = "default_true")]
@@ -1479,6 +1825,12 @@ pub struct DefaultRoute {
     pub deny: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
+    #[serde(default)]
+    pub protection_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub allow_sensitive_upload: bool,
 }
 
 impl Default for DefaultRoute {
@@ -1487,6 +1839,9 @@ impl Default for DefaultRoute {
             enabled: true,
             deny: false,
             plugins: Vec::new(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         }
     }
 }
@@ -1545,6 +1900,12 @@ pub struct RouteRule {
     pub upstream: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
+    #[serde(default)]
+    pub protection_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub allow_sensitive_upload: bool,
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
 }
@@ -2048,6 +2409,9 @@ targets = ["example.com"]"#,
             upstream: None,
             plugins: Vec::new(),
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         config.environment.push(EnvironmentVariable {
             uuid: shared,
@@ -2171,6 +2535,9 @@ targets = ["example.com"]"#,
             upstream: None,
             plugins: Vec::new(),
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         assert!(config
             .validate()
@@ -2484,6 +2851,9 @@ targets = ["example.com"]"#,
             upstream: Some("missing".into()),
             plugins: vec!["missing".into()],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         config.validate().unwrap();
         config.rules[0].enabled = true;
@@ -2837,5 +3207,83 @@ aktion = "deny""#,
             enabled: true,
         });
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn protection_defaults_to_disabled_on_routes_and_default_route() {
+        let config: Config = toml::from_str(
+            r#"
+            [[routes]]
+            id = "api"
+            [[routes.endpoints]]
+            target = "api.example.com"
+            "#,
+        )
+        .unwrap();
+        assert!(!config.default_route.protection_enabled);
+        assert!(!config.rules[0].protection_enabled);
+        assert!(!config.rules[0].allow_sensitive_upload);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn sensitive_upload_requires_an_exact_domain_route() {
+        let mut config = Config::default();
+        config.rules.push(RouteRule {
+            uuid: new_config_uuid(),
+            id: "trusted".into(),
+            enabled: true,
+            priority: 0,
+            endpoints: vec![RouteEndpoint {
+                target: "api.example.com".into(),
+                port: Some(443),
+            }],
+            deny: false,
+            rewrite_host: None,
+            rewrite_port: None,
+            upstream: None,
+            plugins: vec![],
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: true,
+            legacy: Default::default(),
+        });
+        config.validate().unwrap();
+        config.rules[0].endpoints[0].target = "*.example.com".into();
+        assert!(config.validate().is_err());
+        config.rules[0].allow_sensitive_upload = false;
+        config.default_route.allow_sensitive_upload = true;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn protection_provider_secret_is_redacted() {
+        let mut config = Config::default();
+        config.protections.push(ProtectionProfile {
+            uuid: new_config_uuid(),
+            id: "guard".into(),
+            enabled: true,
+            mode: ProtectionMode::Observe,
+            data: DataProtectionConfig::default(),
+            intelligence: IntelligenceProtectionConfig {
+                providers: vec![IntelligenceProviderConfig {
+                    uuid: new_config_uuid(),
+                    id: "jev".into(),
+                    enabled: true,
+                    provider: IntelligenceProviderKind::Typesafe,
+                    endpoint: None,
+                    model: None,
+                    api_key: Some(SecretValue::Inline {
+                        value: "secret-key".into(),
+                    }),
+                    mode: ProtectionMode::Observe,
+                }],
+                ..IntelligenceProtectionConfig::default()
+            },
+        });
+        config.validate().unwrap();
+        let redacted = serde_json::to_string(&config.redacted()).unwrap();
+        assert!(!redacted.contains("secret-key"));
+        assert!(redacted.contains("<redacted>"));
     }
 }

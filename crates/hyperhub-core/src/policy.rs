@@ -55,6 +55,9 @@ pub struct RouteDecision {
     pub deny: bool,
     pub upstream: Option<String>,
     pub plugins: PluginSet,
+    pub protection_enabled: bool,
+    pub protection: Option<String>,
+    pub allow_sensitive_upload: bool,
     pub destination: Destination,
 }
 
@@ -63,6 +66,9 @@ pub struct HttpRouteDecision {
     pub rule_id: Option<String>,
     pub deny: bool,
     pub plugins: PluginSet,
+    pub protection_enabled: bool,
+    pub protection: Option<String>,
+    pub allow_sensitive_upload: bool,
 }
 
 #[derive(Debug)]
@@ -89,6 +95,9 @@ pub struct PolicySnapshot {
 struct CompiledDefaultRoute {
     deny: bool,
     plugins: PluginSet,
+    protection_enabled: bool,
+    protection: Option<String>,
+    allow_sensitive_upload: bool,
 }
 
 impl PolicySnapshot {
@@ -148,6 +157,9 @@ impl PolicySnapshot {
             Some(CompiledDefaultRoute {
                 deny: config.default_route.deny,
                 plugins,
+                protection_enabled: config.default_route.protection_enabled,
+                protection: config.default_route.protection.clone(),
+                allow_sensitive_upload: config.default_route.allow_sensitive_upload,
             })
         } else {
             None
@@ -171,6 +183,9 @@ impl PolicySnapshot {
                 deny: default.deny,
                 upstream: None,
                 plugins: default.plugins.clone(),
+                protection_enabled: default.protection_enabled,
+                protection: default.protection.clone(),
+                allow_sensitive_upload: default.allow_sensitive_upload,
                 destination: context.destination.clone(),
             },
             None => RouteDecision {
@@ -178,6 +193,9 @@ impl PolicySnapshot {
                 deny: false,
                 upstream: None,
                 plugins: PluginSet::default(),
+                protection_enabled: false,
+                protection: None,
+                allow_sensitive_upload: false,
                 destination: context.destination.clone(),
             },
         }
@@ -194,6 +212,9 @@ impl PolicySnapshot {
                     rule_id: Some(entry.rule.id.clone()),
                     deny: entry.rule.deny,
                     plugins: entry.plugins.clone(),
+                    protection_enabled: entry.rule.protection_enabled,
+                    protection: entry.rule.protection.clone(),
+                    allow_sensitive_upload: entry.rule.allow_sensitive_upload,
                 };
             }
         }
@@ -202,11 +223,17 @@ impl PolicySnapshot {
                 rule_id: Some(DEFAULT_ROUTE_ID.to_string()),
                 deny: default.deny,
                 plugins: default.plugins.clone(),
+                protection_enabled: default.protection_enabled,
+                protection: default.protection.clone(),
+                allow_sensitive_upload: default.allow_sensitive_upload,
             },
             None => HttpRouteDecision {
                 rule_id: None,
                 deny: false,
                 plugins: PluginSet::default(),
+                protection_enabled: false,
+                protection: None,
+                allow_sensitive_upload: false,
             },
         }
     }
@@ -296,6 +323,9 @@ impl CompiledRule {
             deny: self.rule.deny,
             upstream: self.rule.upstream.clone(),
             plugins: self.plugins.clone(),
+            protection_enabled: self.rule.protection_enabled,
+            protection: self.rule.protection.clone(),
+            allow_sensitive_upload: self.rule.allow_sensitive_upload,
             destination,
         }
     }
@@ -377,6 +407,9 @@ mod tests {
                 upstream: None,
                 plugins: vec![],
                 legacy: Default::default(),
+                protection_enabled: false,
+                protection: None,
+                allow_sensitive_upload: false,
             },
             RouteRule {
                 uuid: crate::config::new_config_uuid(),
@@ -390,6 +423,9 @@ mod tests {
                 upstream: None,
                 plugins: vec![],
                 legacy: Default::default(),
+                protection_enabled: false,
+                protection: None,
+                allow_sensitive_upload: false,
             },
         ];
         let decision = PolicySnapshot::compile(&config).unwrap().decide(&context());
@@ -413,6 +449,9 @@ mod tests {
             upstream: None,
             plugins: vec![],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let policy = PolicySnapshot::compile(&config).unwrap();
         let decision = policy.decide(&context());
@@ -460,6 +499,9 @@ mod tests {
             upstream: None,
             plugins: vec![],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let policy = PolicySnapshot::compile(&config).unwrap();
         let mut request = context();
@@ -496,6 +538,9 @@ mod tests {
             upstream: None,
             plugins: vec![],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let policy = PolicySnapshot::compile(&config).unwrap();
         let mut request = context();
@@ -527,6 +572,9 @@ mod tests {
             upstream: None,
             plugins: vec![],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let policy = PolicySnapshot::compile(&config).unwrap();
         let mut request = context();
@@ -572,6 +620,9 @@ mod tests {
             upstream: None,
             plugins: vec!["api-token".into()],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let policy = PolicySnapshot::compile(&config).unwrap();
 
@@ -647,6 +698,9 @@ mod tests {
             upstream: None,
             plugins: vec![],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let policy = PolicySnapshot::compile(&ssh_config).unwrap();
         request.destination.hostnames = vec!["git.example.com".into()];

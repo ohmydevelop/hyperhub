@@ -525,6 +525,7 @@ impl SocksService {
         let runtime = self.runtime.snapshot();
         let config = runtime.config;
         let policy = runtime.policy;
+        let protection = runtime.protection;
         let firewall = compile_firewall_snapshot(&config, runtime.updated_at_ms)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         if let Some(snapshot) = firewall.as_ref() {
@@ -1083,6 +1084,7 @@ impl SocksService {
             ssh_mitm_key: self.ssh_mitm_key.clone(),
             config: config.clone(),
             policy: policy.clone(),
+            protection: protection.clone(),
             audit: self.audit.clone(),
             context,
             decision,
@@ -1510,6 +1512,9 @@ mod tests {
             upstream: None,
             plugins: vec!["credential".into()],
             legacy: Default::default(),
+            protection_enabled: false,
+            protection: None,
+            allow_sensitive_upload: false,
         });
         config.validate().unwrap();
         let service =
