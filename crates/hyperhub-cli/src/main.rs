@@ -113,6 +113,7 @@ enum Command {
     AuthClear,
     Chat(chat::ChatConfig),
     ConfigCli(config_cli::Command),
+    Skill,
     Validate(Option<PathBuf>),
     Doctor(Option<PathBuf>),
     Help,
@@ -170,6 +171,7 @@ fn execute(command: Command) -> Result<i32, String> {
         Command::AuthClear => clear_password_authorization(),
         Command::Chat(config) => chat::run(config),
         Command::ConfigCli(command) => config_cli::run(command),
+        Command::Skill => skill_installer::print_embedded_skill(),
         Command::Run(run) => run_target(run),
     }
 }
@@ -686,6 +688,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         "auth" => parse_auth(&args[1..]),
         "config" => parse_config_command(&args[1..]),
         "chat" => chat::parse(&args[1..]).map(Command::Chat),
+        "skill" => parse_skill(&args[1..]),
         "show" => config_cli::parse_show(&args[1..]).map(Command::ConfigCli),
         "approve" => config_cli::parse_approve(&args[1..]).map(Command::ConfigCli),
         "import" => parse_import(&args[1..]).map(Command::Serve),
@@ -708,6 +711,14 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         value => Err(format!(
             "unknown command '{value}'; use `hyperhub run -- {value}` to run a target with this name"
         )),
+    }
+}
+
+fn parse_skill(args: &[OsString]) -> Result<Command, String> {
+    if args.is_empty() {
+        Ok(Command::Skill)
+    } else {
+        Err("skill accepts no options; run `hyperhub skill` to print the Agent Skill".into())
     }
 }
 
@@ -1155,35 +1166,38 @@ fn print_doctor(target: Option<&Path>) -> Result<i32, String> {
 }
 
 fn usage() -> &'static str {
-    "HyperHub process network control
+    "HyperHub process network control and Agent configuration gateway
 
 usage:
   hyperhub <command> [options]
 
-configuration:
-  hyperhub chat [--password-file file]
-  hyperhub config [--password-file file]
-  hyperhub show
-  hyperhub config patch <json-patch|-> [--password-file file]
-  hyperhub approve [--password-file file] [--editor program]
-  hyperhub import <file> [--password-file file] [--input-password-file file]
-  hyperhub export <file> [--password-file file] [--export-password-file file] [--plain]
-  hyperhub validate [--password-file file]
+configuration and Agent guidance:
+  hyperhub skill                         print the complete Agent Skill and config reference
+  hyperhub chat [--password-file file]  edit configuration with the local chat assistant
+  hyperhub config [--password-file file] open the interactive configuration editor
+  hyperhub show                         show the redacted JSON configuration
+  hyperhub config patch <file|-> ...    queue a JSON Patch for human approval
+  hyperhub approve ...                  review, edit, approve, or reject queued changes
+  hyperhub import <file> ...            import and encrypt a configuration
+  hyperhub export <file> ...            export configuration (redacted by default)
+  hyperhub validate ...                 validate and refresh the redacted view
 
 server management:
-  hyperhub start [--debug] [--password-file file]
-  hyperhub stop
-  hyperhub restart [--debug] [--password-file file]
-  hyperhub status [--json]
-  hyperhub logs [-f|--follow] [-n|--lines count]
-  hyperhub auth clear
-  hyperhub serve [--debug] [--output file] [--password-file file]
+  hyperhub start ...                    start the local gateway
+  hyperhub stop                         stop the local gateway
+  hyperhub restart ...                  restart the local gateway
+  hyperhub status [--json]              show gateway and managed-process status
+  hyperhub logs ...                     view gateway logs
+  hyperhub auth clear                   clear cached local authorization
+  hyperhub serve ...                    run the gateway service directly
 
 target execution:
-  hyperhub run [--backend ptrace|gum] [--password-file file] [--dry-run] [--] target [args...]
+  hyperhub run ... -- target [args...]  run a target inside HyperHub controls
 
 diagnostics:
-  hyperhub doctor [--target exe]"
+  hyperhub doctor [--target exe]        show backend and target diagnostics
+
+Use `hyperhub skill` when an Agent cannot discover the installed agents/skills directory."
 }
 
 fn print_usage() {
@@ -1200,17 +1214,19 @@ mod tests {
     #[test]
     fn help_lists_only_canonical_user_commands() {
         let help = usage();
-        assert!(help.contains("configuration:"));
+        assert!(help.contains("configuration and Agent guidance:"));
         assert!(help.contains("server management:"));
         assert!(help.contains("target execution:"));
         assert!(help.contains("diagnostics:"));
+        assert!(help.contains("hyperhub skill"));
         assert!(help.contains("hyperhub show"));
-        let configuration = help.find("configuration:").unwrap();
+        let configuration = help.find("configuration and Agent guidance:").unwrap();
         let server = help.find("server management:").unwrap();
         let execution = help.find("target execution:").unwrap();
         let diagnostics = help.find("diagnostics:").unwrap();
         assert!(configuration < server && server < execution && execution < diagnostics);
         for command in [
+            "skill",
             "chat",
             "config",
             "show",
@@ -1301,6 +1317,11 @@ mod tests {
         assert_eq!(configure.action, ServeAction::Config);
         assert_eq!(configure.password_file, Some("password.txt".into()));
 
+        assert!(matches!(
+            parse_args(vec![os("skill")]).unwrap(),
+            Command::Skill
+        ));
+        assert!(parse_args(vec![os("skill"), os("--help")]).is_err());
         assert!(matches!(
             parse_args(vec![os("show")]).unwrap(),
             Command::ConfigCli(config_cli::Command::Show)

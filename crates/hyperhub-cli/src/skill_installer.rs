@@ -1,7 +1,7 @@
 use rand::random;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 const INSTALL_MARKER: &str = ".hyperhub-skill.json";
@@ -46,6 +46,34 @@ impl SkillInstallMarker {
             bundle_version: EMBEDDED_SKILL_BUNDLE_VERSION.into(),
         }
     }
+}
+
+pub(crate) fn print_embedded_skill() -> Result<i32, String> {
+    let mut stdout = io::stdout().lock();
+    let mut printed = false;
+    for file in EMBEDDED_SKILL_FILES {
+        if !matches!(file.path, "SKILL.md" | "references/configuration.md") {
+            continue;
+        }
+        if printed {
+            stdout
+                .write_all(b"\n\n--- HyperHub Skill reference: ")
+                .and_then(|_| stdout.write_all(file.path.as_bytes()))
+                .and_then(|_| stdout.write_all(b" ---\n\n"))
+                .map_err(|error| format!("cannot print embedded Skill: {error}"))?;
+        }
+        stdout
+            .write_all(file.bytes)
+            .map_err(|error| format!("cannot print embedded Skill: {error}"))?;
+        printed = true;
+    }
+    if !printed {
+        return Err("embedded HyperHub Skill is empty".into());
+    }
+    stdout
+        .flush()
+        .map_err(|error| format!("cannot flush embedded Skill output: {error}"))?;
+    Ok(0)
 }
 
 pub(crate) fn install_user_skill() -> Result<SkillInstallOutcome, String> {
