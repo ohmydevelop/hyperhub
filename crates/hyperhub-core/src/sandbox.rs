@@ -1,4 +1,4 @@
-use crate::config::{Config, FileSandboxOperation, SandboxAction};
+use crate::config::{Config, FileSandboxOperation, PrefilterPolicy, SandboxAction};
 use crate::firewall::{compile_snapshot as compile_firewall, FirewallSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,12 @@ pub struct ProcessSandboxSnapshotRule {
     pub id: String,
     pub action: SandboxAction,
     pub patterns: Vec<ProcessSandboxSnapshotPattern>,
+    #[serde(default)]
+    pub protection_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub prefilter_policy: PrefilterPolicy,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProcessSandboxSnapshotPattern {
@@ -44,6 +50,12 @@ pub struct FileSandboxSnapshotRule {
     pub action: SandboxAction,
     pub patterns: Vec<String>,
     pub operations: Vec<FileSandboxOperation>,
+    #[serde(default)]
+    pub protection_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub prefilter_policy: PrefilterPolicy,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,6 +290,9 @@ pub fn compile_snapshot(config: &Config, version: u64) -> Result<SandboxSnapshot
                             command_line: p.command_line.clone(),
                         })
                         .collect(),
+                    protection_enabled: rule.protection_enabled,
+                    protection: rule.protection.clone(),
+                    prefilter_policy: rule.prefilter_policy,
                 },
             ));
         }
@@ -309,6 +324,9 @@ pub fn compile_snapshot(config: &Config, version: u64) -> Result<SandboxSnapshot
                         .map(|p| p.pattern.clone())
                         .collect(),
                     operations: rule.operations.clone(),
+                    protection_enabled: rule.protection_enabled,
+                    protection: rule.protection.clone(),
+                    prefilter_policy: rule.prefilter_policy,
                 },
             ));
         }
@@ -356,6 +374,9 @@ mod tests {
                     command_line: String::new(),
                 },
             ],
+            protection_enabled: false,
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
         config.sandbox.file.enabled = true;
@@ -376,6 +397,9 @@ mod tests {
                 },
             ],
             operations: vec![FileSandboxOperation::Read],
+            protection_enabled: false,
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
         let snapshot = compile_snapshot(&config, 7).unwrap();
@@ -402,6 +426,9 @@ mod tests {
                         executable: r"/bin/sh$".into(),
                         command_line: r"--danger".into(),
                     }],
+                    protection_enabled: false,
+                    protection: None,
+                    prefilter_policy: PrefilterPolicy::None,
                 }],
             }),
             file: Some(FileSandboxSnapshot {
@@ -412,6 +439,9 @@ mod tests {
                     action: SandboxAction::Deny,
                     patterns: vec![r"/secret(?:/|$)".into()],
                     operations: vec![FileSandboxOperation::Read],
+                    protection_enabled: false,
+                    protection: None,
+                    prefilter_policy: PrefilterPolicy::None,
                 }],
             }),
         };

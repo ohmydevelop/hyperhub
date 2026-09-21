@@ -10,9 +10,9 @@ use hyperhub_core::config::{
     FileSandboxOperation, FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallDefaultRule,
     FirewallEndpoint, FirewallRule, HttpAuthScheme, IntelligenceProtectionConfig,
     IntelligenceProviderConfig, IntelligenceProviderKind, PluginConfig, PluginKind, PluginProtocol,
-    ProcessSandboxPattern, ProcessSandboxRule, ProtectionMode, ProtectionProfile, RootCertificate,
-    RouteEndpoint, RouteRule, RouteTarget, SandboxAction, SecretValue, SshAccount, SshHostKey,
-    SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture, DEFAULT_ROUTE_ID,
+    PrefilterPolicy, ProcessSandboxPattern, ProcessSandboxRule, ProtectionMode, ProtectionProfile,
+    RootCertificate, RouteEndpoint, RouteRule, RouteTarget, SandboxAction, SecretValue, SshAccount,
+    SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture, DEFAULT_ROUTE_ID,
 };
 use hyperhub_core::config_store;
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
@@ -4045,6 +4045,9 @@ fn add_selected(app: &mut App) {
                 priority: 0,
                 action: SandboxAction::Deny,
                 patterns: Vec::new(),
+                protection_enabled: false,
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
                 legacy: Default::default(),
             });
             changed(app);
@@ -4066,6 +4069,9 @@ fn add_selected(app: &mut App) {
                 action: SandboxAction::Deny,
                 patterns: Vec::new(),
                 operations: vec![FileSandboxOperation::Read],
+                protection_enabled: false,
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
                 legacy: Default::default(),
             });
             changed(app);

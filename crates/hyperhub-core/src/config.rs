@@ -735,6 +735,12 @@ impl Config {
             if !rule.enabled {
                 continue;
             }
+            validate_sandbox_protection(
+                &protection_ids,
+                rule.protection_enabled,
+                rule.protection.as_deref(),
+                &format!("process sandbox rule '{}'", rule.id),
+            )?;
             if !rule.patterns.iter().any(|pattern| pattern.enabled) {
                 return Err(ConfigError::Validation(format!(
                     "process sandbox rule '{}' must contain an enabled regex pattern",
@@ -771,6 +777,12 @@ impl Config {
             if !rule.enabled {
                 continue;
             }
+            validate_sandbox_protection(
+                &protection_ids,
+                rule.protection_enabled,
+                rule.protection.as_deref(),
+                &format!("file sandbox rule '{}'", rule.id),
+            )?;
             if !rule.patterns.iter().any(|pattern| pattern.enabled) {
                 return Err(ConfigError::Validation(format!(
                     "file sandbox rule '{}' must contain an enabled regex pattern",
@@ -1042,6 +1054,26 @@ impl Config {
     pub fn protection(&self, id: &str) -> Option<&ProtectionProfile> {
         self.protections.iter().find(|value| value.id == id)
     }
+}
+
+fn validate_sandbox_protection(
+    protection_ids: &HashSet<String>,
+    enabled: bool,
+    protection: Option<&str>,
+    owner: &str,
+) -> Result<(), ConfigError> {
+    if !enabled {
+        return Ok(());
+    }
+    let id = protection.ok_or_else(|| {
+        ConfigError::Validation(format!("{owner} protection_enabled requires protection"))
+    })?;
+    if !protection_ids.contains(id) {
+        return Err(ConfigError::Validation(format!(
+            "{owner} references unknown protection '{id}'"
+        )));
+    }
+    Ok(())
 }
 
 fn reject_removed_fields(
@@ -1550,6 +1582,16 @@ pub struct SandboxConfig {
     pub file: FileSandboxConfig,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefilterPolicy {
+    #[default]
+    None,
+    NetworkUpload,
+    SensitiveRead,
+    ArchiveOrEncode,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessSandboxConfig {
@@ -1576,6 +1618,12 @@ pub struct ProcessSandboxRule {
     pub action: SandboxAction,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patterns: Vec<ProcessSandboxPattern>,
+    #[serde(default)]
+    pub protection_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub prefilter_policy: PrefilterPolicy,
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
 }
@@ -1629,6 +1677,12 @@ pub struct FileSandboxRule {
     pub patterns: Vec<FileSandboxPattern>,
     #[serde(default)]
     pub operations: Vec<FileSandboxOperation>,
+    #[serde(default)]
+    pub protection_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub prefilter_policy: PrefilterPolicy,
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
 }
@@ -3025,6 +3079,9 @@ aktion = "deny""#,
             priority: 0,
             action: SandboxAction::Deny,
             patterns: Vec::new(),
+            protection_enabled: false,
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
         assert!(config
@@ -3048,6 +3105,9 @@ aktion = "deny""#,
             action: SandboxAction::Deny,
             patterns: Vec::new(),
             operations: vec![FileSandboxOperation::Read],
+            protection_enabled: false,
+            protection: None,
+            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
         assert!(config

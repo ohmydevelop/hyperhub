@@ -1,7 +1,9 @@
 mod network;
+mod prefilter;
 
 use arc_swap::ArcSwapOption;
 pub(crate) use network::*;
+use prefilter::{PrefilterContext, PrefilterDecision};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -26,6 +28,16 @@ pub(crate) enum FileSandboxOperation {
     Rename,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PrefilterPolicy {
+    #[default]
+    None,
+    NetworkUpload,
+    SensitiveRead,
+    ArchiveOrEncode,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct SandboxSnapshot {
     pub(crate) version: u64,
@@ -47,6 +59,12 @@ pub(crate) struct ProcessSandboxSnapshotRule {
     pub(crate) id: String,
     pub(crate) action: SandboxAction,
     pub(crate) patterns: Vec<ProcessSandboxPattern>,
+    #[serde(default)]
+    pub(crate) protection_enabled: bool,
+    #[serde(default)]
+    pub(crate) protection: Option<String>,
+    #[serde(default)]
+    pub(crate) prefilter_policy: PrefilterPolicy,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
@@ -69,6 +87,12 @@ pub(crate) struct FileSandboxSnapshotRule {
     pub(crate) action: SandboxAction,
     pub(crate) patterns: Vec<String>,
     pub(crate) operations: Vec<FileSandboxOperation>,
+    #[serde(default)]
+    pub(crate) protection_enabled: bool,
+    #[serde(default)]
+    pub(crate) protection: Option<String>,
+    #[serde(default)]
+    pub(crate) prefilter_policy: PrefilterPolicy,
 }
 
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
@@ -82,6 +106,9 @@ struct CompiledProcessSandboxRule {
     id: String,
     action: SandboxAction,
     patterns: Vec<CompiledProcessSandboxPattern>,
+    protection_enabled: bool,
+    protection: Option<String>,
+    prefilter_policy: PrefilterPolicy,
 }
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
 struct CompiledProcessSandboxPattern {
@@ -100,6 +127,9 @@ struct CompiledFileSandboxRule {
     action: SandboxAction,
     patterns: Vec<regex::Regex>,
     operations: Vec<FileSandboxOperation>,
+    protection_enabled: bool,
+    protection: Option<String>,
+    prefilter_policy: PrefilterPolicy,
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -148,7 +178,24 @@ pub(crate) fn file_sandbox_decision(
         if rule.operations.contains(&op)
             && rule.patterns.iter().any(|pattern| pattern.is_match(path))
         {
-            return (rule.action, Some(rule.id.clone()), "rule".into());
+            let rule_id = Some(rule.id.clone());
+            if rule.action == SandboxAction::Pass && rule.protection_enabled {
+                let prefilter = prefilter::evaluate(
+                    rule.prefilter_policy,
+                    path,
+                    &[path.to_owned()],
+                    &PrefilterContext::default(),
+                );
+                let source = if prefilter.hard_deny {
+                    "prefilter_hard_deny"
+                } else if prefilter.should_query_gateway {
+                    "prefilter_query"
+                } else {
+                    "rule"
+                };
+                return (rule.action, rule_id, source.into());
+            }
+            return (rule.action, rule_id, "rule".into());
         }
     }
     (snapshot.default_action, None, "default".into())
@@ -173,9 +220,50 @@ pub(crate) fn process_sandbox_decision(
         }) {
             continue;
         }
-        return (rule.action, Some(rule.id.clone()), "rule".into());
+        let rule_id = Some(rule.id.clone());
+        if rule.action == SandboxAction::Pass && rule.protection_enabled {
+            let argv = cmd
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let prefilter = prefilter::evaluate(
+                rule.prefilter_policy,
+                exe,
+                &argv,
+                &PrefilterContext::default(),
+            );
+            let source = if prefilter.hard_deny {
+                "prefilter_hard_deny"
+            } else if prefilter.should_query_gateway {
+                "prefilter_query"
+            } else {
+                "rule"
+            };
+            return (rule.action, rule_id, source.into());
+        }
+        return (rule.action, rule_id, "rule".into());
     }
     (snapshot.default_action, None, "default".into())
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn process_prefilter(
+    snapshot: &CompiledProcessSandboxSnapshot,
+    executable: &str,
+    command_line: &str,
+    context: &PrefilterContext,
+) -> Option<(String, PrefilterDecision)> {
+    prefilter::process_prefilter(snapshot, executable, command_line, context)
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn file_prefilter(
+    snapshot: &CompiledFileSandboxSnapshot,
+    path: &str,
+    operation: FileSandboxOperation,
+    context: &PrefilterContext,
+) -> Option<(String, PrefilterDecision)> {
+    prefilter::file_prefilter(snapshot, path, operation, context)
 }
 
 #[cfg(all(test, any(windows, unix), feature = "gum-agent"))]
@@ -192,6 +280,9 @@ mod tests {
                 action: SandboxAction::Deny,
                 patterns: vec![r"^C:/secret(?:/|$)".into()],
                 operations: vec![FileSandboxOperation::Read],
+                protection_enabled: false,
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
             }],
         })
         .unwrap();
@@ -217,6 +308,9 @@ mod tests {
                     executable: r"(?i)tool\.exe$".into(),
                     command_line: r"--danger(?:\s|$)".into(),
                 }],
+                protection_enabled: false,
+                protection: None,
+                prefilter_policy: PrefilterPolicy::None,
             }],
         })
         .unwrap();
@@ -312,6 +406,9 @@ pub(crate) fn compile_process_snapshot(
                 id: rule.id,
                 action: rule.action,
                 patterns,
+                protection_enabled: rule.protection_enabled,
+                protection: rule.protection,
+                prefilter_policy: rule.prefilter_policy,
             })
         })
         .collect::<Result<_, regex::Error>>()?;
@@ -339,6 +436,9 @@ pub(crate) fn compile_file_snapshot(
                     .map(|pattern| regex::Regex::new(&pattern))
                     .collect::<Result<_, _>>()?,
                 operations: rule.operations,
+                protection_enabled: rule.protection_enabled,
+                protection: rule.protection,
+                prefilter_policy: rule.prefilter_policy,
             })
         })
         .collect::<Result<_, regex::Error>>()?;
