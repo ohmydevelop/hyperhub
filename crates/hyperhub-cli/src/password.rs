@@ -119,11 +119,18 @@ pub fn acquire_with_environment(
             "a terminal is required for password input; use --password-file or {PASSWORD_ENV}"
         ));
     }
-    let first = prompt_hidden("HyperHub password: ")?;
+    if confirm {
+        eprintln!("Creating a new HyperHub password (input is masked with *)\n");
+    }
+    let first = if confirm {
+        prompt_with_feedback("HyperHub password: ", true)?
+    } else {
+        prompt_hidden("HyperHub password: ")?
+    };
     validate(&first)?;
     eprintln!();
     if confirm {
-        let second = prompt_hidden("Confirm password: ")?;
+        let second = prompt_with_feedback("Confirm password: ", true)?;
         eprintln!();
         if *first != *second {
             return Err("password confirmation does not match".into());
