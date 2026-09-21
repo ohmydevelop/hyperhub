@@ -92,6 +92,16 @@ jobs:
       - name: Check targets and fixtures
         run: ./scripts/test-platform.sh
 
+      - name: Benchmark smart protection matrix
+        run: python3 scripts/benchmark-smart-protection.py --output target/benchmarks/smart-protection
+
+      - name: Upload smart protection benchmark
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-protection-benchmark
+          path: target/benchmarks/smart-protection/*
+          if-no-files-found: error
+
       - name: Upload static benchmark report
         uses: actions/upload-artifact@v4
         with:
