@@ -720,7 +720,8 @@ python3 - "$temporary/trust-show-ssh.json" "$trust_ssh_port" <<'PYCODE'
 import json, pathlib, sys
 config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 authority = f"127.0.0.1:{sys.argv[2]}"
-assert any(item.get("host") == authority and item.get("enabled") for item in config["ssh_host_keys"]), (authority, config["ssh_host_keys"])
+keys = config["gateway"]["trust"]["ssh_host_keys"]
+assert any(item.get("host") == authority and item.get("enabled") for item in keys), (authority, keys)
 PYCODE
 kill "$trust_ssh_pid"
 wait "$trust_ssh_pid" 2>/dev/null || true
