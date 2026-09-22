@@ -528,6 +528,9 @@ impl ProtectionSnapshot {
                 break;
             }
         }
+        if outcome.reason.is_none() && !outcome.providers.is_empty() {
+            outcome.reason = Some("provider_pass".into());
+        }
         outcome
     }
 }
@@ -930,7 +933,7 @@ fn parse_decision(value: &Value) -> Result<ParsedDecision, String> {
         return Err("decision_out_of_range".into());
     }
     Ok(ParsedDecision {
-        deny: (tier >= 3 && destructive > 0.75) || (blast >= 3.0 && destructive > 0.5),
+        deny: tier >= 3 || destructive > 0.75 || (blast >= 3.0 && destructive > 0.5),
         risk_level: risk.into(),
         confidence,
         destructive_probability: destructive,
@@ -955,6 +958,17 @@ mod tests {
             },
             intelligence: IntelligenceProtectionConfig::default(),
         }
+    }
+
+    #[test]
+    fn critical_risk_blocks_even_when_destructive_probability_is_low() {
+        let parsed = parse_decision(&json!({"answers": {
+            "risk_level": {"choice": "critical_danger", "confidence": 0.98},
+            "is_destructive": {"noul": 0.1},
+            "blast_radius": {"score": 2.0}
+        }}))
+        .unwrap();
+        assert!(parsed.deny);
     }
 
     #[test]

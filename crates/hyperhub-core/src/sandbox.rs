@@ -333,6 +333,7 @@ pub fn evaluate_process_prefilter(
         "--data-binary",
         "--upload-file",
         "--post-file",
+        "--request",
         " -t ",
         " -t",
     ];

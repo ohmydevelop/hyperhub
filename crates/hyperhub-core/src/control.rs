@@ -1205,6 +1205,9 @@ impl ControlService {
                         .unwrap_or_else(|| "prefilter_pass".into());
                     let risk_level = provider.and_then(|item| item.risk_level.clone());
                     let confidence = provider.and_then(|item| item.confidence);
+                    let destructive_probability =
+                        provider.and_then(|item| item.destructive_probability);
+                    let blast_radius = provider.and_then(|item| item.blast_radius);
                     let cache_hit = provider.is_some_and(|item| item.cache_hit);
                     self.audit.session_event(
                         "smart_protection_decision",
@@ -1220,6 +1223,8 @@ impl ControlService {
                             "features": audit_features,
                             "risk_level": risk_level,
                             "confidence": confidence,
+                            "destructive_probability": destructive_probability,
+                            "blast_radius": blast_radius,
                             "cache_hit": cache_hit,
                             "reporter": "static-supervisor",
                         }),
@@ -1283,6 +1288,9 @@ impl ControlService {
                         .unwrap_or_else(|| "prefilter_pass".into());
                     let risk_level = provider.and_then(|item| item.risk_level.clone());
                     let confidence = provider.and_then(|item| item.confidence);
+                    let destructive_probability =
+                        provider.and_then(|item| item.destructive_probability);
+                    let blast_radius = provider.and_then(|item| item.blast_radius);
                     let cache_hit = provider.is_some_and(|item| item.cache_hit);
                     self.audit.session_event(
                         "smart_protection_decision",
@@ -1298,6 +1306,8 @@ impl ControlService {
                             "features": audit_features,
                             "risk_level": risk_level,
                             "confidence": confidence,
+                            "destructive_probability": destructive_probability,
+                            "blast_radius": blast_radius,
                             "cache_hit": cache_hit,
                         }),
                     );

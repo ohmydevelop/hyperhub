@@ -198,7 +198,7 @@ def policy_blocks(answers: Dict[str, Any]) -> bool:
     tier = RISK_TIERS.get(risk.get("choice"), 3)
     destructive = safe_float(answers.get("is_destructive", {}).get("noul"), 1.0)
     blast = safe_float(answers.get("blast_radius", {}).get("score"), 4.0)
-    return (tier >= 3 and destructive > 0.75) or (blast >= 3 and destructive > 0.5)
+    return tier >= 3 or destructive > 0.75 or (blast >= 3 and destructive > 0.5)
 
 
 def parse_provider_response(value: Dict[str, Any]) -> Tuple[bool, bool, Optional[str]]:
@@ -696,7 +696,10 @@ def main() -> int:
                 "provider_latency_pass": args.backend != "mock" or percentile(healthy_provider_values, 0.95) < MOCK_P95_GATE_MS,
             },
         }
-        summary["status"] = "pass" if summary["status"] == "pass" and all(summary["gates"].values()) else "fail"
+        boolean_gates = [value for value in summary["gates"].values() if isinstance(value, bool)]
+        summary["status"] = (
+            "pass" if summary["status"] == "pass" and all(boolean_gates) else "fail"
+        )
         (output_dir / "cases.jsonl").write_text(
             "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records),
             encoding="utf-8",

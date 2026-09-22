@@ -94,8 +94,8 @@
     "expected": {
       "hard_deny": false,
       "should_query_gateway": true,
-      "final_action": "allow",
-      "would_deny": false
+      "final_action": "deny",
+      "would_deny": true
     }
   }
 ]

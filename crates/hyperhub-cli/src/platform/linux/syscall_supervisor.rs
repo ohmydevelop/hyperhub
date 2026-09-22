@@ -1068,6 +1068,18 @@ impl Supervisor {
             return Ok(self.enforce);
         }
         if !prefilter.should_query_gateway {
+            let decision = SandboxDecision {
+                action: SandboxAction::Pass,
+                rule_id: Some(binding.rule_id),
+                source: "prefilter_pass",
+            };
+            self.report_sandbox(
+                tid,
+                SandboxAuditKind::Process,
+                "create",
+                &intent.executable,
+                &decision,
+            );
             return Ok(false);
         }
         let process_pid = self.ensure_member(tid)? as u32;

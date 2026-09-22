@@ -44,6 +44,7 @@ pub(crate) fn evaluate(
         "--data-binary",
         "--upload-file",
         "--post-file",
+        "--request",
         " -t ",
         " -t",
         " -T",
