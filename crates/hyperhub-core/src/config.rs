@@ -578,39 +578,19 @@ impl Config {
                 )));
             }
             if let Some(provider) = &protection.intelligence.provider {
-                let (endpoint, model, requires_key) = match provider.provider {
-                    IntelligenceProviderKind::Typesafe => (
-                        provider
-                            .endpoint
-                            .as_deref()
-                            .unwrap_or("https://api.typesafe.ai/v1/systemone"),
-                        provider.model.as_deref().unwrap_or("jev-latest"),
-                        true,
-                    ),
-                    IntelligenceProviderKind::Openrouter => (
-                        provider
-                            .endpoint
-                            .as_deref()
-                            .unwrap_or("https://openrouter.ai/api/v1/systemone"),
-                        provider.model.as_deref().unwrap_or("typesafe/jev-1.13"),
-                        true,
-                    ),
-                    IntelligenceProviderKind::Custom => (
-                        provider.endpoint.as_deref().ok_or_else(|| {
-                            ConfigError::Validation(format!(
-                                "custom provider '{}' in protection '{}' requires endpoint",
-                                provider.id, protection.id
-                            ))
-                        })?,
-                        provider.model.as_deref().ok_or_else(|| {
-                            ConfigError::Validation(format!(
-                                "custom provider '{}' in protection '{}' requires model",
-                                provider.id, protection.id
-                            ))
-                        })?,
-                        false,
-                    ),
-                };
+                let endpoint = provider.endpoint.as_deref().ok_or_else(|| {
+                    ConfigError::Validation(format!(
+                        "provider '{}' in protection '{}' requires endpoint",
+                        provider.id, protection.id
+                    ))
+                })?;
+                let model = provider.model.as_deref().ok_or_else(|| {
+                    ConfigError::Validation(format!(
+                        "provider '{}' in protection '{}' requires model",
+                        provider.id, protection.id
+                    ))
+                })?;
+                let requires_key = true;
                 if model.trim().is_empty() {
                     return Err(ConfigError::Validation(format!(
                         "provider '{}' in protection '{}' requires a non-empty model",
@@ -1789,10 +1769,8 @@ pub enum ProtectionAction {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum IntelligenceProviderKind {
-    Typesafe,
-    Openrouter,
-    Custom,
+pub enum IntelligenceProtocol {
+    SystemOne,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1837,7 +1815,7 @@ pub struct IntelligenceProviderConfig {
     #[serde(default)]
     pub uuid: String,
     pub id: String,
-    pub provider: IntelligenceProviderKind,
+    pub protocol: IntelligenceProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3346,7 +3324,7 @@ aktion = "deny""#,
                 provider: Some(IntelligenceProviderConfig {
                     uuid: new_config_uuid(),
                     id: "jev".into(),
-                    provider: IntelligenceProviderKind::Typesafe,
+                    protocol: IntelligenceProtocol::SystemOne,
                     endpoint: None,
                     model: None,
                     api_key: Some(SecretValue::Inline {

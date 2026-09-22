@@ -1,5 +1,5 @@
 use crate::config::{
-    Config, IntelligenceProviderConfig, IntelligenceProviderKind, ProtectionAction, ProtectionMode,
+    Config, IntelligenceProtocol, IntelligenceProviderConfig, ProtectionAction, ProtectionMode,
     ProtectionProfile, SecretValue,
 };
 use crate::policy::{ConnectionContext, Protocol};
@@ -458,7 +458,10 @@ impl ProtectionSnapshot {
             return outcome;
         }
         let state = provider_state(request);
-        outcome.input_sha256 = format!("{:x}", Sha256::digest(state.as_bytes()));
+        outcome.input_sha256 = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&state).unwrap_or_default())
+        );
         if let Some(provider) = &profile.provider {
             let started = Instant::now();
             let evaluated = provider
@@ -481,7 +484,7 @@ impl ProtectionSnapshot {
                     (
                         ProviderAudit {
                             provider_id: provider.config.id.clone(),
-                            provider: provider_kind_name(provider.config.provider).into(),
+                            provider: provider_kind_name(provider.config.protocol).into(),
                             model: provider.model.clone(),
                             verdict: if deny { "deny" } else { "pass" }.into(),
                             risk_level: Some(decision.risk_level),
@@ -502,7 +505,7 @@ impl ProtectionSnapshot {
                     (
                         ProviderAudit {
                             provider_id: provider.config.id.clone(),
-                            provider: provider_kind_name(provider.config.provider).into(),
+                            provider: provider_kind_name(provider.config.protocol).into(),
                             model: provider.model.clone(),
                             verdict: if deny { "deny" } else { "pass" }.into(),
                             risk_level: None,
@@ -600,11 +603,14 @@ impl CompiledProtection {
 impl ProviderRuntime {
     async fn evaluate(
         &self,
-        state: &str,
+        state: &Value,
         timeout_ms: u64,
         cache_ttl_ms: u64,
     ) -> Result<(ParsedDecision, bool), String> {
-        let key = format!("{:x}", Sha256::digest(state.as_bytes()));
+        let key = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(state).unwrap_or_default())
+        );
         if cache_ttl_ms > 0 {
             if let Some(entry) = self
                 .cache
@@ -793,30 +799,20 @@ fn rolling_hashes(bytes: &[u8], window: usize) -> HashSet<[u8; 32]> {
 }
 
 fn provider_endpoint(config: &IntelligenceProviderConfig) -> &str {
-    config.endpoint.as_deref().unwrap_or(match config.provider {
-        IntelligenceProviderKind::Typesafe => "https://api.typesafe.ai/v1/systemone",
-        IntelligenceProviderKind::Openrouter => "https://openrouter.ai/api/v1/systemone",
-        IntelligenceProviderKind::Custom => "",
-    })
+    config.endpoint.as_deref().unwrap_or("")
 }
 
 fn provider_model(config: &IntelligenceProviderConfig) -> &str {
-    config.model.as_deref().unwrap_or(match config.provider {
-        IntelligenceProviderKind::Typesafe => "jev-latest",
-        IntelligenceProviderKind::Openrouter => "typesafe/jev-1.13",
-        IntelligenceProviderKind::Custom => "",
-    })
+    config.model.as_deref().unwrap_or("")
 }
 
-fn provider_kind_name(kind: IntelligenceProviderKind) -> &'static str {
+fn provider_kind_name(kind: IntelligenceProtocol) -> &'static str {
     match kind {
-        IntelligenceProviderKind::Typesafe => "typesafe",
-        IntelligenceProviderKind::Openrouter => "openrouter",
-        IntelligenceProviderKind::Custom => "custom",
+        IntelligenceProtocol::SystemOne => "system_one",
     }
 }
 
-fn system_one_payload(model: &str, state: &str) -> Value {
+fn system_one_payload(model: &str, state: &Value) -> Value {
     json!({
         "model": model,
         "state": state,
@@ -849,7 +845,7 @@ fn system_one_payload(model: &str, state: &str) -> Value {
     })
 }
 
-fn provider_state(request: &ProtectionRequest) -> String {
+fn provider_state(request: &ProtectionRequest) -> Value {
     let findings = request
         .scan
         .findings
@@ -886,7 +882,7 @@ fn provider_state(request: &ProtectionRequest) -> String {
         "provenance_matches": request.scan.provenance_matches,
         "source_ids": request.scan.source_ids,
     });
-    serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+    value
 }
 
 fn parse_decision(value: &Value) -> Result<ParsedDecision, String> {

@@ -123,6 +123,7 @@ port = 443
 #
 # [protections.intelligence.provider]
 # id = "jev-primary"
-# provider = "typesafe"
+# protocol = "system_one"
+# endpoint = "https://api.typesafe.ai/v1/systemone"
 # model = "jev-latest"
 # api_key = { env = "TYPESAFE_API_KEY" }

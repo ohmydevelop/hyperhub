@@ -9,7 +9,7 @@ use hyperhub_core::config::{
     parse_route_target, Config, DataProtectionConfig, EnforcementMode, EnvironmentVariable,
     FileSandboxOperation, FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallDefaultRule,
     FirewallEndpoint, FirewallRule, HttpAuthScheme, IntelligenceProtectionConfig,
-    IntelligenceProviderConfig, IntelligenceProviderKind, PluginConfig, PluginKind, PluginProtocol,
+    IntelligenceProtocol, IntelligenceProviderConfig, PluginConfig, PluginKind, PluginProtocol,
     ProcessSandboxPattern, ProcessSandboxRule, ProtectionAction, ProtectionMode, ProtectionProfile,
     RootCertificate, RouteEndpoint, RouteRule, RouteTarget, RuleAction, SandboxAction, SecretValue,
     SshAccount, SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture,
@@ -1853,20 +1853,11 @@ fn edit_protection_intelligence_field(app: &mut App, index: usize, field: usize)
             changed(app);
         }
         1 => {
-            let provider = app.config.protections[index]
-                .intelligence
-                .provider
-                .get_or_insert_with(default_intelligence_provider);
-            provider.provider = match provider.provider {
-                IntelligenceProviderKind::Typesafe => IntelligenceProviderKind::Openrouter,
-                IntelligenceProviderKind::Openrouter => IntelligenceProviderKind::Custom,
-                IntelligenceProviderKind::Custom => IntelligenceProviderKind::Typesafe,
-            };
-            changed(app);
+            app.status = "当前协议类型为 System One".into();
         }
         2 => open_text(
             app,
-            "Provider endpoint（官方可留空）",
+            "System One Endpoint",
             app.config.protections[index]
                 .intelligence
                 .provider
@@ -1877,7 +1868,7 @@ fn edit_protection_intelligence_field(app: &mut App, index: usize, field: usize)
         ),
         3 => open_text(
             app,
-            "Provider model（官方可留空）",
+            "System One Model",
             app.config.protections[index]
                 .intelligence
                 .provider
@@ -1938,9 +1929,9 @@ fn default_intelligence_provider() -> IntelligenceProviderConfig {
     IntelligenceProviderConfig {
         uuid: hyperhub_core::config::new_config_uuid(),
         id: "jev-primary".into(),
-        provider: IntelligenceProviderKind::Typesafe,
-        endpoint: None,
-        model: None,
+        protocol: IntelligenceProtocol::SystemOne,
+        endpoint: Some("https://api.typesafe.ai/v1/systemone".into()),
+        model: Some("jev-latest".into()),
         api_key: None,
     }
 }
@@ -5207,7 +5198,7 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                     provider
                         .map(|provider| format!(
                             "{:?} / {}",
-                            provider.provider,
+                            provider.protocol,
                             provider.model.as_deref().unwrap_or("官方默认")
                         ))
                         .unwrap_or_else(|| "未配置 Provider".into())
@@ -5233,10 +5224,10 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
             vec![
                 format!("启用智能判断      {}", yes_no(intelligence.enabled)),
                 format!(
-                    "Provider 类型     {:?}",
+                    "协议类型     {:?}",
                     provider
-                        .map(|p| p.provider)
-                        .unwrap_or(IntelligenceProviderKind::Typesafe)
+                        .map(|p| p.protocol)
+                        .unwrap_or(IntelligenceProtocol::SystemOne)
                 ),
                 format!(
                     "Endpoint          {}",
