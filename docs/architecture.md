@@ -40,7 +40,7 @@ hyperhub run app.exe args...
 
 申请 Session 时先走自动鉴权：Serve 从 Named Pipe 获取真实客户端 PID，沿父进程链查找并核验有效 Session 成员，命中后直接创建新的 pending Session。没有有效父 Session 时才返回 challenge，由 CLI 读取主密码并完成 HMAC-SHA256 证明。客户端自报的 PID 不参与自动授权判断。
 
-唯一运行配置为 `~/.hyperhub/config.bin`。内存仍使用 TOML `Config` 模型，磁盘使用 Argon2id、HKDF-SHA256 和 XChaCha20-Poly1305 加密；TUI 直接编辑对象，外部 TOML/BIN 通过 `import`/`export` 命令导入或导出。
+每个实例的运行配置位于 `$HYPERHUB_HOME/config.bin`；未设置时默认使用 `~/.hyperhub/config.bin`。控制端点由同一个 HyperHub Home 派生，因此多个实例可并行运行。内存使用 `Config` 模型，磁盘使用 Argon2id、HKDF-SHA256 和 XChaCha20-Poly1305 加密；TUI 直接编辑对象，外部 TOML/BIN 通过 `import`/`export` 命令导入或导出。
 
 启动目标时：
 

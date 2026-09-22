@@ -1160,20 +1160,23 @@ impl SocksService {
 }
 
 async fn bind_listener(address: SocketAddr) -> io::Result<TcpListener> {
-    match TcpListener::bind(address).await {
-        Ok(listener) => Ok(listener),
-        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-            let fallback = SocketAddr::new(address.ip(), 0);
-            TcpListener::bind(fallback).await.map_err(|fallback_error| {
-                io::Error::new(
-                    fallback_error.kind(),
-                    format!(
-                        "configured SOCKS5 listener {address} is occupied and fallback listener {fallback} failed: {fallback_error}"
-                    ),
-                )
-            })
+    let mut candidate = address;
+    loop {
+        match TcpListener::bind(candidate).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                let Some(port) = candidate.port().checked_add(1) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        format!(
+                            "configured SOCKS5 listener {address} is occupied and no higher port is available"
+                        ),
+                    ));
+                };
+                candidate.set_port(port);
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -1368,9 +1371,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn occupied_listener_falls_back_to_a_free_loopback_port() {
-        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let occupied_address = occupied.local_addr().unwrap();
+    async fn occupied_listener_uses_the_next_free_loopback_port() {
+        let (occupied, occupied_next, occupied_address) = loop {
+            let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = occupied.local_addr().unwrap();
+            let Some(next_port) = address.port().checked_add(1) else {
+                continue;
+            };
+            match TcpListener::bind(SocketAddr::new(address.ip(), next_port)).await {
+                Ok(occupied_next) => break (occupied, occupied_next, address),
+                Err(_) => continue,
+            }
+        };
         let mut config = Config::default();
         config.listener.socks_listen = occupied_address.to_string();
         let service = SocksService::with_environment(
@@ -1382,9 +1394,10 @@ mod tests {
         let controller = service.listener_controller();
         let actual = service.prepare_listener().await.unwrap();
         assert_eq!(actual.ip(), occupied_address.ip());
-        assert_ne!(actual.port(), occupied_address.port());
+        assert!(actual.port() > occupied_address.port() + 1);
         assert_eq!(controller.address(), Some(actual));
         drop(occupied);
+        drop(occupied_next);
 
         let task = tokio::spawn(service.run());
         TcpStream::connect(actual).await.unwrap();

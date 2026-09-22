@@ -118,7 +118,12 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
         if let Some(status) = running {
             if status.pid == pid {
                 println!(
-                    "HyperHub serve started (pid {pid})\nlog: {}",
+                    "HyperHub serve started (pid {pid})\nhome: {}\ncontrol: {}\nsocks: {}\nlog: {}",
+                    hyperhub_core::config_store::hyperhub_home()
+                        .map_err(|error| error.to_string())?
+                        .display(),
+                    discovery_control_endpoint(),
+                    status.socks_address,
                     log_path.display()
                 );
                 return Ok(0);
@@ -190,10 +195,23 @@ pub fn restart(config: StartConfig) -> Result<i32, String> {
 
 pub fn status(json: bool) -> Result<i32, String> {
     let Some(status) = query_status()? else {
+        let home =
+            hyperhub_core::config_store::hyperhub_home().map_err(|error| error.to_string())?;
+        let control_endpoint = discovery_control_endpoint();
         if json {
-            println!("{{\"state\":\"stopped\"}}");
+            let output = serde_json::json!({
+                "state": "stopped",
+                "hyperhub_home": home,
+                "control_endpoint": control_endpoint,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
+            );
         } else {
             println!("HyperHub serve is stopped");
+            println!("home: {}", home.display());
+            println!("control: {control_endpoint}");
         }
         return Ok(3);
     };
@@ -201,6 +219,9 @@ pub fn status(json: bool) -> Result<i32, String> {
         let output = serde_json::json!({
             "state": "running",
             "pid": status.pid,
+            "socks_address": status.socks_address,
+            "hyperhub_home": hyperhub_core::config_store::hyperhub_home().map_err(|error| error.to_string())?,
+            "control_endpoint": discovery_control_endpoint(),
             "started_at_ms": status.started_at_ms,
             "generated_at_ms": status.generated_at_ms,
             "sessions": status.sessions,
@@ -213,6 +234,14 @@ pub fn status(json: bool) -> Result<i32, String> {
     } else {
         println!("HyperHub serve is running");
         println!("pid: {}", status.pid);
+        println!(
+            "home: {}",
+            hyperhub_core::config_store::hyperhub_home()
+                .map_err(|error| error.to_string())?
+                .display()
+        );
+        println!("control: {}", discovery_control_endpoint());
+        println!("socks: {}", status.socks_address);
         println!("sessions: {}", status.sessions.len());
         let managed = status
             .sessions
@@ -280,6 +309,7 @@ pub fn logs(config: LogsConfig) -> Result<i32, String> {
 
 struct ServeStatus {
     pid: u32,
+    socks_address: String,
     started_at_ms: u64,
     generated_at_ms: u64,
     sessions: Vec<hyperhub_core::session::SessionSnapshot>,
@@ -309,12 +339,14 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
     match response {
         ControlResponse::Status {
             pid,
+            socks_address,
             started_at_ms,
             generated_at_ms,
             sessions,
             connections,
         } => Ok(Some(ServeStatus {
             pid,
+            socks_address,
             started_at_ms,
             generated_at_ms,
             sessions,

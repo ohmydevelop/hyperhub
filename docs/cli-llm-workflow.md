@@ -14,6 +14,8 @@ Needle 3 权重与平台 runner 都嵌入 HyperHub 二进制；运行时关闭 t
 
 LLM 通过 HyperHub CLI 内嵌并安装的 Agent Skill 调用普通 CLI；Shell 负责组合能力，HyperHub CLI 负责配置语义、加密存储、运行时热更新和可恢复的人工审批队列。
 
+如需操作非默认实例，先设置绝对路径 `HYPERHUB_HOME`，并确保同一任务中的 `show`、`config patch`、`approve`、`start`、`run` 与 `stop` 均继承相同值。控制端点和所有可变状态会由该目录自动隔离。
+
 `hyperhub start` 和 `hyperhub restart` 会把 Skill 安装到用户级通用目录：
 
 ```text

@@ -77,27 +77,43 @@ hyperhub.exe run cmd    # Windows
 
 ### 隔离运行实例
 
-HyperHub 默认使用当前用户的 `HOME` 和用户级控制 socket。需要运行完全独立的测试实例时，同时设置独立的 `HOME`、`XDG_RUNTIME_DIR` 和 `HYPERHUB_CONTROL_ENDPOINT`：
+像 `CODEX_HOME` 一样，设置 `HYPERHUB_HOME`（推荐绝对路径） 即可选择独立实例，无需修改系统 `HOME`：
 
 ```bash
 sandbox=$(mktemp -d)
-mkdir -p "$sandbox/home" "$sandbox/runtime"
-chmod 700 "$sandbox/runtime"
+export HYPERHUB_HOME="$sandbox/hyperhub"
 printf '%s\n' 'local-test-password' > "$sandbox/password"
 chmod 600 "$sandbox/password"
 
-HOME="$sandbox/home" \
-XDG_RUNTIME_DIR="$sandbox/runtime" \
-HYPERHUB_CONTROL_ENDPOINT="$sandbox/runtime/hyperhub-control.sock" \
-  ./target/release/hyperhub start --password-file "$sandbox/password"
-
-HOME="$sandbox/home" \
-XDG_RUNTIME_DIR="$sandbox/runtime" \
-HYPERHUB_CONTROL_ENDPOINT="$sandbox/runtime/hyperhub-control.sock" \
-  ./target/release/hyperhub status --json
+./target/release/hyperhub start --password-file "$sandbox/password"
+./target/release/hyperhub status --json
+./target/release/hyperhub show
 ```
 
-该实例的配置、脱敏视图、日志、Skill 安装目录和控制 socket 都与默认用户实例分离。结束后使用同样的环境变量运行 `hyperhub stop`，再删除临时目录。
+PowerShell：
+
+```powershell
+$sandbox = Join-Path $env:TEMP "hyperhub-$([guid]::NewGuid())"
+$env:HYPERHUB_HOME = Join-Path $sandbox 'hyperhub'
+New-Item -ItemType Directory -Force $sandbox | Out-Null
+Set-Content -NoNewline (Join-Path $sandbox 'password') 'local-test-password'
+
+.\target\release\hyperhub.exe start --password-file (Join-Path $sandbox 'password')
+.\target\release\hyperhub.exe status --json
+```
+
+每个 `HYPERHUB_HOME` 独立保存配置、审批队列、脱敏视图、日志、审计数据、证书、Chat 运行资产和控制端点。`status --json` 会显示实例的 `hyperhub_home`、`control_endpoint` 和实际 `socks_address`。
+
+SOCKS5 默认从配置端口 `18444` 开始监听；端口被占用时依次尝试 `18445`、`18446`，直到找到可用端口。`hyperhub run` 通过该实例的本地控制端点建立 Session 并取得实际端口，因此不依赖固定端口。
+
+结束时保持同一个 `HYPERHUB_HOME`：
+
+```bash
+./target/release/hyperhub stop
+unset HYPERHUB_HOME
+```
+
+`HYPERHUB_CONTROL_ENDPOINT` 仅用于需要手工指定控制端点的高级场景，并优先于 `HYPERHUB_HOME` 派生值。Agent Skill 仍安装在 Agent 通用 Skill 目录，因为它是无敏感信息的共享 CLI 操作说明，不属于某个运行实例。
 
 ### Agent Skill 自动安装
 

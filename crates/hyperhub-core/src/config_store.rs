@@ -103,12 +103,43 @@ pub enum ExportFormat {
     Toml,
 }
 
+pub const HYPERHUB_HOME_ENV: &str = "HYPERHUB_HOME";
+
+pub fn hyperhub_home() -> Result<PathBuf, StoreError> {
+    let current = std::env::current_dir().map_err(|source| StoreError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    resolve_hyperhub_home(
+        std::env::var_os(HYPERHUB_HOME_ENV),
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }),
+        &current,
+    )
+}
+
+fn resolve_hyperhub_home(
+    configured: Option<std::ffi::OsString>,
+    user_home: Option<std::ffi::OsString>,
+    current: &Path,
+) -> Result<PathBuf, StoreError> {
+    if let Some(value) = configured.filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(value);
+        return Ok(if path.is_absolute() {
+            path
+        } else {
+            current.join(path)
+        });
+    }
+    let home = user_home.ok_or_else(|| {
+        StoreError::Format(format!(
+            "cannot determine HyperHub home; set {HYPERHUB_HOME_ENV} or the user home directory"
+        ))
+    })?;
+    Ok(PathBuf::from(home).join(".hyperhub"))
+}
+
 pub fn default_config_path() -> Result<PathBuf, StoreError> {
-    let home =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok_or_else(|| {
-            StoreError::Format("cannot determine the current user's home directory".into())
-        })?;
-    Ok(PathBuf::from(home).join(".hyperhub").join("config.bin"))
+    Ok(hyperhub_home()?.join("config.bin"))
 }
 
 pub fn redacted_config_path(config_path: &Path) -> PathBuf {
@@ -878,6 +909,47 @@ pub fn reconcile_root_certificates<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hyperhub_home_prefers_an_explicit_path() {
+        let explicit = if cfg!(windows) {
+            PathBuf::from(r"C:\isolated\hyperhub")
+        } else {
+            PathBuf::from("/isolated/hyperhub")
+        };
+        let user = if cfg!(windows) {
+            std::ffi::OsString::from(r"C:\Users\user")
+        } else {
+            std::ffi::OsString::from("/home/user")
+        };
+        let current = if cfg!(windows) {
+            PathBuf::from(r"C:\work")
+        } else {
+            PathBuf::from("/work")
+        };
+        assert_eq!(
+            resolve_hyperhub_home(
+                Some(explicit.clone().into_os_string()),
+                Some(user.clone()),
+                &current
+            )
+            .unwrap(),
+            explicit
+        );
+        assert_eq!(
+            resolve_hyperhub_home(Some("state/hyperhub".into()), Some(user.clone()), &current)
+                .unwrap(),
+            current.join("state/hyperhub")
+        );
+        assert_eq!(
+            resolve_hyperhub_home(None, Some(user), &current).unwrap(),
+            if cfg!(windows) {
+                PathBuf::from(r"C:\Users\user\.hyperhub")
+            } else {
+                PathBuf::from("/home/user/.hyperhub")
+            }
+        );
+    }
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

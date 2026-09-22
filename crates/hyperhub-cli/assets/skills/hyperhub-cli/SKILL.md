@@ -17,6 +17,7 @@ description: Use when an Agent needs to inspect, plan, submit, or verify HyperHu
    ```
 
 3. 不向用户索取真实 token、key 或密码，也不把敏感值写入回复、日志或普通临时文件。
+4. 用户指定 `HYPERHUB_HOME` 时，后续 `show`、`config patch`、`approve`、`start`、`status`、`run` 和 `stop` 必须在同一个环境变量下执行；不同值代表完全独立的 HyperHub 实例。
 
 ## 读取配置
 

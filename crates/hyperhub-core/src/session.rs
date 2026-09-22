@@ -1459,6 +1459,7 @@ pub enum ControlResponse {
     },
     Status {
         pid: u32,
+        socks_address: String,
         started_at_ms: u64,
         generated_at_ms: u64,
         sessions: Vec<SessionSnapshot>,

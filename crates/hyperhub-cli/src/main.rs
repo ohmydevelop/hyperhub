@@ -1197,6 +1197,10 @@ target execution:
 diagnostics:
   hyperhub doctor [--target exe]        show backend and target diagnostics
 
+environment:
+  HYPERHUB_HOME=<dir>          select an isolated configuration and Serve instance
+  HYPERHUB_CONTROL_ENDPOINT=<endpoint>  override the derived local control endpoint
+
 Use `hyperhub skill` when an Agent cannot discover the installed agents/skills directory."
 }
 
@@ -1218,6 +1222,7 @@ mod tests {
         assert!(help.contains("server management:"));
         assert!(help.contains("target execution:"));
         assert!(help.contains("diagnostics:"));
+        assert!(help.contains("HYPERHUB_HOME=<dir>"));
         assert!(help.contains("hyperhub skill"));
         assert!(help.contains("hyperhub show"));
         let configuration = help.find("configuration and Agent guidance:").unwrap();

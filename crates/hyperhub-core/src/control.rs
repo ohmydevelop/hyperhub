@@ -34,56 +34,39 @@ pub fn discovery_control_endpoint() -> String {
     if let Some(endpoint) = configured_control_endpoint() {
         return endpoint;
     }
-    let suffix =
-        crate::config_store::current_user_sid_string().unwrap_or_else(|_| "unknown".into());
-    format!("{DISCOVERY_CONTROL_ENDPOINT}-{suffix}")
+    let sid = crate::config_store::current_user_sid_string().unwrap_or_else(|_| "unknown".into());
+    let home = crate::config_store::hyperhub_home()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    windows_control_endpoint(&sid, &home)
 }
-#[cfg(target_os = "linux")]
+
+#[cfg(windows)]
+fn windows_control_endpoint(sid: &str, home: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{sid}\0{home}").as_bytes());
+    let suffix = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(r"\\.\pipe\hyperhub-{suffix}")
+}
+
+#[cfg(unix)]
 pub fn discovery_control_endpoint() -> String {
     if let Some(endpoint) = configured_control_endpoint() {
         return endpoint;
     }
-    use std::os::unix::fs::MetadataExt;
-
-    let uid = linux_effective_uid().unwrap_or(0);
-    let runtime = std::path::PathBuf::from(format!("/run/user/{uid}"));
-    let runtime_is_private = runtime.metadata().is_ok_and(|metadata| {
-        metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o077 == 0
-    });
-    control_endpoint_for_uid(uid, runtime_is_private)
+    crate::config_store::hyperhub_home()
+        .map(|home| control_endpoint_for_home(&home))
+        .unwrap_or_else(|_| std::path::PathBuf::from(DISCOVERY_CONTROL_ENDPOINT))
         .display()
         .to_string()
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-pub fn discovery_control_endpoint() -> String {
-    if let Some(endpoint) = configured_control_endpoint() {
-        return endpoint;
-    }
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            std::path::PathBuf::from(value)
-                .join("hyperhub")
-                .join("control.sock")
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from(DISCOVERY_CONTROL_ENDPOINT))
-        .display()
-        .to_string()
-}
-
-#[cfg(target_os = "linux")]
-fn control_endpoint_for_uid(uid: u32, runtime_available: bool) -> std::path::PathBuf {
-    let base = if runtime_available {
-        std::path::PathBuf::from(format!("/run/user/{uid}"))
-    } else {
-        std::path::PathBuf::from(format!("/tmp/hyperhub-{uid}"))
-    };
-    if runtime_available {
-        base.join("hyperhub").join("control.sock")
-    } else {
-        base.join("control.sock")
-    }
+#[cfg(unix)]
+fn control_endpoint_for_home(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("runtime").join("control.sock")
 }
 
 #[cfg(target_os = "linux")]
@@ -1155,6 +1138,7 @@ impl ControlService {
             }
             ControlRequest::GetStatus => ControlResponse::Status {
                 pid: std::process::id(),
+                socks_address: self.socks_address(&self.runtime.snapshot()),
                 started_at_ms: self.started_at_ms,
                 generated_at_ms: unix_timestamp_ms(),
                 sessions: self.sessions.snapshot(),
@@ -1957,27 +1941,23 @@ pub async fn control_request(
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
-    fn linux_control_endpoint_is_stable_per_uid() {
+    fn unix_control_endpoint_is_scoped_to_hyperhub_home() {
         assert_eq!(
-            control_endpoint_for_uid(1000, true),
-            std::path::PathBuf::from("/run/user/1000/hyperhub/control.sock")
-        );
-        assert_eq!(
-            control_endpoint_for_uid(1000, false),
-            std::path::PathBuf::from("/tmp/hyperhub-1000/control.sock")
+            control_endpoint_for_home(std::path::Path::new("/isolated/hyperhub")),
+            std::path::PathBuf::from("/isolated/hyperhub/runtime/control.sock")
         );
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_control_endpoint_is_scoped_to_the_current_user() {
-        let sid = crate::config_store::current_user_sid_string().unwrap();
-        assert_eq!(
-            discovery_control_endpoint(),
-            format!("{DISCOVERY_CONTROL_ENDPOINT}-{sid}")
-        );
+    fn windows_control_endpoint_is_scoped_to_user_and_hyperhub_home() {
+        let first = windows_control_endpoint("S-1-test", r"C:\one");
+        let second = windows_control_endpoint("S-1-test", r"C:\two");
+        assert!(first.starts_with(r"\\.\pipe\hyperhub-"));
+        assert_ne!(first, second);
+        assert_eq!(first, windows_control_endpoint("S-1-test", r"C:\one"));
     }
 
     #[cfg(target_os = "linux")]
