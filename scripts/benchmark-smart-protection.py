@@ -341,27 +341,29 @@ def verify_hyperhub_smart_protection(config: Dict[str, Any]) -> None:
         for profile in config.get("protections", [])
         if profile.get("enabled", True)
     }
-    process_config = config.get("sandbox", {}).get("process", {})
-    bindings = [
-        rule
-        for rule in process_config.get("rules", [])
-        if rule.get("enabled", True) and rule.get("protection") in profiles
-    ]
-    if not process_config.get("enabled") or not bindings:
-        raise RuntimeError(
-            "HyperHub process sandbox has no enabled rule bound to an enabled protection profile"
-        )
-    active = []
-    for rule in bindings:
-        profile = profiles[rule["protection"]]
+    if not profiles:
+        raise RuntimeError("HyperHub has no enabled smart protection profile")
+    for profile_id, profile in profiles.items():
         intelligence = profile.get("intelligence", {})
-        provider = intelligence.get("provider")
-        if intelligence.get("enabled") and isinstance(provider, dict):
-            active.append((rule, profile))
-    if not active:
-        raise RuntimeError(
-            "HyperHub protection binding exists, but intelligence.enabled or provider is not configured"
-        )
+        if intelligence.get("enabled") and not isinstance(intelligence.get("provider"), dict):
+            raise RuntimeError(f"protection {profile_id} has intelligence enabled without provider")
+
+    process = config.get("sandbox", {}).get("process", {})
+    file_config = config.get("sandbox", {}).get("file", {})
+    firewall = config.get("firewall", {})
+
+    def require_binding(rules: List[Dict[str, Any]], label: str) -> None:
+        for rule in rules:
+            if rule.get("enabled", True) and rule.get("action") == "smart":
+                if rule.get("protection") in profiles:
+                    return
+        raise RuntimeError(f"HyperHub {label} has no enabled smart rule bound to a profile")
+
+    require_binding(process.get("rules", []), "process sandbox")
+    require_binding(file_config.get("rules", []), "file sandbox")
+    require_binding(firewall.get("rules", []), "firewall")
+    if not process.get("enabled") or not file_config.get("enabled") or not firewall.get("enabled"):
+        raise RuntimeError("process, file, and firewall sandboxes must all be enabled")
 
 
 def hyperhub_audit_path(binary: str) -> Path:
@@ -413,6 +415,15 @@ def run_hyperhub_case(
     argv = [str(item) for item in case["command"].get("argv", [])]
     redacted = local["redacted_argv"]
     started = time.perf_counter_ns()
+    kind = case.get("kind", "process")
+    if kind == "file":
+        executable_wrapper = "/bin/cat"
+    elif kind == "network":
+        executable_wrapper = "/usr/bin/python3"
+    else:
+        executable_wrapper = "/bin/true"
+    shutil.copy2(executable_wrapper, wrapper)
+    wrapper.chmod(0o700)
     if case.get("launch") == "child":
         command = [
             binary,
@@ -462,10 +473,9 @@ def run_hyperhub_case(
         time.sleep(0.02)
     smart_events = [event for event in events if event.get("event") == "smart_protection_decision"]
     sandbox_events = [
-        event
-        for event in events
+        event for event in events
         if event.get("event") in ("sandbox_allowed", "sandbox_denied")
-        and event.get("attributes", {}).get("kind") == "process"
+        and event.get("attributes", {}).get("kind") == kind
     ]
     smart = smart_events[-1] if smart_events else None
     sandbox = sandbox_events[-1] if sandbox_events else None
@@ -486,11 +496,11 @@ def run_hyperhub_case(
         and smart.get("attributes", {}).get("provider_queried", True)
     )
     full_chain = (
-        sandbox is not None
-        and sandbox.get("attributes", {}).get("rule_id") is not None
-        and (
-            local["local_deny"]
-            or smart is not None
+        (smart is not None and kind == "network")
+        or (
+            sandbox is not None
+            and sandbox.get("attributes", {}).get("rule_id") is not None
+            and (local["local_deny"] or smart is not None)
         )
     )
     checks = {
@@ -510,6 +520,7 @@ def run_hyperhub_case(
             "event": "case",
             "case": case["id"],
             "category": case["category"],
+            "kind": kind,
             "mode": case.get("mode", "enforce"),
             "transport": "hyperhub",
             "sanitization": local,
@@ -647,9 +658,7 @@ def main() -> int:
             audit_path = hyperhub_audit_path(str(binary))
             audit_offset = audit_path.stat().st_size
             with tempfile.TemporaryDirectory(prefix="hyperhub-smart-protection-") as temporary:
-                wrapper = Path(temporary) / "curl"
-                shutil.copy2("/bin/true", wrapper)
-                wrapper.chmod(0o700)
+                wrapper = Path(temporary) / "smart-action"
                 for case in cases:
                     record, audit_offset = run_hyperhub_case(
                         case,

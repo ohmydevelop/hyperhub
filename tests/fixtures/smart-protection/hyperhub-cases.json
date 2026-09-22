@@ -123,5 +123,46 @@
       "provider_queried": true
     },
     "launch": "child"
+  },
+  {
+    "id": "hyperhub_file_private_key_read",
+    "kind": "file",
+    "category": "file_exfiltration",
+    "mode": "enforce",
+    "command": {
+      "executable": "cat",
+      "argv": [
+        "cat",
+        "/tmp/hh-fixture/.ssh/id_rsa"
+      ]
+    },
+    "context": {},
+    "expected": {
+      "final_action": "deny",
+      "would_deny": true,
+      "local_deny": false,
+      "provider_queried": true
+    }
+  },
+  {
+    "id": "hyperhub_network_smart_connect",
+    "kind": "network",
+    "category": "network_egress",
+    "mode": "enforce",
+    "command": {
+      "executable": "python3",
+      "argv": [
+        "python3",
+        "-c",
+        "import socket; socket.create_connection(('127.0.0.1', 9), 1)"
+      ]
+    },
+    "context": {},
+    "expected": {
+      "final_action": "deny",
+      "would_deny": true,
+      "local_deny": false,
+      "provider_queried": true
+    }
   }
 ]

@@ -92,3 +92,22 @@ Gum Agent 与 Linux ptrace supervisor 都会保留完整参数结构并脱敏敏
 高置信度本地命中短路模型，其余受保护动作通过控制通道请求智能判断。网关写入
 `smart_protection_decision`，deny 会在 `execve`/`execveat` 返回前阻断。默认规则不设置
 `protection`，不会改变既有 sandbox 行为。
+
+### 文件与网络沙盒完整链路
+
+HyperHub transport benchmark 现在额外覆盖：
+
+- `hyperhub_file_private_key_read`：文件沙盒 `read` 智能动作；
+- `hyperhub_network_smart_connect`：Firewall `connect` 智能动作；
+- 根进程、子进程、文件和网络四类事件均检查 Jev 审计和最终动作。
+
+完整链路执行前，配置必须存在并启用：
+
+```text
+sandbox.file.enabled = true
+sandbox.file.rules[*].action = smart
+firewall.enabled = true
+firewall.rules[*].action = smart
+```
+
+配置不满足时 benchmark 会直接失败并说明缺少的绑定，不会误报为通过。
