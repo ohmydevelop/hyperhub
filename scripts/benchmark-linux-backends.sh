@@ -771,6 +771,7 @@ PYCODE
 cat >> "$sandbox_config" <<TOML
 
 [[sandbox.file.rules]]
+enabled = true
 id = "deny-read"
 priority = 100
 action = "deny"
@@ -778,6 +779,7 @@ operations = ["read"]
 patterns = [{ pattern = "^$temporary/intents/read$" }]
 
 [[sandbox.file.rules]]
+enabled = true
 id = "deny-write"
 priority = 100
 action = "deny"
@@ -785,6 +787,7 @@ operations = ["write"]
 patterns = [{ pattern = "^$temporary/intents/write$" }]
 
 [[sandbox.file.rules]]
+enabled = true
 id = "deny-create"
 priority = 100
 action = "deny"
@@ -792,6 +795,7 @@ operations = ["create"]
 patterns = [{ pattern = "^$temporary/intents/create$" }]
 
 [[sandbox.file.rules]]
+enabled = true
 id = "deny-delete"
 priority = 100
 action = "deny"
@@ -799,6 +803,7 @@ operations = ["delete"]
 patterns = [{ pattern = "^$temporary/intents/delete$" }]
 
 [[sandbox.file.rules]]
+enabled = true
 id = "deny-rename-target"
 priority = 100
 action = "deny"
@@ -806,12 +811,14 @@ operations = ["rename"]
 patterns = [{ pattern = "^$temporary/intents/rename-new$" }]
 
 [[sandbox.process.rules]]
+enabled = true
 id = "deny-true"
 priority = 100
 action = "deny"
 patterns = [{ executable = ".*/true$", command_line = "" }]
 
 [[sandbox.process.rules]]
+enabled = true
 id = "deny-fork"
 priority = 100
 action = "deny"
