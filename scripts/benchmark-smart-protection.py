@@ -11,9 +11,11 @@ import argparse
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -329,6 +331,219 @@ def run_case(
     }
 
 
+def hyperhub_show(binary: str) -> Dict[str, Any]:
+    process = subprocess.run(
+        [binary, "show"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(f"hyperhub show failed: {process.stderr.strip()}")
+    return json.loads(process.stdout)
+
+
+def verify_hyperhub_smart_protection(config: Dict[str, Any]) -> None:
+    profiles = {
+        profile.get("id"): profile
+        for profile in config.get("protections", [])
+        if profile.get("enabled", True)
+    }
+    process_config = config.get("sandbox", {}).get("process", {})
+    bindings = [
+        rule
+        for rule in process_config.get("rules", [])
+        if rule.get("enabled", True) and rule.get("protection") in profiles
+    ]
+    if not process_config.get("enabled") or not bindings:
+        raise RuntimeError(
+            "HyperHub process sandbox has no enabled rule bound to an enabled protection profile"
+        )
+    active = []
+    for rule in bindings:
+        profile = profiles[rule["protection"]]
+        intelligence = profile.get("intelligence", {})
+        providers = [
+            provider
+            for provider in intelligence.get("providers", [])
+            if provider.get("enabled", True)
+        ]
+        if intelligence.get("enabled") and providers:
+            active.append((rule, profile))
+    if not active:
+        raise RuntimeError(
+            "HyperHub protection binding exists, but intelligence.enabled or all providers are disabled"
+        )
+
+
+def hyperhub_audit_path(binary: str) -> Path:
+    process = subprocess.run(
+        [binary, "logs", "--lines", "200"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=10,
+    )
+    matches = re.findall(r"^HyperHub audit log (.+)$", process.stdout, re.MULTILINE)
+    if not matches:
+        raise RuntimeError("cannot locate HyperHub audit JSONL path from hyperhub logs")
+    path = Path(matches[-1]).expanduser()
+    if not path.is_file():
+        raise RuntimeError(f"HyperHub audit JSONL does not exist: {path}")
+    return path
+
+
+def read_appended_events(path: Path, offset: int) -> Tuple[List[Dict[str, Any]], int]:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(offset)
+        text = handle.read()
+        end = handle.tell()
+    events = []
+    for line in text.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+    return events, end
+
+
+def run_hyperhub_case(
+    case: Dict[str, Any],
+    binary: str,
+    password_file: Path,
+    audit_path: Path,
+    audit_offset: int,
+    wrapper: Path,
+    timeout_ms: int,
+) -> Tuple[Dict[str, Any], int]:
+    local_started = time.perf_counter_ns()
+    local = prefilter(case)
+    local_ms = (time.perf_counter_ns() - local_started) / 1_000_000
+    argv = [str(item) for item in case["command"].get("argv", [])]
+    redacted = redact_argv(argv, case.get("secrets", []))
+    started = time.perf_counter_ns()
+    command = [
+        binary,
+        "run",
+        "--password-file",
+        str(password_file),
+        "--",
+        "/bin/sh",
+        "-c",
+        'exec "$@"',
+        "hyperhub-benchmark",
+        str(wrapper),
+        *argv,
+    ]
+    run_error: Optional[str] = None
+    try:
+        process = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=max(5.0, timeout_ms / 1000.0 + 5.0),
+        )
+        returncode = process.returncode
+    except subprocess.TimeoutExpired:
+        returncode = 124
+        run_error = "hyperhub_run_timeout"
+    elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+    # Audit writes are synchronous, but allow a short grace period for filesystem visibility.
+    events: List[Dict[str, Any]] = []
+    new_offset = audit_offset
+    for _ in range(10):
+        events, new_offset = read_appended_events(audit_path, audit_offset)
+        if events or not local["should_query_gateway"]:
+            break
+        time.sleep(0.02)
+    smart_events = [event for event in events if event.get("event") == "smart_protection_decision"]
+    sandbox_events = [
+        event
+        for event in events
+        if event.get("event") in ("sandbox_allowed", "sandbox_denied")
+        and event.get("attributes", {}).get("kind") == "process"
+    ]
+    smart = smart_events[-1] if smart_events else None
+    sandbox = sandbox_events[-1] if sandbox_events else None
+    smart_action = smart.get("attributes", {}).get("action") if smart else None
+    if smart_action == "deny":
+        final_action = "deny"
+    elif smart_action == "pass":
+        final_action = "allow"
+    else:
+        final_action = "allow" if returncode == 0 else "deny"
+    expected = case["expected"]
+    appended_text = "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
+    privacy_leaks = [
+        secret for secret in case.get("secrets", []) if secret and secret in appended_text
+    ]
+    queried = smart is not None
+    full_chain = (
+        sandbox is not None
+        and sandbox.get("attributes", {}).get("rule_id") is not None
+        and (
+            not local["should_query_gateway"]
+            or smart is not None
+        )
+    )
+    checks = {
+        "hard_deny": local["hard_deny"] == expected["hard_deny"],
+        "should_query_gateway": queried == expected["should_query_gateway"],
+        "final_action": final_action == expected["final_action"],
+        "would_deny": (final_action == "deny")
+        == expected.get("would_deny", expected["final_action"] == "deny"),
+        "privacy": not privacy_leaks,
+        "full_chain": full_chain,
+    }
+    provider_error = run_error
+    if smart is not None and smart.get("attributes", {}).get("reason") == "provider_error":
+        provider_error = "provider_error"
+    return (
+        {
+            "event": "case",
+            "case": case["id"],
+            "category": case["category"],
+            "mode": case.get("mode", "enforce"),
+            "transport": "hyperhub",
+            "prefilter": local,
+            "redacted_argv": redacted,
+            "provider_queried": queried,
+            "provider_error": provider_error,
+            "provider_denied": smart_action == "deny",
+            "low_confidence": bool(
+                smart and smart.get("attributes", {}).get("reason") == "provider_low_confidence"
+            ),
+            "action": final_action,
+            "would_deny": final_action == "deny",
+            "latency_ms": {
+                "local": round(local_ms, 4),
+                "provider": round(elapsed_ms, 4) if queried else None,
+                "end_to_end": round(elapsed_ms, 4),
+            },
+            "privacy_leaks": privacy_leaks,
+            "hyperhub": {
+                "returncode": returncode,
+                "smart_event": smart is not None,
+                "sandbox_event": sandbox is not None,
+                "rule_id": None if sandbox is None else sandbox.get("attributes", {}).get("rule_id"),
+                "decision_source": None
+                if sandbox is None
+                else sandbox.get("attributes", {}).get("decision_source"),
+            },
+            "checks": checks,
+            "pass": all(checks.values()),
+        },
+        new_offset,
+    )
+
+
 def percentile(values: List[float], fraction: float) -> float:
     if not values:
         return 0.0
@@ -372,7 +587,8 @@ def write_report(output_dir: Path, records: List[Dict[str, Any]], summary: Dict[
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("mock", "jev", "laya"), default="mock")
-    parser.add_argument("--cases", default=str(Path(__file__).resolve().parents[1] / "tests/fixtures/smart-protection/cases.json"))
+    parser.add_argument("--transport", choices=("direct", "hyperhub"), default="direct")
+    parser.add_argument("--cases")
     parser.add_argument("--output", default="target/benchmarks/smart-protection")
     parser.add_argument("--endpoint", default=os.getenv("JEV_BASE_URL"))
     parser.add_argument("--api-key", default=os.getenv("JEV_API_KEY") or os.getenv("TYPESAFE_API_KEY"))
@@ -380,13 +596,19 @@ def main() -> int:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--hyperhub-bin", default=os.getenv("HYPERHUB_BIN", "hyperhub"))
+    parser.add_argument("--password-file", type=Path)
     args = parser.parse_args()
     if args.timeout_ms < 1:
         parser.error("--timeout-ms must be positive")
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
-    cases = load_cases(Path(args.cases))
+    default_fixture = "hyperhub-cases.json" if args.transport == "hyperhub" else "cases.json"
+    cases_path = Path(args.cases) if args.cases else (
+        Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "smart-protection" / default_fixture
+    )
+    cases = load_cases(cases_path)
     if args.case:
         selected = set(args.case)
         cases = [case for case in cases if case["id"] in selected]
@@ -399,8 +621,8 @@ def main() -> int:
     try:
         if args.backend == "mock":
             mock_process, endpoint = start_mock_server()
-        elif args.backend == "jev" and not endpoint:
-            parser.error("--endpoint or JEV_BASE_URL is required for --backend jev")
+        elif args.backend == "jev" and args.transport == "direct" and not endpoint:
+            parser.error("--endpoint or JEV_BASE_URL is required for direct --backend jev")
         elif args.backend == "laya":
             try:
                 laya_agent = make_laya_agent(args.model, args.device)
@@ -409,8 +631,41 @@ def main() -> int:
                 return 2
 
         records = []
-        for case in cases:
-            records.append(run_case(case, args.backend, endpoint, args.api_key, laya_agent, args.timeout_ms))
+        if args.transport == "hyperhub":
+            if args.backend != "jev":
+                parser.error("--transport hyperhub currently requires --backend jev")
+            if args.password_file is None:
+                parser.error("--transport hyperhub requires --password-file")
+            if not args.password_file.is_file():
+                parser.error("--password-file does not exist")
+            binary = shutil.which(args.hyperhub_bin) or (
+                args.hyperhub_bin if Path(args.hyperhub_bin).is_file() else None
+            )
+            if binary is None:
+                parser.error("HyperHub binary was not found; use --hyperhub-bin")
+            verify_hyperhub_smart_protection(hyperhub_show(str(binary)))
+            audit_path = hyperhub_audit_path(str(binary))
+            audit_offset = audit_path.stat().st_size
+            with tempfile.TemporaryDirectory(prefix="hyperhub-smart-protection-") as temporary:
+                wrapper = Path(temporary) / "curl"
+                shutil.copy2("/bin/true", wrapper)
+                wrapper.chmod(0o700)
+                for case in cases:
+                    record, audit_offset = run_hyperhub_case(
+                        case,
+                        str(binary),
+                        args.password_file,
+                        audit_path,
+                        audit_offset,
+                        wrapper,
+                        args.timeout_ms,
+                    )
+                    records.append(record)
+        else:
+            for case in cases:
+                records.append(
+                    run_case(case, args.backend, endpoint, args.api_key, laya_agent, args.timeout_ms)
+                )
         local_values = [record["latency_ms"]["local"] for record in records]
         provider_values = [record["latency_ms"]["provider"] for record in records if record["latency_ms"]["provider"] is not None]
         healthy_provider_values = [
@@ -421,6 +676,7 @@ def main() -> int:
         failures = [record for record in records if not record["pass"]]
         summary = {
             "backend": args.backend,
+            "transport": args.transport,
             "cases": len(records),
             "passed": len(records) - len(failures),
             "failed": len(failures),
@@ -459,4 +715,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except RuntimeError as error:
+        print(f"benchmark setup failed: {error}", file=sys.stderr)
+        raise SystemExit(2)

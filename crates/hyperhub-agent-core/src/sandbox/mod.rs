@@ -157,10 +157,7 @@ pub(crate) fn file_allows(path: &str, op: FileSandboxOperation) -> bool {
 }
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn process_allows(exe: &str, cmd: &str) -> bool {
-    let Some(s) = process_sandbox_snapshot() else {
-        return true;
-    };
-    process_sandbox_decision(&s, exe, cmd).0 == SandboxAction::Pass
+    process_decision_with_protection(exe, cmd).0 == SandboxAction::Pass
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -239,6 +236,65 @@ pub(crate) fn process_sandbox_decision(
         return (rule.action, rule_id, "rule".into());
     }
     (snapshot.default_action, None, "default".into())
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn process_decision_with_protection(
+    executable: &str,
+    command_line: &str,
+) -> (SandboxAction, Option<String>, String) {
+    let Some(snapshot) = process_sandbox_snapshot() else {
+        return (SandboxAction::Pass, None, "disabled".into());
+    };
+    let (action, rule_id, source) = process_sandbox_decision(&snapshot, executable, command_line);
+    if action == SandboxAction::Deny {
+        return (action, rule_id, source);
+    }
+    let Some((matched_rule_id, protection_id)) =
+        process_protection_id(&snapshot, executable, command_line)
+    else {
+        return (action, rule_id, source);
+    };
+    let context = PrefilterContext::default();
+    let Some((_, prefilter)) = process_prefilter(&snapshot, executable, command_line, &context)
+    else {
+        return (action, Some(matched_rule_id), "protection".into());
+    };
+    if prefilter.hard_deny {
+        return (
+            SandboxAction::Deny,
+            Some(matched_rule_id),
+            "prefilter_hard_deny".into(),
+        );
+    }
+    if !prefilter.should_query_gateway {
+        return (action, Some(matched_rule_id), "prefilter_pass".into());
+    }
+    match query_prefilter_gateway(
+        &protection_id,
+        Some(&matched_rule_id),
+        "process_create",
+        executable,
+        &prefilter.redacted_argv,
+        &prefilter.features,
+        &context,
+    ) {
+        Ok(true) => (
+            SandboxAction::Deny,
+            Some(matched_rule_id),
+            "smart_protection".into(),
+        ),
+        Ok(false) => (
+            SandboxAction::Pass,
+            Some(matched_rule_id),
+            "smart_protection_pass".into(),
+        ),
+        Err(_) => (
+            snapshot.error_action,
+            Some(matched_rule_id),
+            "smart_protection_error".into(),
+        ),
+    }
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]

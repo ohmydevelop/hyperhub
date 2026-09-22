@@ -286,7 +286,7 @@ mod tests {
                 id: "deny-baidu".into(),
                 action: FirewallAction::Deny,
                 protection: None,
-                prefilter_policy: super::PrefilterPolicy::None,
+                prefilter_policy: crate::PrefilterPolicy::None,
                 endpoints: vec![FirewallEndpoint {
                     target: FirewallRuleTarget::Domain(FirewallDomainTarget {
                         host: "www.baidu.com".into(),
@@ -325,7 +325,7 @@ mod tests {
                 id: "deny-private".into(),
                 action: FirewallAction::Deny,
                 protection: None,
-                prefilter_policy: super::PrefilterPolicy::None,
+                prefilter_policy: crate::PrefilterPolicy::None,
                 endpoints: vec![FirewallEndpoint {
                     target: FirewallRuleTarget::Network("10.0.0.0/8".parse().unwrap()),
                     port: None,

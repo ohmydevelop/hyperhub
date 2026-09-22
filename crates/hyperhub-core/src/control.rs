@@ -3,7 +3,9 @@ use crate::config::Config;
 use crate::firewall::compile_snapshot as compile_firewall_snapshot;
 use crate::framing::{read_frame, write_frame};
 use crate::runtime::{RuntimeSnapshot, RuntimeState};
-use crate::sandbox::compile_snapshot as compile_sandbox_snapshot;
+use crate::sandbox::{
+    compile_runtime_snapshot, compile_snapshot as compile_sandbox_snapshot, decide_process_hook,
+};
 use crate::session::{
     unix_timestamp_after, unix_timestamp_ms, verify_config_update_proof, AgentFlags,
     ConnectionRegistry, ControlRequest, ControlResponse, SessionRegistry,
@@ -378,15 +380,47 @@ impl ControlService {
             ControlRequest::DecideProcessHook {
                 session_id,
                 token,
-                executable: _,
+                executable,
                 root: _,
             } => {
-                let _ = (&session_id, &token);
-                ControlResponse::ProcessHookDecision {
-                    hook: true,
-                    rule_id: None,
-                    source: "default".into(),
-                    version: runtime.updated_at_ms,
+                if !self.sessions.authenticate_member(
+                    &session_id,
+                    &token,
+                    peer_pid.unwrap_or_default(),
+                ) {
+                    ControlResponse::Error {
+                        message: "invalid process hook reporter".into(),
+                    }
+                } else {
+                    match compile_sandbox_snapshot(&runtime.config, runtime.updated_at_ms).and_then(
+                        |snapshot| {
+                            compile_runtime_snapshot(snapshot).map_err(|error| error.to_string())
+                        },
+                    ) {
+                        Ok(snapshot) => {
+                            let decision = snapshot
+                                .process
+                                .as_ref()
+                                .map(|process| decide_process_hook(process, &executable));
+                            let decision = decision.unwrap_or(crate::sandbox::SandboxDecision {
+                                action: crate::config::SandboxAction::Pass,
+                                rule_id: None,
+                                source: "default",
+                            });
+                            ControlResponse::ProcessHookDecision {
+                                hook: true,
+                                rule_id: decision.rule_id,
+                                source: decision.source.into(),
+                                version: runtime.updated_at_ms,
+                            }
+                        }
+                        Err(_) => ControlResponse::ProcessHookDecision {
+                            hook: true,
+                            rule_id: None,
+                            source: "fallback".into(),
+                            version: runtime.updated_at_ms,
+                        },
+                    }
                 }
             }
             ControlRequest::ActivateSession {
@@ -1118,11 +1152,92 @@ impl ControlService {
                     }
                 }
             }
+            ControlRequest::StaticSmartProtectionCheck {
+                session_id,
+                token,
+                root_pid,
+                process_pid,
+                protection_id,
+                rule_id,
+                stage,
+                executable,
+                argv,
+                features,
+                context,
+            } => {
+                let authenticated = peer_pid.is_some_and(|reporter| {
+                    process_ancestors(root_pid).contains(&reporter)
+                        && self
+                            .sessions
+                            .authenticate_member(&session_id, &token, root_pid)
+                        && self
+                            .sessions
+                            .authenticate_member(&session_id, &token, process_pid)
+                });
+                if !authenticated {
+                    ControlResponse::Error {
+                        message: "invalid static smart protection reporter".into(),
+                    }
+                } else {
+                    let audit_features = features.clone();
+                    let outcome = runtime
+                        .protection
+                        .evaluate_agent(
+                            &protection_id,
+                            &session_id,
+                            process_pid,
+                            &executable,
+                            &stage,
+                            argv,
+                            features,
+                            context,
+                        )
+                        .await;
+                    let provider = outcome.providers.iter().find(|item| item.error.is_none());
+                    let action = if outcome.deny {
+                        crate::config::SandboxAction::Deny
+                    } else {
+                        crate::config::SandboxAction::Pass
+                    };
+                    let reason = outcome
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "prefilter_pass".into());
+                    let risk_level = provider.and_then(|item| item.risk_level.clone());
+                    let confidence = provider.and_then(|item| item.confidence);
+                    let cache_hit = provider.is_some_and(|item| item.cache_hit);
+                    self.audit.session_event(
+                        "smart_protection_decision",
+                        &session_id,
+                        Some(process_pid),
+                        Some(&executable),
+                        serde_json::json!({
+                            "protection": protection_id,
+                            "rule_id": rule_id,
+                            "stage": stage,
+                            "action": action,
+                            "reason": reason,
+                            "features": audit_features,
+                            "risk_level": risk_level,
+                            "confidence": confidence,
+                            "cache_hit": cache_hit,
+                            "reporter": "static-supervisor",
+                        }),
+                    );
+                    ControlResponse::SmartProtectionDecision {
+                        action,
+                        reason,
+                        risk_level,
+                        confidence,
+                        cache_hit,
+                    }
+                }
+            }
             ControlRequest::SmartProtectionCheck {
                 session_id,
                 token,
                 protection_id,
-                rule_id: _rule_id,
+                rule_id,
                 stage,
                 executable,
                 argv,
@@ -1141,12 +1256,14 @@ impl ControlService {
                         message: "invalid smart protection reporter".into(),
                     }
                 } else {
+                    let reporter_pid = peer_pid.unwrap();
+                    let audit_features = features.clone();
                     let outcome = runtime
                         .protection
                         .evaluate_agent(
                             &protection_id,
                             &session_id,
-                            peer_pid.unwrap(),
+                            reporter_pid,
                             &executable,
                             &stage,
                             argv,
@@ -1155,16 +1272,41 @@ impl ControlService {
                         )
                         .await;
                     let provider = outcome.providers.iter().find(|item| item.error.is_none());
+                    let action = if outcome.deny {
+                        crate::config::SandboxAction::Deny
+                    } else {
+                        crate::config::SandboxAction::Pass
+                    };
+                    let reason = outcome
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "prefilter_pass".into());
+                    let risk_level = provider.and_then(|item| item.risk_level.clone());
+                    let confidence = provider.and_then(|item| item.confidence);
+                    let cache_hit = provider.is_some_and(|item| item.cache_hit);
+                    self.audit.session_event(
+                        "smart_protection_decision",
+                        &session_id,
+                        Some(reporter_pid),
+                        Some(&executable),
+                        serde_json::json!({
+                            "protection": protection_id,
+                            "rule_id": rule_id,
+                            "stage": stage,
+                            "action": action,
+                            "reason": reason,
+                            "features": audit_features,
+                            "risk_level": risk_level,
+                            "confidence": confidence,
+                            "cache_hit": cache_hit,
+                        }),
+                    );
                     ControlResponse::SmartProtectionDecision {
-                        action: if outcome.deny {
-                            crate::config::SandboxAction::Deny
-                        } else {
-                            crate::config::SandboxAction::Pass
-                        },
-                        reason: outcome.reason.unwrap_or_else(|| "prefilter_pass".into()),
-                        risk_level: provider.and_then(|item| item.risk_level.clone()),
-                        confidence: provider.and_then(|item| item.confidence),
-                        cache_hit: provider.is_some_and(|item| item.cache_hit),
+                        action,
+                        reason,
+                        risk_level,
+                        confidence,
+                        cache_hit,
                     }
                 }
             }

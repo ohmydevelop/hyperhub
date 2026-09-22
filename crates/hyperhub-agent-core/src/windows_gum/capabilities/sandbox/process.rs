@@ -41,7 +41,7 @@ impl ProcessSandboxPlugin {
         let (Some(exe), Some(cmd)) = (exe, cmd) else {
             return (s.error_action, None, "error".into());
         };
-        crate::process_sandbox_decision(&s, exe, cmd)
+        crate::process_decision_with_protection(exe, cmd)
     }
     fn failure_mode(&self) -> HookFailureMode {
         match crate::process_sandbox_snapshot() {

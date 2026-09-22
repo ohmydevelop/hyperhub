@@ -88,6 +88,21 @@ pub(crate) fn evaluate(
         score += 10;
         features.insert("state_change_method".to_owned());
     }
+    if [
+        "delete",
+        "destroy",
+        "shutdown",
+        "drop",
+        "purge",
+        "--force",
+        "production",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        score += 20;
+        features.insert("dangerous_marker".to_owned());
+    }
     if lower.contains(".env")
         || lower.contains("credentials")
         || lower.contains("id_rsa")

@@ -93,6 +93,8 @@ struct CompiledProcessSandboxRule {
     id: String,
     action: SandboxAction,
     patterns: Vec<CompiledProcessSandboxPattern>,
+    protection: Option<String>,
+    prefilter_policy: PrefilterPolicy,
 }
 
 #[derive(Debug)]
@@ -123,6 +125,40 @@ pub struct SandboxDecision {
     pub source: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessProtectionBinding {
+    pub rule_id: String,
+    pub protection_id: String,
+    pub prefilter_policy: PrefilterPolicy,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessPrefilterContext {
+    #[serde(default)]
+    pub sensitive_files_read: u32,
+    #[serde(default)]
+    pub sensitive_bytes_read: u64,
+    #[serde(default)]
+    pub external_input_seen: bool,
+    #[serde(default)]
+    pub prompt_injection_seen: bool,
+    #[serde(default)]
+    pub destination_authorized: Option<bool>,
+    #[serde(default)]
+    pub managed_secret_match: bool,
+    #[serde(default)]
+    pub static_sandbox_deny: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessPrefilterDecision {
+    pub score: u32,
+    pub hard_deny: bool,
+    pub should_query_gateway: bool,
+    pub features: Vec<String>,
+    pub redacted_argv: Vec<String>,
+}
+
 pub fn compile_runtime_snapshot(
     snapshot: SandboxSnapshot,
 ) -> Result<CompiledSandboxSnapshot, regex::Error> {
@@ -151,6 +187,8 @@ pub fn compile_runtime_snapshot(
                         id: rule.id,
                         action: rule.action,
                         patterns,
+                        protection: rule.protection,
+                        prefilter_policy: rule.prefilter_policy,
                     })
                 })
                 .collect::<Result<Vec<_>, regex::Error>>()?;
@@ -232,6 +270,219 @@ pub fn decide_process(
                     .command_line
                     .as_ref()
                     .is_none_or(|regex| regex.is_match(command_line))
+        }) {
+            return SandboxDecision {
+                action: rule.action,
+                rule_id: Some(rule.id.clone()),
+                source: "rule",
+            };
+        }
+    }
+    SandboxDecision {
+        action: snapshot.default_action,
+        rule_id: None,
+        source: "default",
+    }
+}
+
+pub fn process_protection_binding(
+    snapshot: &CompiledProcessSandboxSnapshot,
+    executable: &str,
+    command_line: &str,
+) -> Option<ProcessProtectionBinding> {
+    snapshot.rules.iter().find_map(|rule| {
+        let protection_id = rule.protection.as_ref()?;
+        rule.patterns
+            .iter()
+            .any(|pattern| {
+                pattern
+                    .executable
+                    .as_ref()
+                    .is_none_or(|regex| regex.is_match(executable))
+                    && pattern
+                        .command_line
+                        .as_ref()
+                        .is_none_or(|regex| regex.is_match(command_line))
+            })
+            .then(|| ProcessProtectionBinding {
+                rule_id: rule.id.clone(),
+                protection_id: protection_id.clone(),
+                prefilter_policy: rule.prefilter_policy,
+            })
+    })
+}
+
+pub fn evaluate_process_prefilter(
+    policy: PrefilterPolicy,
+    executable: &str,
+    argv: &[String],
+    context: &ProcessPrefilterContext,
+) -> ProcessPrefilterDecision {
+    const QUERY_THRESHOLD: u32 = 60;
+    let mut score = 0u32;
+    let mut features = std::collections::BTreeSet::new();
+    let joined = std::iter::once(executable)
+        .chain(argv.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lower = joined.to_ascii_lowercase();
+    let network = ["curl", "wget", "scp", "sftp", "rsync", "git"];
+    let upload = [
+        "--data",
+        "--data-raw",
+        "--data-binary",
+        "--upload-file",
+        "--post-file",
+        " -t ",
+        " -t",
+    ];
+    let archive = ["tar", "zip", "gzip", "7z", "base64", "openssl"];
+
+    if matches!(
+        policy,
+        PrefilterPolicy::NetworkUpload
+            | PrefilterPolicy::ArchiveOrEncode
+            | PrefilterPolicy::NetworkEgress
+    ) && network
+        .iter()
+        .any(|tool| lower.split_whitespace().any(|part| part == *tool))
+    {
+        score += 20;
+        features.insert("network_tool".to_owned());
+    }
+    if matches!(
+        policy,
+        PrefilterPolicy::NetworkUpload
+            | PrefilterPolicy::ArchiveOrEncode
+            | PrefilterPolicy::NetworkEgress
+    ) && upload.iter().any(|marker| lower.contains(marker))
+    {
+        score += 20;
+        features.insert("upload_argument".to_owned());
+    }
+    if matches!(policy, PrefilterPolicy::ArchiveOrEncode)
+        && archive
+            .iter()
+            .any(|tool| lower.split_whitespace().any(|part| part == *tool))
+    {
+        score += 15;
+        features.insert("archive_or_encode".to_owned());
+    }
+    if lower.contains("--request post")
+        || lower.contains("--request put")
+        || lower.contains("--request patch")
+        || lower.contains("--request delete")
+    {
+        score += 10;
+        features.insert("state_change_method".to_owned());
+    }
+    if [
+        "delete",
+        "destroy",
+        "shutdown",
+        "drop",
+        "purge",
+        "--force",
+        "production",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        score += 20;
+        features.insert("dangerous_marker".to_owned());
+    }
+    if lower.contains(".env")
+        || lower.contains("credentials")
+        || lower.contains("id_rsa")
+        || lower.contains("id_ed25519")
+        || lower.contains(".ssh")
+        || lower.contains("secret")
+    {
+        score += 30;
+        features.insert("sensitive_file_reference".to_owned());
+    }
+    if context.sensitive_files_read > 0 {
+        score += 25;
+        features.insert("sensitive_file_read".to_owned());
+    }
+    if context.external_input_seen {
+        features.insert("external_input_seen".to_owned());
+    }
+    if context.prompt_injection_seen {
+        score += 20;
+        features.insert("prompt_injection_source".to_owned());
+    }
+    if context.destination_authorized == Some(false) {
+        score += 10;
+        features.insert("external_destination".to_owned());
+    }
+    if context.managed_secret_match {
+        features.insert("managed_secret_match".to_owned());
+    }
+    let hard_deny = context.static_sandbox_deny || context.managed_secret_match;
+    let score = score.min(100);
+    ProcessPrefilterDecision {
+        score,
+        hard_deny,
+        should_query_gateway: !hard_deny && score >= QUERY_THRESHOLD,
+        features: features.into_iter().collect(),
+        redacted_argv: redact_process_argv(argv),
+    }
+}
+
+fn redact_process_argv(argv: &[String]) -> Vec<String> {
+    let mut result = Vec::with_capacity(argv.len());
+    let mut redact_next = false;
+    let mut previous = "";
+    for raw in argv {
+        let mut value = raw.clone();
+        if redact_next {
+            value = "<redacted>".into();
+            redact_next = false;
+        }
+        if matches!(previous, "--header" | "-H")
+            && ["authorization:", "cookie:", "proxy-authorization:"]
+                .iter()
+                .any(|prefix| value.to_ascii_lowercase().starts_with(prefix))
+        {
+            if let Some((name, _)) = value.split_once(':') {
+                value = format!("{name}: <redacted>");
+            }
+        }
+        if let Some((prefix, _)) = value.split_once("Bearer ") {
+            value = format!("{prefix}Bearer <redacted>");
+        }
+        for marker in ["--password=", "--token=", "--secret=", "--api-key="] {
+            if value.to_ascii_lowercase().starts_with(marker) {
+                value = format!("{marker}<redacted>");
+            }
+        }
+        if matches!(
+            raw.as_str(),
+            "--password" | "--token" | "--secret" | "--api-key" | "--header" | "-H"
+        ) {
+            redact_next = true;
+        }
+        previous = raw;
+        result.push(value);
+    }
+    result
+}
+
+/// Decide whether a child process should inherit the Agent runtime.
+/// Command-line matching is intentionally not required here: at this stage the
+/// launcher only has the executable path, and the child Agent will perform the
+/// full command-line sandbox/protection decision before exec/spawn.
+pub fn decide_process_hook(
+    snapshot: &CompiledProcessSandboxSnapshot,
+    executable: &str,
+) -> SandboxDecision {
+    for rule in &snapshot.rules {
+        if rule.patterns.iter().any(|pattern| {
+            pattern
+                .executable
+                .as_ref()
+                .is_none_or(|regex| regex.is_match(executable))
         }) {
             return SandboxDecision {
                 action: rule.action,
@@ -450,5 +701,55 @@ mod tests {
             decide_process(compiled.process.as_ref().unwrap(), "/bin/sh", "sh --danger",).action,
             SandboxAction::Deny
         );
+    }
+    #[test]
+    fn process_protection_prefilter_queries_and_redacts_full_argv() {
+        let snapshot = SandboxSnapshot {
+            version: 10,
+            network: None,
+            process: Some(ProcessSandboxSnapshot {
+                default_action: SandboxAction::Pass,
+                error_action: SandboxAction::Pass,
+                rules: vec![ProcessSandboxSnapshotRule {
+                    id: "protect-curl".into(),
+                    action: SandboxAction::Pass,
+                    patterns: vec![ProcessSandboxSnapshotPattern {
+                        executable: r"curl$".into(),
+                        command_line: r"curl".into(),
+                    }],
+                    protection: Some("jev".into()),
+                    prefilter_policy: PrefilterPolicy::NetworkUpload,
+                }],
+            }),
+            file: None,
+        };
+        let compiled = compile_runtime_snapshot(snapshot).unwrap();
+        let process = compiled.process.as_ref().unwrap();
+        let argv = vec![
+            "curl".into(),
+            "--request".into(),
+            "POST".into(),
+            "--header".into(),
+            "Authorization: Bearer benchmark-secret".into(),
+            "--data-binary".into(),
+            "@/tmp/.env".into(),
+        ];
+        let command_line = argv.join(" ");
+        let binding = process_protection_binding(process, "/usr/bin/curl", &command_line).unwrap();
+        assert_eq!(binding.protection_id, "jev");
+        let decision = evaluate_process_prefilter(
+            binding.prefilter_policy,
+            "/usr/bin/curl",
+            &argv,
+            &ProcessPrefilterContext::default(),
+        );
+        assert!(decision.should_query_gateway);
+        assert!(decision
+            .features
+            .contains(&"sensitive_file_reference".into()));
+        assert!(!decision
+            .redacted_argv
+            .iter()
+            .any(|argument| argument.contains("benchmark-secret")));
     }
 }
