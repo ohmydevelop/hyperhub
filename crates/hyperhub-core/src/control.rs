@@ -21,19 +21,8 @@ pub const DISCOVERY_CONTROL_ENDPOINT: &str = r"\\.\pipe\hyperhub-control";
 #[cfg(unix)]
 pub const DISCOVERY_CONTROL_ENDPOINT: &str = "/tmp/hyperhub-control.sock";
 
-pub const CONTROL_ENDPOINT_ENV: &str = "HYPERHUB_CONTROL_ENDPOINT";
-
-fn configured_control_endpoint() -> Option<String> {
-    std::env::var_os(CONTROL_ENDPOINT_ENV)
-        .filter(|value| !value.is_empty())
-        .map(|value| std::path::PathBuf::from(value).display().to_string())
-}
-
 #[cfg(windows)]
 pub fn discovery_control_endpoint() -> String {
-    if let Some(endpoint) = configured_control_endpoint() {
-        return endpoint;
-    }
     let sid = crate::config_store::current_user_sid_string().unwrap_or_else(|_| "unknown".into());
     let home = crate::config_store::hyperhub_home()
         .map(|path| path.display().to_string())
@@ -54,9 +43,6 @@ fn windows_control_endpoint(sid: &str, home: &str) -> String {
 
 #[cfg(unix)]
 pub fn discovery_control_endpoint() -> String {
-    if let Some(endpoint) = configured_control_endpoint() {
-        return endpoint;
-    }
     crate::config_store::hyperhub_home()
         .map(|home| control_endpoint_for_home(&home))
         .unwrap_or_else(|_| std::path::PathBuf::from(DISCOVERY_CONTROL_ENDPOINT))

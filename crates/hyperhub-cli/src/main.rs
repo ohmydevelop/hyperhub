@@ -1198,8 +1198,9 @@ diagnostics:
   hyperhub doctor [--target exe]        show backend and target diagnostics
 
 environment:
-  HYPERHUB_HOME=<dir>          select an isolated configuration and Serve instance
-  HYPERHUB_CONTROL_ENDPOINT=<endpoint>  override the derived local control endpoint
+  HYPERHUB_HOME=<dir>                     select an isolated configuration and Serve instance
+  HYPERHUB_CONFIG_PASSWORD=<password>     provide the configuration password non-interactively
+  HYPERHUB_SHELL=<program>                select the shell launched by the installed hsh helper
 
 Use `hyperhub skill` when an Agent cannot discover the installed agents/skills directory."
 }

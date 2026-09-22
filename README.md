@@ -113,7 +113,17 @@ SOCKS5 默认从配置端口 `18444` 开始监听；端口被占用时依次尝�
 unset HYPERHUB_HOME
 ```
 
-`HYPERHUB_CONTROL_ENDPOINT` 仅用于需要手工指定控制端点的高级场景，并优先于 `HYPERHUB_HOME` 派生值。Agent Skill 仍安装在 Agent 通用 Skill 目录，因为它是无敏感信息的共享 CLI 操作说明，不属于某个运行实例。
+控制端点不提供人工配置入口：Unix 自动使用 `$HYPERHUB_HOME/runtime/control.sock`，Windows 自动根据当前用户与 `HYPERHUB_HOME` 派生 named pipe。Agent Skill 仍安装在 Agent 通用 Skill 目录，因为它是无敏感信息的共享 CLI 操作说明，不属于某个运行实例。
+
+正式支持的运行时环境变量只有 3 个：
+
+- `HYPERHUB_HOME`：选择配置与 Serve 实例；
+- `HYPERHUB_CONFIG_PASSWORD`：非交互提供配置密码；
+- `HYPERHUB_SHELL`：仅供 `hsh` 快捷命令选择目标 Shell。
+
+`HYPERHUB_CONTROL_ENDPOINT`、Session token、SOCKS 地址等变量由 HyperHub 向受管进程自动注入，属于内部协议，用户不应设置。
+
+安装脚本另支持 3 个一次性变量：`HYPERHUB_REPO`、`HYPERHUB_VERSION`、`HYPERHUB_INSTALL_DIR`。源码构建另支持 5 个开发变量：`HYPERHUB_FRIDA_GUM_ROOT`、`HYPERHUB_FRIDA_CORE_ROOT`、`HYPERHUB_EMBEDDED_AGENT_PATH`、`HYPERHUB_NEEDLE3_MODEL`、`HYPERHUB_NEEDLE3_RUNNER`。因此普通运行只需考虑 3 个变量；连同安装和源码构建入口，正式支持人工设置的变量共 11 个。
 
 ### Agent Skill 自动安装
 
