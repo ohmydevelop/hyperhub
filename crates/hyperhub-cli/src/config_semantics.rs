@@ -4,6 +4,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigSection {
     Gateway,
+    ModelGateway,
     Basic,
     Proxy,
     Credential,
@@ -22,6 +23,7 @@ impl ConfigSection {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Gateway => "网关",
+            Self::ModelGateway => "模型网关",
             Self::Basic => "基础",
             Self::Proxy => "代理",
             Self::Credential => "凭证",
@@ -39,9 +41,11 @@ impl ConfigSection {
 
     pub(crate) fn breadcrumb(self) -> String {
         match self {
-            Self::Gateway | Self::Sandbox | Self::Process | Self::Environment => {
-                self.label().into()
-            }
+            Self::Gateway
+            | Self::ModelGateway
+            | Self::Sandbox
+            | Self::Process
+            | Self::Environment => self.label().into(),
             Self::Basic
             | Self::Proxy
             | Self::Credential

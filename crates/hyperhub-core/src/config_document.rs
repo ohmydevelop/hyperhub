@@ -2,10 +2,10 @@ use crate::config::{
     AuditPolicy, Config, DefaultRoute, EnforcementMode, EnvironmentVariable, FileSandboxConfig,
     FileSandboxOperation, FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallConfig,
     FirewallDefaultRule, FirewallEndpoint, FirewallRule, HttpAuthScheme, ListenerConfig,
-    PluginConfig, PluginKind, PluginProtocol, ProcessSandboxConfig, ProcessSandboxPattern,
-    ProcessSandboxRule, RootCertificate, RouteEndpoint, RouteRule, SandboxAction, SandboxConfig,
-    SandboxDefaultRule, SecretValue, SshAccount, SshHostKey, Upstream, UpstreamKind,
-    WebSocketCapture,
+    ModelGatewayConfig, PluginConfig, PluginKind, PluginProtocol, ProcessSandboxConfig,
+    ProcessSandboxPattern, ProcessSandboxRule, RootCertificate, RouteEndpoint, RouteRule,
+    SandboxAction, SandboxConfig, SandboxDefaultRule, SecretValue, SshAccount, SshHostKey,
+    Upstream, UpstreamKind, WebSocketCapture,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,6 +29,8 @@ pub struct GatewayDocument {
     pub mode: EnforcementMode,
     pub debug: bool,
     pub listener: ListenerDocument,
+    #[serde(default)]
+    pub model_gateway: ModelGatewayConfig,
     #[serde(default)]
     pub proxies: Vec<ProxyDocument>,
     #[serde(default)]
@@ -375,6 +377,7 @@ impl ConfigDocument {
                     socks_address: config.listener.socks_listen.clone(),
                     pending_session_ttl_seconds: config.listener.pending_session_ttl_secs,
                 },
+                model_gateway: config.model_gateway.clone(),
                 proxies: config
                     .upstreams
                     .iter()
@@ -582,6 +585,7 @@ impl ConfigDocument {
                 socks_listen: self.gateway.listener.socks_address,
                 pending_session_ttl_secs: self.gateway.listener.pending_session_ttl_seconds,
             },
+            model_gateway: self.gateway.model_gateway,
             audit: AuditPolicy {
                 log: None,
                 transcript_dir: None,

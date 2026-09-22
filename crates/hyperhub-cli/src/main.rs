@@ -5,6 +5,7 @@ use hyperhub_core::config_store::{
 use hyperhub_core::control::{
     control_request, discovery_control_endpoint, run_control_server, ControlService,
 };
+use hyperhub_core::model_gateway::ModelGatewayService;
 use hyperhub_core::session::{session_proof, ControlRequest, ControlResponse, SessionRegistry};
 use hyperhub_core::socks::SocksService;
 use std::cell::Cell;
@@ -286,6 +287,14 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         .map_err(|error| format!("cannot bind SOCKS5 listener: {error}"))?;
     let audit = socks.audit_writer();
     let (shutdown, mut shutdown_signal) = tokio::sync::watch::channel(false);
+    let model_gateway =
+        ModelGatewayService::new(socks.runtime()).map_err(|error| error.to_string())?;
+    let model_gateway_listener = runtime
+        .block_on(model_gateway.prepare_listener())
+        .map_err(|error| format!("cannot bind model gateway listener: {error}"))?;
+    if let Some((_, address)) = &model_gateway_listener {
+        output.line(format!("HyperHub model gateway listening on {}", address))?;
+    }
     let control = ControlService::new(
         sessions,
         socks.connections(),
@@ -313,11 +322,18 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     }
     runtime
         .block_on(async {
+            let gateway_run = async move {
+                match model_gateway_listener {
+                    Some((listener, _)) => model_gateway.run(listener).await,
+                    None => std::future::pending::<std::io::Result<()>>().await,
+                }
+            };
             tokio::select! {
                 result = async {
                     tokio::try_join!(
                         socks.run(),
-                        run_control_server(discovery_control_endpoint(), control)
+                        run_control_server(discovery_control_endpoint(), control),
+                        gateway_run
                     )
                     .map(|_| ())
                 } => result,

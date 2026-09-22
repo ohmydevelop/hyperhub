@@ -8,14 +8,15 @@ use crossterm::terminal::{
 use hyperhub_core::config::{
     parse_route_target, Config, EnforcementMode, EnvironmentVariable, FileSandboxOperation,
     FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallDefaultRule, FirewallEndpoint,
-    FirewallRule, HttpAuthScheme, PluginConfig, PluginKind, PluginProtocol, ProcessSandboxPattern,
-    ProcessSandboxRule, RootCertificate, RouteEndpoint, RouteRule, RouteTarget, SandboxAction,
-    SecretValue, SshAccount, SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture,
-    DEFAULT_ROUTE_ID,
+    FirewallRule, HttpAuthScheme, ModelMapping, ModelProvider, ModelProviderKind, PluginConfig,
+    PluginKind, PluginProtocol, ProcessSandboxPattern, ProcessSandboxRule, RootCertificate,
+    RouteEndpoint, RouteRule, RouteTarget, SandboxAction, SecretValue, SshAccount, SshHostKey,
+    SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture, DEFAULT_ROUTE_ID,
 };
 use hyperhub_core::config_document::ConfigDocument;
 use hyperhub_core::config_store;
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
+use hyperhub_core::model_gateway::{self, ModelGatewayService};
 use hyperhub_core::session::{
     config_update_proof, ControlRequest, ControlResponse, InjectedProcessSnapshot,
 };
@@ -29,13 +30,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::io;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NavNode {
     Gateway,
+    ModelGateway,
     Basic,
     Proxy,
     Credential,
@@ -53,6 +58,7 @@ enum NavNode {
 const NAV_ITEMS: &[NavNode] = &[
     NavNode::Process,
     NavNode::Gateway,
+    NavNode::ModelGateway,
     NavNode::Basic,
     NavNode::Proxy,
     NavNode::Credential,
@@ -67,6 +73,7 @@ const NAV_ITEMS: &[NavNode] = &[
 ];
 
 const CATEGORY_GATEWAY: NavNode = NavNode::Gateway;
+const CATEGORY_MODEL_GATEWAY: NavNode = NavNode::ModelGateway;
 const CATEGORY_BASIC: NavNode = NavNode::Basic;
 const CATEGORY_PROXY: NavNode = NavNode::Proxy;
 const CATEGORY_CREDENTIAL: NavNode = NavNode::Credential;
@@ -85,6 +92,7 @@ impl NavNode {
     fn section(self) -> ConfigSection {
         match self {
             Self::Gateway => ConfigSection::Gateway,
+            Self::ModelGateway => ConfigSection::ModelGateway,
             Self::Basic => ConfigSection::Basic,
             Self::Proxy => ConfigSection::Proxy,
             Self::Credential => ConfigSection::Credential,
@@ -113,7 +121,7 @@ impl NavNode {
     }
 
     fn is_group(self) -> bool {
-        matches!(self, Self::Gateway | Self::Sandbox)
+        matches!(self, Self::Gateway | Self::ModelGateway | Self::Sandbox)
     }
 
     fn is_child(self) -> bool {
@@ -163,12 +171,22 @@ enum ObjectEditor {
     SandboxProcessRule(usize),
     FileSandboxRule(usize),
     RootCertificate(usize),
+    ModelProvider(usize),
+    ModelMapping(usize),
 }
 
 #[derive(Clone, Copy)]
 enum TextField {
     SocksListen,
     PendingTtl,
+    ModelGatewayListen,
+    ModelGatewayTimeout,
+    ModelProviderId(usize),
+    ModelProviderName(usize),
+    ModelProviderBaseUrl(usize),
+    ModelMappingName(usize),
+    ModelMappingProvider(usize),
+    ModelMappingModel(usize),
     UpstreamId(usize),
     UpstreamAddress(usize),
     UpstreamTimeout(usize),
@@ -197,6 +215,9 @@ enum SecretField {
     CredentialPassword(usize),
     CredentialHttpSecret(usize),
     SshPassword(usize, usize, Option<usize>),
+    ModelGatewayApiKey,
+    ModelProviderApiKey(usize),
+    ModelProviderAccessToken(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -324,6 +345,14 @@ struct ReferencePicker {
     selected: usize,
 }
 
+#[derive(Clone)]
+struct ModelPicker {
+    mapping: usize,
+    values: Vec<String>,
+    selected: usize,
+    query: String,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct ManagedProcessView {
     session_id: String,
@@ -358,6 +387,10 @@ struct App {
     ssh_password_editor: Option<SshPasswordEditor>,
     ssh_key_add_picker: Option<SshKeyAddPicker>,
     reference_picker: Option<ReferencePicker>,
+    model_picker: Option<ModelPicker>,
+    oauth_rx:
+        Option<std::sync::mpsc::Receiver<Result<model_gateway::ChatGptTokenResponse, String>>>,
+    oauth_provider: Option<usize>,
     ssh_key_preview: Option<SshKeyPreview>,
     managed_processes: Vec<ManagedProcessView>,
     status: String,
@@ -437,6 +470,9 @@ pub fn run(
         ssh_password_editor: None,
         ssh_key_add_picker: None,
         reference_picker: None,
+        model_picker: None,
+        oauth_rx: None,
+        oauth_provider: None,
         ssh_key_preview: None,
         managed_processes: if live {
             query_managed_processes().unwrap_or_default()
@@ -489,6 +525,35 @@ pub fn run(
                 terminal
                     .draw(|frame| draw(frame, &app))
                     .map_err(|error| error.to_string())?;
+            }
+        }
+        if let Some(result) = app.oauth_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            app.oauth_rx = None;
+            let provider_index = app.oauth_provider.take();
+            match (provider_index, result) {
+                (Some(index), Ok(token)) => {
+                    if let Some(provider) = app.config.model_gateway.providers.get_mut(index) {
+                        provider.access_token = Some(SecretValue::Inline {
+                            value: token.access_token,
+                        });
+                        if let Some(refresh) = token.refresh_token {
+                            provider.refresh_token = Some(SecretValue::Inline { value: refresh });
+                        }
+                        provider.token_expires_at_ms = token.expires_in.map(|seconds| {
+                            hyperhub_core::session::unix_timestamp_ms()
+                                .saturating_add(seconds.saturating_mul(1000))
+                        });
+                        provider.account_id = token
+                            .id_token
+                            .as_deref()
+                            .and_then(model_gateway::chatgpt_account_id);
+                        changed(&mut app);
+                        app.status =
+                            "✓ ChatGPT OAuth 登录完成，已保存 token；请按 Ctrl+S 保存".into();
+                    }
+                }
+                (_, Err(error)) => app.status = format!("✗ ChatGPT OAuth 失败：{error}"),
+                _ => {}
             }
         }
         if !event::poll(Duration::from_millis(250)).map_err(|error| error.to_string())? {
@@ -620,6 +685,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         handle_ssh_account_editor_key(app, key);
         return Ok(false);
     }
+    if app.model_picker.is_some() {
+        handle_model_picker_key(app, key);
+        return Ok(false);
+    }
+    if key.code == KeyCode::Char('l') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(ObjectEditor::ModelProvider(index)) = app.editor {
+            if app.config.model_gateway.providers[index].kind
+                == ModelProviderKind::ChatGptSubscription
+            {
+                if let Err(error) = start_chatgpt_login(app, index) {
+                    app.status = format!("✗ {error}");
+                }
+            } else {
+                app.status = "请先将 Provider 类型切换为 ChatGPT 订阅".into();
+            }
+            return Ok(false);
+        }
+    }
     if app.reference_picker.is_some() {
         handle_reference_picker_key(app, key);
         return Ok(false);
@@ -678,6 +761,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             } else {
                 "⚠ Serve 未运行，无法刷新受管进程列表".into()
             };
+        }
+        KeyCode::Char('r') if app.category == CATEGORY_MODEL_GATEWAY => {
+            if let Err(error) = refresh_model_provider_models(app) {
+                app.status = format!("✗ {error}");
+            }
         }
         KeyCode::Char('/') => open_input(app, "搜索配置", "", false, InputAction::Search),
         KeyCode::Char('p') if app.live => {
@@ -1363,6 +1451,7 @@ fn selected_is_toggle(app: &App) -> bool {
         return object_field_is_toggle(app, editor, app.field);
     }
     match (app.category, app.field) {
+        (CATEGORY_MODEL_GATEWAY, 0) => true,
         (CATEGORY_BASIC, 0 | 3) => true,
         (CATEGORY_SANDBOX_PROCESS, 0..=2) => true,
         (CATEGORY_FILES, 0..=2) => true,
@@ -1391,6 +1480,8 @@ fn object_field_is_toggle(app: &App, editor: ObjectEditor, field: usize) -> bool
         ObjectEditor::SandboxProcessRule(_) => matches!(field, 1 | 3),
         ObjectEditor::FileSandboxRule(_) => matches!(field, 1 | 3 | 4..=8),
         ObjectEditor::RootCertificate(_) => field == 1,
+        ObjectEditor::ModelProvider(_) => matches!(field, 2 | 3),
+        ObjectEditor::ModelMapping(_) => field == 3,
     }
 }
 
@@ -1419,6 +1510,10 @@ fn toggle_selected(app: &mut App) {
         return;
     }
     match (app.category, app.field) {
+        (CATEGORY_MODEL_GATEWAY, 0) => {
+            app.config.model_gateway.enabled = !app.config.model_gateway.enabled;
+            changed(app);
+        }
         (CATEGORY_BASIC, 0) => {
             app.config.mode = match app.config.mode {
                 EnforcementMode::Enforce => EnforcementMode::Observe,
@@ -1532,6 +1627,39 @@ fn edit_selected(app: &mut App) {
         return;
     }
     match (app.category, app.field) {
+        (CATEGORY_MODEL_GATEWAY, 0) => app.status = "模型网关启停请按 Space 切换".into(),
+        (CATEGORY_MODEL_GATEWAY, 1) => open_input(
+            app,
+            "模型网关监听地址",
+            &app.config.model_gateway.listen_address.clone(),
+            false,
+            InputAction::Text(TextField::ModelGatewayListen),
+        ),
+        (CATEGORY_MODEL_GATEWAY, 2) => open_input(
+            app,
+            "Provider 请求超时（毫秒）",
+            &app.config.model_gateway.timeout_ms.to_string(),
+            false,
+            InputAction::Text(TextField::ModelGatewayTimeout),
+        ),
+        (CATEGORY_MODEL_GATEWAY, 3) => {
+            open_secret(app, "模型网关 API Key", SecretField::ModelGatewayApiKey)
+        }
+        (CATEGORY_MODEL_GATEWAY, field)
+            if field >= 4 && field - 4 < app.config.model_gateway.providers.len() =>
+        {
+            enter_editor(app, ObjectEditor::ModelProvider(field - 4))
+        }
+        (CATEGORY_MODEL_GATEWAY, field)
+            if field >= 4 + app.config.model_gateway.providers.len()
+                && field - 4 - app.config.model_gateway.providers.len()
+                    < app.config.model_gateway.mappings.len() =>
+        {
+            enter_editor(
+                app,
+                ObjectEditor::ModelMapping(field - 4 - app.config.model_gateway.providers.len()),
+            )
+        }
         (CATEGORY_GATEWAY, _) => {
             app.focus = Focus::Detail;
             app.status = "网关概览为只读汇总".into();
@@ -1699,6 +1827,197 @@ fn enter_editor(app: &mut App, editor: ObjectEditor) {
     app.field = 0;
     app.focus = Focus::Detail;
     app.status = "↑↓ 选择字段，Enter/e 编辑或切换，Space 也可切换，Esc 返回列表".into();
+}
+
+fn start_chatgpt_login(app: &mut App, provider_index: usize) -> Result<(), String> {
+    if app.oauth_rx.is_some() {
+        return Err("已有 ChatGPT OAuth 登录正在进行".into());
+    }
+    let (url, pkce) = model_gateway::chatgpt_authorization_url()?;
+    let listener = TcpListener::bind(("127.0.0.1", 1455))
+        .map_err(|error| format!("无法监听 OAuth 回调 127.0.0.1:1455：{error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let auth_url = url.to_string();
+    crate::clipboard::copy_to_clipboard(&auth_url)
+        .map_err(|error| format!("无法复制 OAuth URL：{error}"))?;
+    let state = pkce.state.clone();
+    let verifier = pkce.verifier.clone();
+    std::thread::Builder::new()
+        .name("hyperhub-chatgpt-oauth".into())
+        .spawn(move || {
+            let result = receive_chatgpt_callback(listener, &state, &verifier);
+            let _ = tx.send(result);
+        })
+        .map_err(|error| format!("无法启动 OAuth 回调线程：{error}"))?;
+    open_browser_url(&auth_url);
+    app.oauth_rx = Some(rx);
+    app.oauth_provider = Some(provider_index);
+    app.status =
+        "✓ OAuth URL 已复制并尝试打开浏览器；等待 localhost:1455 回调（按 l 可重试）".into();
+    Ok(())
+}
+
+fn receive_chatgpt_callback(
+    listener: TcpListener,
+    expected_state: &str,
+    verifier: &str,
+) -> Result<model_gateway::ChatGptTokenResponse, String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    let (mut stream, _) = loop {
+        match listener.accept() {
+            Ok(pair) => break pair,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err("OAuth 回调等待超时".into())
+            }
+            Err(error) => return Err(format!("读取 OAuth 回调失败：{error}")),
+        }
+    };
+    let mut request = [0u8; 8192];
+    let length = stream
+        .read(&mut request)
+        .map_err(|error| error.to_string())?;
+    let first_line = String::from_utf8_lossy(&request[..length])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    let target = first_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or("OAuth 回调请求格式无效")?;
+    let callback = url::Url::parse(&format!("http://localhost{target}"))
+        .map_err(|error| format!("OAuth 回调 URL 无效：{error}"))?;
+    let params = callback
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    let page = if params.get("state").map(|value| value.as_ref()) != Some(expected_state) {
+        "OAuth state 校验失败，请关闭此页面并重试。"
+    } else if params.get("error").is_some() {
+        "ChatGPT OAuth 被取消。"
+    } else {
+        "ChatGPT OAuth 成功，请返回 HyperHub。"
+    };
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", page.len(), page);
+    let _ = stream.write_all(response.as_bytes());
+    if params.get("state").map(|value| value.as_ref()) != Some(expected_state) {
+        return Err("OAuth state 校验失败".into());
+    }
+    if let Some(error) = params.get("error") {
+        return Err(format!("授权失败：{error}"));
+    }
+    let code = params.get("code").ok_or("OAuth 回调缺少 code")?;
+    control_runtime()?.block_on(model_gateway::exchange_chatgpt_code_default(code, verifier))
+}
+
+fn open_browser_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    let _ = Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(url)
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let _ = Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = Command::new("xdg-open").arg(url).spawn();
+}
+
+fn open_model_picker_or_text(app: &mut App, mapping: usize) {
+    let provider_id = app.config.model_gateway.mappings[mapping].provider.clone();
+    let Some(provider) = app
+        .config
+        .model_gateway
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+    else {
+        app.status = "请先为模型映射选择有效 Provider".into();
+        return;
+    };
+    if provider.models.is_empty() {
+        open_text(
+            app,
+            "Provider 中的模型（尚未获取，可手工输入）",
+            app.config.model_gateway.mappings[mapping].model.clone(),
+            TextField::ModelMappingModel(mapping),
+        );
+        return;
+    }
+    let mut values = provider
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    values.sort_by_key(|value| value.to_ascii_lowercase());
+    let selected = values
+        .iter()
+        .position(|value| value == &app.config.model_gateway.mappings[mapping].model)
+        .unwrap_or(0);
+    app.model_picker = Some(ModelPicker {
+        mapping,
+        values,
+        selected,
+        query: String::new(),
+    });
+}
+
+fn model_picker_values(picker: &ModelPicker) -> Vec<String> {
+    let query = picker.query.to_ascii_lowercase();
+    picker
+        .values
+        .iter()
+        .filter(|value| query.is_empty() || value.to_ascii_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
+fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
+    let Some(mut picker) = app.model_picker.take() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.status = "已取消模型选择".into();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            picker.selected = picker.selected.saturating_sub(1);
+            app.model_picker = Some(picker);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let count = model_picker_values(&picker).len();
+            picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
+            app.model_picker = Some(picker);
+        }
+        KeyCode::Backspace => {
+            picker.query.pop();
+            picker.selected = 0;
+            app.model_picker = Some(picker);
+        }
+        KeyCode::Char(value) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            picker.query.push(value);
+            picker.selected = 0;
+            app.model_picker = Some(picker);
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let values = model_picker_values(&picker);
+            if let Some(value) = values.get(picker.selected) {
+                app.config.model_gateway.mappings[picker.mapping].model = value.clone();
+                changed(app);
+                app.status = format!("✓ 已选择 Provider 模型 {value}");
+            } else {
+                app.status = "筛选结果为空".into();
+            }
+        }
+        _ => app.model_picker = Some(picker),
+    }
 }
 
 fn edit_object_field(app: &mut App, editor: ObjectEditor) {
@@ -1906,6 +2225,75 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             )
         }
 
+        (ObjectEditor::ModelProvider(index), 0) => open_text(
+            app,
+            "Provider ID",
+            app.config.model_gateway.providers[index].id.clone(),
+            TextField::ModelProviderId(index),
+        ),
+        (ObjectEditor::ModelProvider(index), 1) => open_text(
+            app,
+            "Provider 名称",
+            app.config.model_gateway.providers[index].name.clone(),
+            TextField::ModelProviderName(index),
+        ),
+        (ObjectEditor::ModelProvider(index), 2) => {
+            app.config.model_gateway.providers[index].enabled =
+                !app.config.model_gateway.providers[index].enabled;
+            changed(app);
+        }
+        (ObjectEditor::ModelProvider(index), 3) => {
+            let provider = &mut app.config.model_gateway.providers[index];
+            provider.kind = match provider.kind {
+                ModelProviderKind::OpenAiCompatible => {
+                    if provider.base_url == "https://api.openai.com/v1" {
+                        provider.base_url = "https://chatgpt.com/backend-api/codex".into();
+                    }
+                    ModelProviderKind::ChatGptSubscription
+                }
+                ModelProviderKind::ChatGptSubscription => {
+                    if provider.base_url == "https://chatgpt.com/backend-api/codex" {
+                        provider.base_url = "https://api.openai.com/v1".into();
+                    }
+                    ModelProviderKind::OpenAiCompatible
+                }
+            };
+            changed(app);
+        }
+        (ObjectEditor::ModelProvider(index), 4) => open_text(
+            app,
+            "Provider Base URL",
+            app.config.model_gateway.providers[index].base_url.clone(),
+            TextField::ModelProviderBaseUrl(index),
+        ),
+        (ObjectEditor::ModelProvider(index), 5) => open_secret(
+            app,
+            "Provider API Key",
+            SecretField::ModelProviderApiKey(index),
+        ),
+        (ObjectEditor::ModelProvider(index), 6) => open_secret(
+            app,
+            "ChatGPT Access Token",
+            SecretField::ModelProviderAccessToken(index),
+        ),
+        (ObjectEditor::ModelMapping(index), 0) => open_text(
+            app,
+            "下游模型名称",
+            app.config.model_gateway.mappings[index].name.clone(),
+            TextField::ModelMappingName(index),
+        ),
+        (ObjectEditor::ModelMapping(index), 1) => open_text(
+            app,
+            "Provider ID",
+            app.config.model_gateway.mappings[index].provider.clone(),
+            TextField::ModelMappingProvider(index),
+        ),
+        (ObjectEditor::ModelMapping(index), 2) => open_model_picker_or_text(app, index),
+        (ObjectEditor::ModelMapping(index), 3) => {
+            app.config.model_gateway.mappings[index].enabled =
+                !app.config.model_gateway.mappings[index].enabled;
+            changed(app);
+        }
         (ObjectEditor::RootCertificate(_), 0) => {
             app.status = "指纹不可修改，如需更换请删除后重新导入".into();
         }
@@ -3121,6 +3509,75 @@ fn apply_input(app: &mut App, modal: InputModal) -> Result<(), String> {
 fn apply_text_field(app: &mut App, field: TextField, value: &str) -> Result<(), String> {
     let optional = || (!value.trim().is_empty()).then(|| value.trim().to_owned());
     match field {
+        TextField::ModelGatewayListen => {
+            app.config.model_gateway.listen_address = required(value, "监听地址")?
+        }
+        TextField::ModelGatewayTimeout => {
+            let timeout = value.parse().map_err(|_| "Provider 请求超时必须是正整数")?;
+            if timeout == 0 {
+                return Err("Provider 请求超时必须大于 0".into());
+            }
+            app.config.model_gateway.timeout_ms = timeout;
+        }
+        TextField::ModelProviderId(index) => {
+            let new_id = unique_id(
+                value,
+                "model provider",
+                app.config
+                    .model_gateway
+                    .providers
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != index)
+                    .map(|(_, v)| v.id.as_str()),
+            )?;
+            let old = std::mem::replace(
+                &mut app.config.model_gateway.providers[index].id,
+                new_id.clone(),
+            );
+            for mapping in &mut app.config.model_gateway.mappings {
+                if mapping.provider == old {
+                    mapping.provider = new_id.clone();
+                }
+            }
+        }
+        TextField::ModelProviderName(index) => {
+            app.config.model_gateway.providers[index].name = required(value, "Provider 名称")?
+        }
+        TextField::ModelProviderBaseUrl(index) => {
+            app.config.model_gateway.providers[index].base_url =
+                required(value, "Provider Base URL")?
+        }
+        TextField::ModelMappingName(index) => {
+            let name = required(value, "下游模型名称")?;
+            if app
+                .config
+                .model_gateway
+                .mappings
+                .iter()
+                .enumerate()
+                .any(|(i, m)| i != index && m.name == name)
+            {
+                return Err(format!("模型名称 '{name}' 已存在"));
+            }
+            app.config.model_gateway.mappings[index].name = name;
+        }
+        TextField::ModelMappingProvider(index) => {
+            let provider = required(value, "Provider ID")?;
+            if !app
+                .config
+                .model_gateway
+                .providers
+                .iter()
+                .any(|p| p.id == provider)
+            {
+                return Err(format!("Provider '{provider}' 不存在"));
+            }
+            app.config.model_gateway.mappings[index].provider = provider;
+        }
+        TextField::ModelMappingModel(index) => {
+            app.config.model_gateway.mappings[index].model = required(value, "Provider 模型")?
+        }
         TextField::SocksListen => app.config.listener.socks_listen = required(value, "监听地址")?,
         TextField::PendingTtl => {
             let ttl = value.parse().map_err(|_| "待激活会话有效期必须是正整数")?;
@@ -3305,6 +3762,13 @@ fn apply_secret_field(app: &mut App, field: SecretField, value: &str) -> Result<
         })
     };
     match field {
+        SecretField::ModelGatewayApiKey => app.config.model_gateway.api_key = secret,
+        SecretField::ModelProviderApiKey(index) => {
+            app.config.model_gateway.providers[index].api_key = secret
+        }
+        SecretField::ModelProviderAccessToken(index) => {
+            app.config.model_gateway.providers[index].access_token = secret
+        }
         SecretField::UpstreamUsername(index) => app.config.upstreams[index].username = secret,
         SecretField::UpstreamPassword(index) => app.config.upstreams[index].password = secret,
         SecretField::CredentialPassword(index) => {
@@ -3626,6 +4090,59 @@ fn changed(app: &mut App) {
 
 fn add_selected(app: &mut App) {
     match app.category {
+        CATEGORY_MODEL_GATEWAY if app.field < 4 + app.config.model_gateway.providers.len() => {
+            let id = next_id(
+                "provider",
+                app.config
+                    .model_gateway
+                    .providers
+                    .iter()
+                    .map(|p| p.id.as_str()),
+            );
+            app.config.model_gateway.providers.push(ModelProvider {
+                uuid: hyperhub_core::config::new_config_uuid(),
+                id: id.clone(),
+                name: id.clone(),
+                kind: ModelProviderKind::OpenAiCompatible,
+                enabled: true,
+                base_url: "https://api.openai.com/v1".into(),
+                ..ModelProvider::default()
+            });
+            changed(app);
+            enter_editor(
+                app,
+                ObjectEditor::ModelProvider(app.config.model_gateway.providers.len() - 1),
+            );
+        }
+        CATEGORY_MODEL_GATEWAY => {
+            let name = next_id(
+                "model",
+                app.config
+                    .model_gateway
+                    .mappings
+                    .iter()
+                    .map(|m| m.name.as_str()),
+            );
+            let provider = app
+                .config
+                .model_gateway
+                .providers
+                .first()
+                .map(|p| p.id.clone())
+                .unwrap_or_default();
+            app.config.model_gateway.mappings.push(ModelMapping {
+                uuid: hyperhub_core::config::new_config_uuid(),
+                name,
+                provider,
+                model: String::new(),
+                enabled: true,
+            });
+            changed(app);
+            enter_editor(
+                app,
+                ObjectEditor::ModelMapping(app.config.model_gateway.mappings.len() - 1),
+            );
+        }
         CATEGORY_PROXY => {
             let id = next_id(
                 "upstream",
@@ -3850,6 +4367,35 @@ fn delete_editor_pattern(app: &mut App) {
 
 fn delete_selected(app: &mut App) {
     let result = match app.category {
+        CATEGORY_MODEL_GATEWAY
+            if app.field >= 4 && app.field - 4 < app.config.model_gateway.providers.len() =>
+        {
+            let index = app.field - 4;
+            let id = app.config.model_gateway.providers[index].id.clone();
+            if app
+                .config
+                .model_gateway
+                .mappings
+                .iter()
+                .any(|mapping| mapping.provider == id)
+            {
+                Err(format!("model provider '{id}' 仍被模型映射引用"))
+            } else {
+                app.config.model_gateway.providers.remove(index);
+                Ok(())
+            }
+        }
+        CATEGORY_MODEL_GATEWAY
+            if app.field >= 4 + app.config.model_gateway.providers.len()
+                && app.field - 4 - app.config.model_gateway.providers.len()
+                    < app.config.model_gateway.mappings.len() =>
+        {
+            app.config
+                .model_gateway
+                .mappings
+                .remove(app.field - 4 - app.config.model_gateway.providers.len());
+            Ok(())
+        }
         CATEGORY_PROXY if app.field < app.config.upstreams.len() => {
             let id = &app.config.upstreams[app.field].id;
             if app
@@ -4105,6 +4651,40 @@ fn query_managed_processes_with(
     Ok(processes)
 }
 
+fn refresh_model_provider_models(app: &mut App) -> Result<(), String> {
+    let provider_index = app
+        .field
+        .checked_sub(4)
+        .filter(|index| *index < app.config.model_gateway.providers.len())
+        .ok_or("请先选中一个 Provider")?;
+    let provider = app.config.model_gateway.providers[provider_index].clone();
+    let runtime = control_runtime()?;
+    let result = runtime.block_on(ModelGatewayService::discover_models(
+        &provider,
+        app.config.model_gateway.timeout_ms,
+    ));
+    let models = match result {
+        Ok(models) => models,
+        Err(error) => {
+            app.config.model_gateway.providers[provider_index].last_error = Some(error.clone());
+            changed(app);
+            return Err(error);
+        }
+    };
+    app.config.model_gateway.providers[provider_index].models = models;
+    app.config.model_gateway.providers[provider_index].models_updated_at_ms =
+        Some(hyperhub_core::session::unix_timestamp_ms());
+    app.config.model_gateway.providers[provider_index].last_error = None;
+    changed(app);
+    app.status = format!(
+        "✓ 已获取 {} 个 Provider 模型；模型映射支持按 Provider 模型名配置",
+        app.config.model_gateway.providers[provider_index]
+            .models
+            .len()
+    );
+    Ok(())
+}
+
 fn refresh_managed_processes(app: &mut App) -> bool {
     // 直接复用同一 runtime 查询状态；Serve 离线时控制面请求快速失败，
     // 不再为 serve_is_running 重复新建 Runtime 并增加一次控制面往返。
@@ -4230,6 +4810,44 @@ fn detail_lines(app: &App) -> Vec<String> {
                 format!("路由              {routes} 条（含已启用默认路由）"),
                 format!("证书              {certificates} 项"),
             ]
+        }
+        CATEGORY_MODEL_GATEWAY => {
+            let mut lines = vec![
+                format!(
+                    "启用              {}",
+                    yes_no(app.config.model_gateway.enabled)
+                ),
+                format!(
+                    "监听地址          {}",
+                    app.config.model_gateway.listen_address
+                ),
+                format!(
+                    "Provider 超时      {} ms",
+                    app.config.model_gateway.timeout_ms
+                ),
+                format!(
+                    "API Key           {}",
+                    secret_summary(app.config.model_gateway.api_key.as_ref())
+                ),
+            ];
+            lines.extend(app.config.model_gateway.providers.iter().map(|p| {
+                format!(
+                    "Provider  {}  {:?}  {}",
+                    p.id,
+                    p.kind,
+                    if p.enabled { "启用" } else { "停用" }
+                )
+            }));
+            lines.extend(app.config.model_gateway.mappings.iter().map(|m| {
+                format!(
+                    "模型    {} -> {} -> {}  {}",
+                    m.name,
+                    m.provider,
+                    m.model,
+                    if m.enabled { "启用" } else { "停用" }
+                )
+            }));
+            lines
         }
         CATEGORY_BASIC => vec![
             format!("模式              {:?}", app.config.mode),
@@ -4523,6 +5141,34 @@ fn nonempty(lines: Vec<String>) -> Vec<String> {
 
 fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
     match editor {
+        ObjectEditor::ModelProvider(index) => {
+            let p = &app.config.model_gateway.providers[index];
+            vec![
+                format!("ID                {}", p.id),
+                format!("名称              {}", p.name),
+                format!("启用              {}", yes_no(p.enabled)),
+                format!("类型              {:?}", p.kind),
+                format!("Base URL          {}", p.base_url),
+                format!("API Key           {}", secret_summary(p.api_key.as_ref())),
+                format!(
+                    "Access Token      {}",
+                    secret_summary(p.access_token.as_ref())
+                ),
+                format!(
+                    "Account ID        {}",
+                    p.account_id.as_deref().unwrap_or("未设置")
+                ),
+            ]
+        }
+        ObjectEditor::ModelMapping(index) => {
+            let m = &app.config.model_gateway.mappings[index];
+            vec![
+                format!("模型名称          {}", m.name),
+                format!("Provider           {}", m.provider),
+                format!("Provider 模型      {}", m.model),
+                format!("启用              {}", yes_no(m.enabled)),
+            ]
+        }
         ObjectEditor::DefaultRoute => vec![
             format!("ID                {}（内置，不可修改）", DEFAULT_ROUTE_ID),
             format!(
@@ -4937,6 +5583,18 @@ fn detail_title(app: &App) -> String {
                 )
             )
         }
+        Some(ObjectEditor::ModelProvider(index)) => {
+            format!(
+                "模型网关 / Provider / {}",
+                app.config.model_gateway.providers[index].id
+            )
+        }
+        Some(ObjectEditor::ModelMapping(index)) => {
+            format!(
+                "模型网关 / 模型映射 / {}",
+                app.config.model_gateway.mappings[index].name
+            )
+        }
         None => app.category.breadcrumb(),
     }
 }
@@ -5068,6 +5726,10 @@ fn object_editor_hint(editor: ObjectEditor) -> String {
         ObjectEditor::SandboxProcessRule(_) => "子进程沙盒规则".into(),
         ObjectEditor::FileSandboxRule(_) => "文件沙盒规则与操作权限".into(),
         ObjectEditor::RootCertificate(_) => "证书：配置启用状态与指纹".to_string(),
+        ObjectEditor::ModelProvider(_) => "模型网关 Provider：配置类型、地址和认证".to_string(),
+        ObjectEditor::ModelMapping(_) => {
+            "模型映射：下游模型名称 → Provider → Provider 模型".to_string()
+        }
     }
 }
 
@@ -5078,6 +5740,9 @@ fn selection_hint(app: &App) -> Option<String> {
 
     if app.ssh_key_add_picker.is_some() {
         return Some("选择私钥导入方式".to_string());
+    }
+    if app.model_picker.is_some() {
+        return Some("输入关键字过滤 Provider 模型，Enter 选择".to_string());
     }
     if app.reference_picker.is_some() {
         return Some("选择引用目标".to_string());
@@ -5110,6 +5775,9 @@ fn selection_hint(app: &App) -> Option<String> {
     if matches!(app.focus, Focus::Sidebar) {
         return Some(match app.category {
             CATEGORY_GATEWAY => "网关：代理、凭证、审计、路由和证书能力概览".to_string(),
+            CATEGORY_MODEL_GATEWAY => {
+                "模型网关：订阅转 API、OpenAI-compatible Provider 和模型映射".to_string()
+            }
             CATEGORY_BASIC => "基础：监听地址、运行模式与 Debug 热更新".to_string(),
             CATEGORY_PROXY => "代理：上游代理列表，供路由规则引用".to_string(),
             CATEGORY_CREDENTIAL => "凭证：HTTP 凭证与 SSH 账号、私钥、密码".to_string(),
@@ -5127,6 +5795,44 @@ fn selection_hint(app: &App) -> Option<String> {
 
     match app.category {
         CATEGORY_GATEWAY => Some("网关概览：显示 Serve 与网关配置摘要".to_string()),
+        CATEGORY_MODEL_GATEWAY => {
+            if app.field == 0 {
+                Some("模型网关启用状态：保存后由 Serve 启动本机 OpenAI-compatible 入口".into())
+            } else if app.field == 1 {
+                Some(format!(
+                    "模型网关监听地址：{}",
+                    app.config.model_gateway.listen_address
+                ))
+            } else if app.field == 2 {
+                Some(format!(
+                    "Provider 请求超时：{} ms",
+                    app.config.model_gateway.timeout_ms
+                ))
+            } else if app.field == 3 {
+                Some("下游 API Key：仅用于本机调用模型网关".into())
+            } else if app.field < 4 + app.config.model_gateway.providers.len() {
+                let p = &app.config.model_gateway.providers[app.field - 4];
+                Some(format!(
+                    "Provider {}（UUID={}）：{:?}",
+                    p.id, p.uuid, p.kind
+                ))
+            } else {
+                let index = app
+                    .field
+                    .saturating_sub(4 + app.config.model_gateway.providers.len());
+                app.config
+                    .model_gateway
+                    .mappings
+                    .get(index)
+                    .map(|m| {
+                        format!(
+                            "模型映射 {}：{} -> {} -> {}",
+                            m.name, m.uuid, m.provider, m.model
+                        )
+                    })
+                    .or_else(|| Some("按 a 新增 Provider 或模型映射".into()))
+            }
+        }
         CATEGORY_BASIC => match app.field {
             0 => Some(match app.config.mode {
                 EnforcementMode::Enforce => "Enforce：严格拒绝，失败不兜底直连".to_string(),
@@ -5421,7 +6127,9 @@ fn sidebar_node_style(node: NavNode) -> Style {
 }
 
 fn shortcut_text(app: &App) -> &'static str {
-    if app.reference_picker.is_some() {
+    if app.model_picker.is_some() {
+        " [输入]过滤 [↑↓/jk]选择 [Enter/Space]应用 [Esc]取消"
+    } else if app.reference_picker.is_some() {
         " [↑↓/jk]选择 [Enter/Space]应用 [Esc]取消 [?]帮助"
     } else if app.list_editor.is_some() {
         " [a]添加 [Enter/e]修改 [d]删除 [Esc]返回 [?]帮助"
@@ -5444,6 +6152,8 @@ fn shortcut_text(app: &App) -> &'static str {
         )
     ) {
         " [a]添加子项 [Space]启停 [Enter/e]编辑 [d]删除 [Esc]返回"
+    } else if matches!(app.editor, Some(ObjectEditor::ModelProvider(_))) {
+        " [l]ChatGPT OAuth [Enter/e]编辑或切换 [Space]切换 [Esc]返回 [Ctrl+S]保存 [?]帮助"
     } else if app.editor.is_some() {
         " [Enter/e]编辑或切换 [Space]切换 [Esc]返回 [Ctrl+S]保存 [?]帮助"
     } else if matches!(app.focus, Focus::Sidebar) {
@@ -5710,6 +6420,41 @@ fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(bottom), rows[2]);
     if let Some(picker) = app.reference_picker {
         draw_reference_picker(frame, area, app, picker, accent);
+    }
+    if let Some(picker) = &app.model_picker {
+        let width = area.width.saturating_sub(8).min(72);
+        let height = area.height.saturating_sub(6).min(18);
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, rect);
+        let values = model_picker_values(picker);
+        let items = if values.is_empty() {
+            vec![ListItem::new("（无匹配模型）")]
+        } else {
+            values
+                .iter()
+                .map(|value| ListItem::new(value.clone()))
+                .collect()
+        };
+        let selected =
+            (!values.is_empty()).then_some(picker.selected.min(values.len().saturating_sub(1)));
+        let mut state = ListState::default().with_selected(selected);
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::bordered().title(format!("选择 Provider 模型：{}", picker.query)))
+                .highlight_symbol("> ")
+                .highlight_style(
+                    Style::default()
+                        .fg(accent)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                ),
+            rect,
+            &mut state,
+        );
     }
     if let Some(picker) = app.ssh_key_add_picker {
         let width = area.width.saturating_sub(4).min(42);
@@ -6014,6 +6759,9 @@ mod tests {
                 ssh_password_editor: None,
                 ssh_key_add_picker: None,
                 reference_picker: None,
+                model_picker: None,
+                oauth_rx: None,
+                oauth_provider: None,
                 ssh_key_preview: None,
                 managed_processes: Vec::new(),
                 status: "✓ 配置有效".into(),
@@ -6056,6 +6804,9 @@ mod tests {
             ssh_password_editor: None,
             ssh_key_add_picker: None,
             reference_picker: None,
+            model_picker: None,
+            oauth_rx: None,
+            oauth_provider: None,
             ssh_key_preview: None,
             managed_processes: Vec::new(),
             status: String::new(),
@@ -6088,6 +6839,7 @@ mod tests {
             [
                 "进程",
                 "网关",
+                "模型网关",
                 "  基础",
                 "  代理",
                 "  凭证",
@@ -6207,6 +6959,7 @@ mod tests {
             &[
                 CATEGORY_PROCESS,
                 CATEGORY_GATEWAY,
+                CATEGORY_MODEL_GATEWAY,
                 CATEGORY_BASIC,
                 CATEGORY_PROXY,
                 CATEGORY_CREDENTIAL,
@@ -7930,6 +8683,9 @@ mod tests {
             ssh_password_editor: None,
             ssh_key_add_picker: None,
             reference_picker: None,
+            model_picker: None,
+            oauth_rx: None,
+            oauth_provider: None,
             ssh_key_preview: None,
             managed_processes: Vec::new(),
             status: String::new(),

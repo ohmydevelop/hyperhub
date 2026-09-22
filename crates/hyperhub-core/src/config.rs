@@ -29,6 +29,13 @@ fn default_true() -> bool {
     true
 }
 
+fn default_model_gateway_listen() -> String {
+    "127.0.0.1:18445".into()
+}
+fn default_model_gateway_timeout_ms() -> u64 {
+    30_000
+}
+
 /// Generate the stable identity used by independently editable configuration items.
 pub fn new_config_uuid() -> String {
     let mut bytes = [0u8; 16];
@@ -123,6 +130,8 @@ pub struct Config {
     #[serde(default)]
     pub listener: ListenerConfig,
     #[serde(default)]
+    pub model_gateway: ModelGatewayConfig,
+    #[serde(default)]
     pub audit: AuditPolicy,
     #[serde(default)]
     pub environment: Vec<EnvironmentVariable>,
@@ -156,6 +165,8 @@ struct ConfigWire {
     #[serde(default)]
     listener: ListenerConfig,
     #[serde(default)]
+    model_gateway: ModelGatewayConfig,
+    #[serde(default)]
     audit: AuditPolicy,
     #[serde(default)]
     environment: Vec<EnvironmentVariable>,
@@ -186,6 +197,7 @@ impl<'de> Deserialize<'de> for Config {
             sandbox: wire.sandbox,
             default_route: wire.default_route,
             listener: wire.listener,
+            model_gateway: wire.model_gateway,
             audit: wire.audit,
             environment: wire.environment,
             upstreams: wire.upstreams,
@@ -209,6 +221,7 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             default_route: DefaultRoute::default(),
             listener: ListenerConfig::default(),
+            model_gateway: ModelGatewayConfig::default(),
             audit: AuditPolicy::default(),
             environment: Vec::new(),
             upstreams: Vec::new(),
@@ -266,6 +279,20 @@ impl Config {
                 value.redact();
             }
         }
+        if let Some(api_key) = &mut config.model_gateway.api_key {
+            api_key.redact();
+        }
+        for provider in &mut config.model_gateway.providers {
+            for secret in [
+                &mut provider.api_key,
+                &mut provider.access_token,
+                &mut provider.refresh_token,
+            ] {
+                if let Some(secret) = secret {
+                    secret.redact();
+                }
+            }
+        }
         for plugin in &mut config.plugins {
             if let Some(secret) = &mut plugin.secret {
                 secret.redact();
@@ -294,6 +321,16 @@ impl Config {
                 *uuid = legacy_config_uuid(kind, identity);
             }
         };
+        for item in &mut self.model_gateway.providers {
+            ensure(&mut item.uuid, "model-provider", &item.id);
+        }
+        for item in &mut self.model_gateway.mappings {
+            ensure(
+                &mut item.uuid,
+                "model-mapping",
+                &format!("{}|{}|{}", item.name, item.provider, item.model),
+            );
+        }
         for item in &mut self.upstreams {
             ensure(&mut item.uuid, "upstream", &item.id);
         }
@@ -356,6 +393,7 @@ impl Config {
                 "listener.pending_session_ttl_secs must be positive".into(),
             ));
         }
+        validate_model_gateway(&self.model_gateway)?;
         let mut environment_names = HashSet::new();
         for variable in &self.environment {
             let normalized = variable.name.to_ascii_uppercase();
@@ -772,6 +810,12 @@ impl Config {
             }
             Ok(())
         };
+        for item in &self.model_gateway.providers {
+            register("model provider", &item.id, &item.uuid)?;
+        }
+        for item in &self.model_gateway.mappings {
+            register("model mapping", &item.name, &item.uuid)?;
+        }
         for item in &self.upstreams {
             register("upstream", &item.id, &item.uuid)?;
         }
@@ -882,6 +926,91 @@ fn validate_trust_host(value: &str) -> Result<(), String> {
     let host = host.trim_matches(['[', ']']);
     if host.is_empty() || port.parse::<u16>().ok().is_none_or(|port| port == 0) {
         return Err(format!("TLS host trust '{value}' is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_model_gateway(gateway: &ModelGatewayConfig) -> Result<(), ConfigError> {
+    let listen = gateway
+        .listen_address
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| {
+            ConfigError::Validation(
+                "model_gateway.listen_address must be an IP socket address".into(),
+            )
+        })?;
+    if !listen.ip().is_loopback() {
+        return Err(ConfigError::Validation(
+            "model_gateway.listen_address must use a loopback address".into(),
+        ));
+    }
+    if listen.port() == 0 {
+        return Err(ConfigError::Validation(
+            "model_gateway.listen_address must use a non-zero port".into(),
+        ));
+    }
+    if gateway.timeout_ms == 0 {
+        return Err(ConfigError::Validation(
+            "model_gateway.timeout_ms must be positive".into(),
+        ));
+    }
+    let provider_ids = unique_ids(
+        "model provider",
+        gateway.providers.iter().map(|v| v.id.as_str()),
+    )?;
+    for provider in &gateway.providers {
+        if provider.id.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "model provider id must not be empty".into(),
+            ));
+        }
+        if provider.name.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "model provider '{}' name must not be empty",
+                provider.id
+            )));
+        }
+        if provider.enabled && provider.base_url.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "model provider '{}' base_url must not be empty",
+                provider.id
+            )));
+        }
+        let mut model_ids = HashSet::new();
+        for model in &provider.models {
+            if model.id.trim().is_empty() || !model_ids.insert(model.id.clone()) {
+                return Err(ConfigError::Validation(format!(
+                    "model provider '{}' has an empty or duplicate model id",
+                    provider.id
+                )));
+            }
+        }
+    }
+    let mut mapping_names = HashSet::new();
+    for mapping in &gateway.mappings {
+        if mapping.name.trim().is_empty() || !mapping_names.insert(mapping.name.clone()) {
+            return Err(ConfigError::Validation(format!(
+                "empty or duplicate model mapping name '{}'",
+                mapping.name
+            )));
+        }
+        if !provider_ids.contains(&mapping.provider) {
+            return Err(ConfigError::Validation(format!(
+                "model mapping '{}' references unknown provider '{}'",
+                mapping.name, mapping.provider
+            )));
+        }
+        if mapping.model.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "model mapping '{}' provider model must not be empty",
+                mapping.name
+            )));
+        }
+    }
+    if gateway.enabled && gateway.api_key.is_none() {
+        return Err(ConfigError::Validation(
+            "enabled model gateway requires api_key".into(),
+        ));
     }
     Ok(())
 }
@@ -1261,6 +1390,125 @@ fn is_forbidden_target_header(name: &str) -> bool {
     FORBIDDEN
         .iter()
         .any(|value| name.eq_ignore_ascii_case(value))
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProviderKind {
+    ChatGptSubscription,
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProviderModel {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProvider {
+    #[serde(default)]
+    pub uuid: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub kind: ModelProviderKind,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<SecretValue>,
+    #[serde(default)]
+    pub access_token: Option<SecretValue>,
+    #[serde(default)]
+    pub refresh_token: Option<SecretValue>,
+    #[serde(default)]
+    pub token_expires_at_ms: Option<u64>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ModelProviderModel>,
+    #[serde(default)]
+    pub models_updated_at_ms: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for ModelProvider {
+    fn default() -> Self {
+        Self {
+            uuid: new_config_uuid(),
+            id: String::new(),
+            name: String::new(),
+            kind: ModelProviderKind::OpenAiCompatible,
+            enabled: true,
+            base_url: String::new(),
+            api_key: None,
+            access_token: None,
+            refresh_token: None,
+            token_expires_at_ms: None,
+            account_id: None,
+            models: Vec::new(),
+            models_updated_at_ms: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelMapping {
+    #[serde(default)]
+    pub uuid: String,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for ModelMapping {
+    fn default() -> Self {
+        Self {
+            uuid: new_config_uuid(),
+            name: String::new(),
+            provider: String::new(),
+            model: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelGatewayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_model_gateway_listen")]
+    pub listen_address: String,
+    #[serde(default = "default_model_gateway_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub api_key: Option<SecretValue>,
+    #[serde(default)]
+    pub providers: Vec<ModelProvider>,
+    #[serde(default)]
+    pub mappings: Vec<ModelMapping>,
+}
+
+impl Default for ModelGatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_address: default_model_gateway_listen(),
+            timeout_ms: default_model_gateway_timeout_ms(),
+            api_key: None,
+            providers: Vec::new(),
+            mappings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2813,6 +3061,63 @@ aktion = "deny""#,
             .unwrap_err()
             .to_string()
             .contains("port 0"));
+    }
+
+    #[test]
+    fn model_gateway_validates_mappings_and_redacts_tokens() {
+        let mut config = Config::default();
+        config.model_gateway.enabled = true;
+        config.model_gateway.api_key = Some(SecretValue::Inline {
+            value: "downstream".into(),
+        });
+        config.model_gateway.providers.push(ModelProvider {
+            id: "chatgpt".into(),
+            name: "ChatGPT subscription".into(),
+            kind: ModelProviderKind::ChatGptSubscription,
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            access_token: Some(SecretValue::Inline {
+                value: "access".into(),
+            }),
+            ..Default::default()
+        });
+        config.model_gateway.mappings.push(ModelMapping {
+            name: "codex".into(),
+            provider: "chatgpt".into(),
+            model: "gpt-5-codex".into(),
+            ..Default::default()
+        });
+        config.validate().unwrap();
+        let redacted = config.redacted();
+        assert_eq!(
+            redacted.model_gateway.api_key,
+            Some(SecretValue::Inline {
+                value: "<redacted>".into()
+            })
+        );
+        assert_eq!(
+            redacted.model_gateway.providers[0].access_token,
+            Some(SecretValue::Inline {
+                value: "<redacted>".into()
+            })
+        );
+
+        config.model_gateway.mappings[0].provider = "missing".into();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("unknown provider"));
+    }
+
+    #[test]
+    fn model_gateway_requires_an_api_key_when_enabled() {
+        let mut config = Config::default();
+        config.model_gateway.enabled = true;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires api_key"));
     }
 
     #[test]

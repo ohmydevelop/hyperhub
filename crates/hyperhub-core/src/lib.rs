@@ -11,6 +11,7 @@ pub mod firewall;
 pub mod framing;
 pub mod http;
 pub mod inspect;
+pub mod model_gateway;
 pub mod plugin;
 pub mod policy;
 pub mod process;
