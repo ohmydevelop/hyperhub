@@ -121,10 +121,8 @@ port = 443
 # low_confidence_action = "pass"
 # cache_ttl_ms = 30000
 #
-# [[protections.intelligence.providers]]
+# [protections.intelligence.provider]
 # id = "jev-primary"
-# enabled = false
 # provider = "typesafe"
 # model = "jev-latest"
-# mode = "enforce"
 # api_key = { env = "TYPESAFE_API_KEY" }

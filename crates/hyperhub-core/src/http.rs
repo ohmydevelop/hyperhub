@@ -1553,7 +1553,7 @@ where
                         "would_deny": outcome.would_deny,
                         "reason": outcome.reason,
                         "input_sha256": outcome.input_sha256,
-                        "providers": outcome.providers,
+                        "provider": outcome.provider,
                     })),
                 );
                 if outcome.deny {

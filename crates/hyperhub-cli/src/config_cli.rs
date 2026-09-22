@@ -658,8 +658,8 @@ fn is_config_item_path(tokens: &[String]) -> bool {
                     | "root_certificates"
                     | "ssh_host_keys"
             )
-    ) || matches!(tokens, [root, _, intelligence, providers, _]
-        if root == "protections" && intelligence == "intelligence" && providers == "providers")
+    ) || matches!(tokens, [root, _, intelligence, provider]
+        if root == "protections" && intelligence == "intelligence" && provider == "provider")
         || matches!(tokens, [root, rules, _] if root == "firewall" && rules == "rules")
         || matches!(
             tokens,

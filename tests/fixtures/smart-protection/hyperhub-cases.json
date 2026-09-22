@@ -14,10 +14,10 @@
       "destination_authorized": true
     },
     "expected": {
-      "hard_deny": false,
-      "should_query_gateway": false,
       "final_action": "allow",
-      "would_deny": false
+      "would_deny": false,
+      "local_deny": false,
+      "provider_queried": true
     }
   },
   {
@@ -39,10 +39,10 @@
       "destination_authorized": false
     },
     "expected": {
-      "hard_deny": false,
-      "should_query_gateway": true,
       "final_action": "deny",
-      "would_deny": true
+      "would_deny": true,
+      "local_deny": false,
+      "provider_queried": true
     }
   },
   {
@@ -62,10 +62,10 @@
       "destination_authorized": false
     },
     "expected": {
-      "hard_deny": false,
-      "should_query_gateway": true,
       "final_action": "deny",
-      "would_deny": true
+      "would_deny": true,
+      "local_deny": false,
+      "provider_queried": true
     }
   },
   {
@@ -92,10 +92,10 @@
       "benchmark-secret-placeholder"
     ],
     "expected": {
-      "hard_deny": false,
-      "should_query_gateway": true,
       "final_action": "deny",
-      "would_deny": true
+      "would_deny": true,
+      "local_deny": true,
+      "provider_queried": false
     }
   },
   {
@@ -117,10 +117,10 @@
       "destination_authorized": false
     },
     "expected": {
-      "hard_deny": false,
-      "should_query_gateway": true,
       "final_action": "deny",
-      "would_deny": true
+      "would_deny": true,
+      "local_deny": false,
+      "provider_queried": true
     },
     "launch": "child"
   }

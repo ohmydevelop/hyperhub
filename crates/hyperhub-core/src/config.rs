@@ -218,7 +218,6 @@ impl<'de> Deserialize<'de> for Config {
             rules: wire.rules,
             legacy: wire.legacy,
         };
-        config.migrate_legacy_protection_bindings();
         config.ensure_item_uuids();
         Ok(config)
     }
@@ -310,48 +309,13 @@ impl Config {
             }
         }
         for protection in &mut config.protections {
-            for provider in &mut protection.intelligence.providers {
+            if let Some(provider) = &mut protection.intelligence.provider {
                 if let Some(api_key) = &mut provider.api_key {
                     api_key.redact();
                 }
             }
         }
         config
-    }
-
-    fn migrate_legacy_protection_bindings(&mut self) {
-        migrate_legacy_protection_flag(
-            &mut self.default_route.legacy,
-            &mut self.default_route.protection,
-        );
-        for rule in &mut self.rules {
-            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
-        }
-        for rule in &mut self.firewall.rules {
-            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
-        }
-        for rule in &mut self.sandbox.process.rules {
-            let legacy = rule.legacy.contains_key("protection_enabled");
-            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
-            if legacy {
-                if rule.protection.is_none() {
-                    rule.prefilter_policy = PrefilterPolicy::None;
-                } else if rule.prefilter_policy == PrefilterPolicy::None {
-                    rule.prefilter_policy = PrefilterPolicy::NetworkUpload;
-                }
-            }
-        }
-        for rule in &mut self.sandbox.file.rules {
-            let legacy = rule.legacy.contains_key("protection_enabled");
-            migrate_legacy_protection_flag(&mut rule.legacy, &mut rule.protection);
-            if legacy {
-                if rule.protection.is_none() {
-                    rule.prefilter_policy = PrefilterPolicy::None;
-                } else if rule.prefilter_policy == PrefilterPolicy::None {
-                    rule.prefilter_policy = PrefilterPolicy::SensitiveRead;
-                }
-            }
-        }
     }
 
     pub fn ensure_item_uuids(&mut self) {
@@ -368,7 +332,7 @@ impl Config {
         }
         for protection in &mut self.protections {
             ensure(&mut protection.uuid, "protection", &protection.id);
-            for provider in &mut protection.intelligence.providers {
+            if let Some(provider) = &mut protection.intelligence.provider {
                 ensure(
                     &mut provider.uuid,
                     "protection-provider",
@@ -607,18 +571,13 @@ impl Config {
                     protection.id
                 )));
             }
-            let _provider_ids = unique_ids(
-                "protection provider",
-                protection
-                    .intelligence
-                    .providers
-                    .iter()
-                    .map(|provider| provider.id.as_str()),
-            )?;
-            for provider in &protection.intelligence.providers {
-                if !provider.enabled {
-                    continue;
-                }
+            if protection.intelligence.enabled && protection.intelligence.provider.is_none() {
+                return Err(ConfigError::Validation(format!(
+                    "protection '{}' intelligence requires a provider",
+                    protection.id
+                )));
+            }
+            if let Some(provider) = &protection.intelligence.provider {
                 let (endpoint, model, requires_key) = match provider.provider {
                     IntelligenceProviderKind::Typesafe => (
                         provider
@@ -700,7 +659,6 @@ impl Config {
             &protection_ids,
             self.default_route.protection.as_deref(),
             "default_route",
-            None,
         )?;
 
         let mut certificate_fingerprints = HashSet::new();
@@ -769,7 +727,6 @@ impl Config {
                 &protection_ids,
                 rule.protection.as_deref(),
                 &format!("process sandbox rule '{}'", rule.id),
-                Some(rule.prefilter_policy),
             )?;
             if !rule.patterns.iter().any(|pattern| pattern.enabled) {
                 return Err(ConfigError::Validation(format!(
@@ -811,7 +768,6 @@ impl Config {
                 &protection_ids,
                 rule.protection.as_deref(),
                 &format!("file sandbox rule '{}'", rule.id),
-                Some(rule.prefilter_policy),
             )?;
             if !rule.patterns.iter().any(|pattern| pattern.enabled) {
                 return Err(ConfigError::Validation(format!(
@@ -897,7 +853,6 @@ impl Config {
                 &protection_ids,
                 rule.protection.as_deref(),
                 &format!("firewall rule '{}'", rule.id),
-                Some(rule.prefilter_policy),
             )?;
         }
 
@@ -941,7 +896,6 @@ impl Config {
                 &protection_ids,
                 rule.protection.as_deref(),
                 &format!("route '{}'", rule.id),
-                None,
             )?;
             if rule.allow_sensitive_upload {
                 for endpoint in &rule.endpoints {
@@ -1034,7 +988,7 @@ impl Config {
         }
         for protection in &self.protections {
             register("protection", &protection.id, &protection.uuid)?;
-            for provider in &protection.intelligence.providers {
+            if let Some(provider) = &protection.intelligence.provider {
                 register("protection provider", &provider.id, &provider.uuid)?;
             }
         }
@@ -1091,43 +1045,14 @@ impl Config {
     }
 }
 
-fn migrate_legacy_protection_flag(
-    legacy: &mut HashMap<String, serde_json::Value>,
-    protection: &mut Option<String>,
-) {
-    let Some(value) = legacy.remove("protection_enabled") else {
-        return;
-    };
-    match value.as_bool() {
-        Some(false) => *protection = None,
-        Some(true) => {}
-        None => {
-            legacy.insert("protection_enabled".into(), value);
-        }
-    }
-}
-
 fn validate_optional_protection(
     protection_ids: &HashSet<String>,
     protection: Option<&str>,
     owner: &str,
-    prefilter_policy: Option<PrefilterPolicy>,
 ) -> Result<(), ConfigError> {
-    match (protection, prefilter_policy) {
-        (None, Some(PrefilterPolicy::None)) | (None, None) => return Ok(()),
-        (None, Some(_)) => {
-            return Err(ConfigError::Validation(format!(
-                "{owner} cannot configure prefilter_policy without protection"
-            )))
-        }
-        (Some(_), Some(PrefilterPolicy::None)) => {
-            return Err(ConfigError::Validation(format!(
-                "{owner} requires a non-none prefilter_policy when protection is configured"
-            )))
-        }
-        (Some(_), _) => {}
-    }
-    let id = protection.expect("checked as Some");
+    let Some(id) = protection else {
+        return Ok(());
+    };
     if !protection_ids.contains(id) {
         return Err(ConfigError::Validation(format!(
             "{owner} references unknown protection '{id}'"
@@ -1642,17 +1567,6 @@ pub struct SandboxConfig {
     pub file: FileSandboxConfig,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PrefilterPolicy {
-    #[default]
-    None,
-    NetworkUpload,
-    SensitiveRead,
-    ArchiveOrEncode,
-    NetworkEgress,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessSandboxConfig {
@@ -1681,8 +1595,6 @@ pub struct ProcessSandboxRule {
     pub patterns: Vec<ProcessSandboxPattern>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
-    #[serde(default)]
-    pub prefilter_policy: PrefilterPolicy,
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
 }
@@ -1738,8 +1650,6 @@ pub struct FileSandboxRule {
     pub operations: Vec<FileSandboxOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
-    #[serde(default)]
-    pub prefilter_policy: PrefilterPolicy,
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
 }
@@ -1790,8 +1700,6 @@ pub struct FirewallRule {
     pub endpoints: Vec<FirewallEndpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
-    #[serde(default)]
-    pub prefilter_policy: PrefilterPolicy,
     #[serde(default, flatten)]
     pub legacy: HashMap<String, serde_json::Value>,
 }
@@ -1870,8 +1778,6 @@ pub struct IntelligenceProviderConfig {
     #[serde(default)]
     pub uuid: String,
     pub id: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     pub provider: IntelligenceProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
@@ -1879,8 +1785,6 @@ pub struct IntelligenceProviderConfig {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<SecretValue>,
-    #[serde(default)]
-    pub mode: ProtectionMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1898,8 +1802,8 @@ pub struct IntelligenceProtectionConfig {
     pub low_confidence_action: ProtectionAction,
     #[serde(default = "default_guard_cache_ttl_ms")]
     pub cache_ttl_ms: u64,
-    #[serde(default)]
-    pub providers: Vec<IntelligenceProviderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<IntelligenceProviderConfig>,
 }
 
 impl Default for IntelligenceProtectionConfig {
@@ -1911,7 +1815,7 @@ impl Default for IntelligenceProtectionConfig {
             error_action: ProtectionAction::Pass,
             low_confidence_action: ProtectionAction::Pass,
             cache_ttl_ms: default_guard_cache_ttl_ms(),
-            providers: Vec::new(),
+            provider: None,
         }
     }
 }
@@ -3136,7 +3040,6 @@ aktion = "deny""#,
             action: SandboxAction::Deny,
             patterns: Vec::new(),
             protection: None,
-            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
         assert!(config
@@ -3161,7 +3064,6 @@ aktion = "deny""#,
             patterns: Vec::new(),
             operations: vec![FileSandboxOperation::Read],
             protection: None,
-            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
         assert!(config
@@ -3236,7 +3138,6 @@ aktion = "deny""#,
                 }],
                 legacy: Default::default(),
                 protection: None,
-                prefilter_policy: PrefilterPolicy::None,
             },
             FirewallRule {
                 uuid: new_config_uuid(),
@@ -3250,7 +3151,6 @@ aktion = "deny""#,
                 }],
                 legacy: Default::default(),
                 protection: None,
-                prefilter_policy: PrefilterPolicy::None,
             },
         ];
         assert!(config
@@ -3284,7 +3184,6 @@ aktion = "deny""#,
             }],
             legacy: Default::default(),
             protection: None,
-            prefilter_policy: PrefilterPolicy::None,
         });
         assert!(config
             .validate()
@@ -3385,18 +3284,16 @@ aktion = "deny""#,
             mode: ProtectionMode::Observe,
             data: DataProtectionConfig::default(),
             intelligence: IntelligenceProtectionConfig {
-                providers: vec![IntelligenceProviderConfig {
+                provider: Some(IntelligenceProviderConfig {
                     uuid: new_config_uuid(),
                     id: "jev".into(),
-                    enabled: true,
                     provider: IntelligenceProviderKind::Typesafe,
                     endpoint: None,
                     model: None,
                     api_key: Some(SecretValue::Inline {
                         value: "secret-key".into(),
                     }),
-                    mode: ProtectionMode::Observe,
-                }],
+                }),
                 ..IntelligenceProtectionConfig::default()
             },
         });
@@ -3404,5 +3301,39 @@ aktion = "deny""#,
         let redacted = serde_json::to_string(&config.redacted()).unwrap();
         assert!(!redacted.contains("secret-key"));
         assert!(redacted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn rejects_removed_smart_protection_fields() {
+        let old_provider_array = r#"
+            [[protections]]
+            id = "guard"
+            [protections.intelligence]
+            enabled = true
+            [[protections.intelligence.providers]]
+            id = "jev"
+            enabled = true
+            provider = "typesafe"
+            mode = "enforce"
+        "#;
+        assert!(toml::from_str::<Config>(old_provider_array).is_err());
+
+        let old_prefilter = r#"
+            [sandbox.process]
+            enabled = true
+            [[sandbox.process.rules]]
+            id = "guarded"
+            action = "pass"
+            protection = "guard"
+            prefilter_policy = "network_upload"
+            [[sandbox.process.rules.patterns]]
+            executable = "curl"
+        "#;
+        let config = toml::from_str::<Config>(old_prefilter).unwrap();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("prefilter_policy"));
     }
 }

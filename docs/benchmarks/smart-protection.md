@@ -5,8 +5,8 @@
 The smart-protection matrix supports two paths:
 
 ```text
-direct:    local prefilter -> redacted full argv -> provider -> allow/deny
-hyperhub:  ptrace/Gum process hook -> local prefilter -> control channel -> gateway -> Jev -> process allow/deny -> audit
+direct:    local sanitizer -> redacted full argv -> provider -> allow/deny
+hyperhub:  ptrace/Gum process hook -> local sanitizer -> control channel -> gateway -> Jev -> process allow/deny -> audit
 ```
 
 The default backend is a deterministic local Mock Jev server. It requires no API key or
@@ -52,7 +52,7 @@ python3 scripts/benchmark-smart-protection.py \
 无网络副作用的 `curl` 测试替身触发真实 `hyperhub run`。检查项包括：
 
 - ptrace/Gum 进程 Hook 是否命中绑定规则；
-- 本地预筛选是否决定查询网关；
+- 本地高置信度检测是否正确短路模型；
 - 网关是否产生 `smart_protection_decision` 审计事件；
 - Jev deny 是否在进程创建前变成 `EACCES`；
 - Jev pass 是否允许测试替身执行；
@@ -67,33 +67,28 @@ private-key transfer, base64/pipe and archive bypasses, destructive requests, pr
 injection context, command-line secret redaction, local hard-deny, observe mode, provider
 malformed/low-confidence/timeout behavior, and a benign archive false-positive case.
 
-The local baseline uses a deterministic score plus hard-deny rules:
-
-- score below 60: no provider query;
-- score at least 60: query the provider;
-- known managed-secret match or static sandbox deny: local hard deny;
-- command-line values are redacted while executable, argument names, ordering, target,
-and operation structure are preserved.
+The local safety layer always redacts credentials and preserves command structure. A managed
+secret, private credential, or other high-confidence local finding short-circuits the provider;
+all remaining protected actions query the configured provider.
 
 ## Default gates
 
-- local prefilter P99: `< 1 ms`;
+- local sanitizer P99: `< 1 ms`;
 - healthy Mock provider P95: `< 50 ms`;
 - no synthetic secret may occur in the provider payload;
 - every hard-deny case must block without a provider query;
 - every Mock deny case must produce a deny in enforce mode;
 - observe mode must record a would-deny result while allowing the action.
 
-## Agent / ptrace 预筛选状态
+## Agent / ptrace 脱敏状态
 
 Sandbox snapshot 可以携带：
 
 ```toml
 protection = "agent-egress"
-prefilter_policy = "network_upload"
 ```
 
-Gum Agent 与 Linux ptrace supervisor 都会执行本地 score/hard-deny/query 判定，
-保留完整参数结构并脱敏敏感值，然后通过控制通道向网关请求智能判断。网关写入
+Gum Agent 与 Linux ptrace supervisor 都会保留完整参数结构并脱敏敏感值；
+高置信度本地命中短路模型，其余受保护动作通过控制通道请求智能判断。网关写入
 `smart_protection_decision`，deny 会在 `execve`/`execveat` 返回前阻断。默认规则不设置
 `protection`，不会改变既有 sandbox 行为。

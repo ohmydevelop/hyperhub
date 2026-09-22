@@ -1,4 +1,4 @@
-use crate::config::{parse_route_target, Config, FirewallAction, PrefilterPolicy, RouteTarget};
+use crate::config::{parse_route_target, Config, FirewallAction, RouteTarget};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -20,8 +20,6 @@ pub struct FirewallSnapshotRule {
     pub endpoints: Vec<FirewallSnapshotEndpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<String>,
-    #[serde(default)]
-    pub prefilter_policy: PrefilterPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,7 +71,6 @@ pub struct FirewallDecision {
     pub rule_id: Option<String>,
     pub source: FirewallDecisionSource,
     pub protection: Option<String>,
-    pub prefilter_policy: PrefilterPolicy,
 }
 
 pub fn decide(
@@ -100,7 +97,6 @@ pub fn decide(
                 rule_id: Some(rule.id.clone()),
                 source: FirewallDecisionSource::Rule,
                 protection: rule.protection.clone(),
-                prefilter_policy: rule.prefilter_policy,
             };
         }
     }
@@ -109,7 +105,6 @@ pub fn decide(
         rule_id: None,
         source: FirewallDecisionSource::Default,
         protection: None,
-        prefilter_policy: PrefilterPolicy::None,
     }
 }
 
@@ -171,7 +166,6 @@ pub fn compile_snapshot(config: &Config, version: u64) -> Result<Option<Firewall
                 action: rule.action,
                 endpoints,
                 protection: rule.protection.clone(),
-                prefilter_policy: rule.prefilter_policy,
             },
         ));
     }
@@ -202,7 +196,6 @@ mod tests {
                 port: None,
             }],
             protection: None,
-            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         }
     }
@@ -254,7 +247,6 @@ mod tests {
                 port: Some(443),
             }],
             protection: None,
-            prefilter_policy: PrefilterPolicy::None,
             legacy: Default::default(),
         });
 
@@ -281,7 +273,6 @@ mod tests {
                 id: "allow-example".into(),
                 action: FirewallAction::Pass,
                 protection: None,
-                prefilter_policy: PrefilterPolicy::None,
                 endpoints: vec![FirewallSnapshotEndpoint {
                     target: FirewallTarget::Domain {
                         host: "example.com".into(),

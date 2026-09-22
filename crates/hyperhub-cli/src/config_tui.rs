@@ -10,7 +10,7 @@ use hyperhub_core::config::{
     FileSandboxOperation, FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallDefaultRule,
     FirewallEndpoint, FirewallRule, HttpAuthScheme, IntelligenceProtectionConfig,
     IntelligenceProviderConfig, IntelligenceProviderKind, PluginConfig, PluginKind, PluginProtocol,
-    PrefilterPolicy, ProcessSandboxPattern, ProcessSandboxRule, ProtectionMode, ProtectionProfile,
+    ProcessSandboxPattern, ProcessSandboxRule, ProtectionAction, ProtectionMode, ProtectionProfile,
     RootCertificate, RouteEndpoint, RouteRule, RouteTarget, SandboxAction, SecretValue, SshAccount,
     SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture, DEFAULT_ROUTE_ID,
 };
@@ -163,6 +163,8 @@ enum ObjectEditor {
     Credential(usize),
     AuditProfile(usize),
     Protection(usize),
+    ProtectionLocal(usize),
+    ProtectionIntelligence(usize),
     Route(usize),
     FirewallRule(usize),
     SandboxProcessRule(usize),
@@ -187,6 +189,8 @@ enum TextField {
     AuditRetentionDays,
     ProtectionId(usize),
     ProtectionMaxScanBytes(usize),
+    ProtectionProvenanceWindow(usize),
+    ProtectionProvenanceMatches(usize),
     ProtectionTimeoutMs(usize),
     ProtectionMinConfidence(usize),
     ProtectionCacheTtlMs(usize),
@@ -663,10 +667,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
     match key.code {
         KeyCode::Char('?') => app.help = true,
         KeyCode::Esc | KeyCode::Char('h') if app.editor.is_some() => {
-            app.editor = None;
-            app.field = 0;
-            app.focus = Focus::Detail;
-            app.status = "已返回对象列表".into();
+            if let Some(
+                ObjectEditor::ProtectionLocal(index) | ObjectEditor::ProtectionIntelligence(index),
+            ) = app.editor
+            {
+                app.editor = Some(ObjectEditor::Protection(index));
+                app.field = 0;
+                app.status = "已返回智能防护概览".into();
+            } else {
+                app.editor = None;
+                app.field = 0;
+                app.focus = Focus::Detail;
+                app.status = "已返回对象列表".into();
+            }
         }
         KeyCode::Esc if matches!(app.focus, Focus::Detail) => {
             app.focus = Focus::Sidebar;
@@ -683,7 +696,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         KeyCode::Enter | KeyCode::Char('e') => {
-            if selected_is_toggle(app) {
+            if matches!(app.editor, Some(ObjectEditor::ProtectionLocal(_)))
+                && matches!(app.field, 4..=7)
+            {
+                app.status = "扫描策略请按 Space 启停".into();
+            } else if selected_is_toggle(app) {
                 toggle_selected(app);
             } else {
                 edit_selected(app);
@@ -1420,7 +1437,9 @@ fn object_field_is_toggle(app: &App, editor: ObjectEditor, field: usize) -> bool
                     ))
         }
         ObjectEditor::AuditProfile(_) => matches!(field, 1..=10),
-        ObjectEditor::Protection(_) => matches!(field, 1 | 2 | 3 | 5..=9 | 13 | 15 | 16),
+        ObjectEditor::Protection(_) => matches!(field, 1 | 2),
+        ObjectEditor::ProtectionLocal(_) => matches!(field, 0 | 4..=7),
+        ObjectEditor::ProtectionIntelligence(_) => matches!(field, 0 | 1 | 8 | 9),
         ObjectEditor::DefaultRoute => matches!(field, 1 | 2),
         ObjectEditor::Route(_) => matches!(field, 1 | 4 | 9),
         ObjectEditor::FirewallRule(_) => matches!(field, 1 | 3),
@@ -1433,14 +1452,14 @@ fn object_field_is_toggle(app: &App, editor: ObjectEditor, field: usize) -> bool
 fn toggle_selected(app: &mut App) {
     if let Some(editor) = app.editor {
         match editor {
-            ObjectEditor::SandboxProcessRule(rule) if app.field >= 6 => {
-                let pattern = &mut app.config.sandbox.process.rules[rule].patterns[app.field - 6];
+            ObjectEditor::SandboxProcessRule(rule) if app.field >= 5 => {
+                let pattern = &mut app.config.sandbox.process.rules[rule].patterns[app.field - 5];
                 pattern.enabled = !pattern.enabled;
                 changed(app);
                 return;
             }
-            ObjectEditor::FileSandboxRule(rule) if app.field >= 11 => {
-                let pattern = &mut app.config.sandbox.file.rules[rule].patterns[app.field - 11];
+            ObjectEditor::FileSandboxRule(rule) if app.field >= 10 => {
+                let pattern = &mut app.config.sandbox.file.rules[rule].patterns[app.field - 10];
                 pattern.enabled = !pattern.enabled;
                 changed(app);
                 return;
@@ -1462,8 +1481,8 @@ fn toggle_selected(app: &mut App) {
             };
             changed(app);
             app.status = match app.config.mode {
-                EnforcementMode::Enforce => "模式：Enforce，严格拒绝且失败不兜底".into(),
-                EnforcementMode::Observe => "模式：Observe，观察模式失败时直连兜底".into(),
+                EnforcementMode::Enforce => "网关故障策略：失败关闭".into(),
+                EnforcementMode::Observe => "网关故障策略：失败放行".into(),
             };
         }
         (CATEGORY_BASIC, 3) => {
@@ -1584,7 +1603,7 @@ fn edit_selected(app: &mut App) {
             app.focus = Focus::Detail;
             app.status = "进程概览显示活跃的受管进程".into();
         }
-        (CATEGORY_BASIC, 0) => app.status = "模式请按 Space 切换".into(),
+        (CATEGORY_BASIC, 0) => app.status = "网关故障策略请按 Space 切换".into(),
         (CATEGORY_BASIC, 3) => app.status = "Debug 请按 Space 切换".into(),
         (CATEGORY_BASIC, 1) => open_input(
             app,
@@ -1746,171 +1765,182 @@ fn enter_editor(app: &mut App, editor: ObjectEditor) {
 
 fn edit_protection_field(app: &mut App, index: usize, field: usize) {
     match field {
-        0 => {
-            let value = app.config.protections[index].id.clone();
-            open_text(app, "智能防护 ID", value, TextField::ProtectionId(index));
-        }
+        0 => open_text(
+            app,
+            "智能防护 ID",
+            app.config.protections[index].id.clone(),
+            TextField::ProtectionId(index),
+        ),
         1 => {
-            app.config.protections[index].enabled = !app.config.protections[index].enabled;
+            app.config.protections[index].enabled ^= true;
             changed(app);
         }
         2 => {
-            let value = app.config.protections[index].mode;
-            app.config.protections[index].mode = match value {
+            app.config.protections[index].mode = match app.config.protections[index].mode {
                 ProtectionMode::Observe => ProtectionMode::Enforce,
                 ProtectionMode::Enforce => ProtectionMode::Observe,
             };
             changed(app);
         }
-        3 => {
-            app.config.protections[index].data.enabled =
-                !app.config.protections[index].data.enabled;
+        3 => enter_editor(app, ObjectEditor::ProtectionLocal(index)),
+        4 => enter_editor(app, ObjectEditor::ProtectionIntelligence(index)),
+        _ => app.status = "当前字段不可编辑".into(),
+    }
+}
+
+fn edit_protection_local_field(app: &mut App, index: usize, field: usize) {
+    match field {
+        0 => {
+            app.config.protections[index].data.enabled ^= true;
             changed(app);
         }
-        4 => {
-            let value = app.config.protections[index]
+        1 => open_text(
+            app,
+            "最大扫描字节数",
+            app.config.protections[index]
                 .data
                 .max_scan_bytes
-                .to_string();
-            open_text(
-                app,
-                "最大扫描字节数",
-                value,
-                TextField::ProtectionMaxScanBytes(index),
-            );
+                .to_string(),
+            TextField::ProtectionMaxScanBytes(index),
+        ),
+        2 => open_text(
+            app,
+            "来源追踪窗口字节数",
+            app.config.protections[index]
+                .data
+                .provenance_window_bytes
+                .to_string(),
+            TextField::ProtectionProvenanceWindow(index),
+        ),
+        3 => open_text(
+            app,
+            "来源追踪命中阈值",
+            app.config.protections[index]
+                .data
+                .provenance_min_matches
+                .to_string(),
+            TextField::ProtectionProvenanceMatches(index),
+        ),
+        4 => {
+            app.config.protections[index].data.detect_managed_secrets ^= true;
+            changed(app);
         }
         5 => {
-            let value = app.config.protections[index].data.detect_managed_secrets;
-            app.config.protections[index].data.detect_managed_secrets = !value;
+            app.config.protections[index].data.detect_known_tokens ^= true;
             changed(app);
         }
         6 => {
-            let value = app.config.protections[index].data.detect_known_tokens;
-            app.config.protections[index].data.detect_known_tokens = !value;
+            app.config.protections[index].data.detect_private_keys ^= true;
             changed(app);
         }
         7 => {
-            let value = app.config.protections[index].data.detect_private_keys;
-            app.config.protections[index].data.detect_private_keys = !value;
+            app.config.protections[index].data.detect_prompt_injection ^= true;
             changed(app);
         }
-        8 => {
-            let value = app.config.protections[index].data.detect_prompt_injection;
-            app.config.protections[index].data.detect_prompt_injection = !value;
+        _ => app.status = "当前字段不可编辑".into(),
+    }
+}
+
+fn edit_protection_intelligence_field(app: &mut App, index: usize, field: usize) {
+    match field {
+        0 => {
+            let item = &mut app.config.protections[index].intelligence;
+            item.enabled ^= true;
+            if item.enabled && item.provider.is_none() {
+                item.provider = Some(default_intelligence_provider());
+            }
             changed(app);
         }
-        9 => {
-            let value = app.config.protections[index].intelligence.enabled;
-            app.config.protections[index].intelligence.enabled = !value;
+        1 => {
+            let provider = app.config.protections[index]
+                .intelligence
+                .provider
+                .get_or_insert_with(default_intelligence_provider);
+            provider.provider = match provider.provider {
+                IntelligenceProviderKind::Typesafe => IntelligenceProviderKind::Openrouter,
+                IntelligenceProviderKind::Openrouter => IntelligenceProviderKind::Custom,
+                IntelligenceProviderKind::Custom => IntelligenceProviderKind::Typesafe,
+            };
             changed(app);
         }
-        10 => {
-            let value = app.config.protections[index]
+        2 => open_text(
+            app,
+            "Provider endpoint（官方可留空）",
+            app.config.protections[index]
                 .intelligence
-                .timeout_ms
-                .to_string();
-            open_text(
-                app,
-                "智能判定超时（ms）",
-                value,
-                TextField::ProtectionTimeoutMs(index),
-            );
-        }
-        11 => {
-            let value = app.config.protections[index]
-                .intelligence
-                .min_confidence
-                .to_string();
-            open_text(
-                app,
-                "最低置信度（0-1）",
-                value,
-                TextField::ProtectionMinConfidence(index),
-            );
-        }
-        12 => {
-            let value = app.config.protections[index]
-                .intelligence
-                .cache_ttl_ms
-                .to_string();
-            open_text(
-                app,
-                "缓存时间（ms）",
-                value,
-                TextField::ProtectionCacheTtlMs(index),
-            );
-        }
-        13 => {
-            if let Some(provider) = app.config.protections[index]
-                .intelligence
-                .providers
-                .first_mut()
-            {
-                provider.enabled = !provider.enabled;
-                changed(app);
-            }
-        }
-        14 => {
-            if let Some(provider) = app.config.protections[index]
-                .intelligence
-                .providers
-                .first_mut()
-            {
-                provider.provider = match provider.provider {
-                    IntelligenceProviderKind::Typesafe => IntelligenceProviderKind::Openrouter,
-                    IntelligenceProviderKind::Openrouter => IntelligenceProviderKind::Custom,
-                    IntelligenceProviderKind::Custom => IntelligenceProviderKind::Typesafe,
-                };
-                changed(app);
-            }
-        }
-        15 => {
-            if let Some(provider) = app.config.protections[index]
-                .intelligence
-                .providers
-                .first_mut()
-            {
-                provider.mode = match provider.mode {
-                    ProtectionMode::Observe => ProtectionMode::Enforce,
-                    ProtectionMode::Enforce => ProtectionMode::Observe,
-                };
-                changed(app);
-            }
-        }
-        16 => {
-            let value = app.config.protections[index]
-                .intelligence
-                .providers
-                .first()
+                .provider
+                .as_ref()
                 .and_then(|p| p.endpoint.clone())
-                .unwrap_or_default();
-            open_text(
-                app,
-                "Provider endpoint（官方可留空）",
-                value,
-                TextField::ProtectionProviderEndpoint(index),
-            );
-        }
-        17 => {
-            let value = app.config.protections[index]
+                .unwrap_or_default(),
+            TextField::ProtectionProviderEndpoint(index),
+        ),
+        3 => open_text(
+            app,
+            "Provider model（官方可留空）",
+            app.config.protections[index]
                 .intelligence
-                .providers
-                .first()
+                .provider
+                .as_ref()
                 .and_then(|p| p.model.clone())
-                .unwrap_or_default();
-            open_text(
-                app,
-                "Provider model（官方可留空）",
-                value,
-                TextField::ProtectionProviderModel(index),
-            );
-        }
-        18 => open_secret(
+                .unwrap_or_default(),
+            TextField::ProtectionProviderModel(index),
+        ),
+        4 => open_secret(
             app,
             "Provider API Key",
             SecretField::ProtectionProviderApiKey(index),
         ),
+        5 => open_text(
+            app,
+            "智能判定超时（ms）",
+            app.config.protections[index]
+                .intelligence
+                .timeout_ms
+                .to_string(),
+            TextField::ProtectionTimeoutMs(index),
+        ),
+        6 => open_text(
+            app,
+            "最低置信度（0-1）",
+            app.config.protections[index]
+                .intelligence
+                .min_confidence
+                .to_string(),
+            TextField::ProtectionMinConfidence(index),
+        ),
+        7 => open_text(
+            app,
+            "缓存时间（ms）",
+            app.config.protections[index]
+                .intelligence
+                .cache_ttl_ms
+                .to_string(),
+            TextField::ProtectionCacheTtlMs(index),
+        ),
+        8 => {
+            let value = &mut app.config.protections[index].intelligence.error_action;
+            *value = opposite_protection_action(*value);
+            changed(app);
+        }
+        9 => {
+            let value = &mut app.config.protections[index]
+                .intelligence
+                .low_confidence_action;
+            *value = opposite_protection_action(*value);
+            changed(app);
+        }
         _ => app.status = "当前字段不可编辑".into(),
+    }
+}
+
+fn default_intelligence_provider() -> IntelligenceProviderConfig {
+    IntelligenceProviderConfig {
+        uuid: hyperhub_core::config::new_config_uuid(),
+        id: "jev-primary".into(),
+        provider: IntelligenceProviderKind::Typesafe,
+        endpoint: None,
+        model: None,
+        api_key: None,
     }
 }
 
@@ -1953,6 +1983,12 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
 
         (ObjectEditor::AuditProfile(index), field) => edit_audit_field(app, index, field),
         (ObjectEditor::Protection(index), field) => edit_protection_field(app, index, field),
+        (ObjectEditor::ProtectionLocal(index), field) => {
+            edit_protection_local_field(app, index, field)
+        }
+        (ObjectEditor::ProtectionIntelligence(index), field) => {
+            edit_protection_intelligence_field(app, index, field)
+        }
 
         (ObjectEditor::DefaultRoute, 0) => {
             app.status = "默认路由 ID 固定为 'default'，不能修改".into();
@@ -2048,12 +2084,8 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             ReferenceTarget::Firewall(index),
             ReferenceKind::Protection,
         ),
-        (ObjectEditor::FirewallRule(index), 5) => {
-            cycle_prefilter_policy(&mut app.config.firewall.rules[index].prefilter_policy);
-            changed(app);
-        }
-        (ObjectEditor::FirewallRule(index), field) if field >= 6 => {
-            let value = app.config.firewall.rules[index].endpoints[field - 6]
+        (ObjectEditor::FirewallRule(index), field) if field >= 5 => {
+            let value = app.config.firewall.rules[index].endpoints[field - 5]
                 .target
                 .clone();
             open_input(
@@ -2061,7 +2093,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
                 "目标（域名、IP 或 CIDR）",
                 &value,
                 false,
-                InputAction::FirewallTarget(index, Some(field - 6)),
+                InputAction::FirewallTarget(index, Some(field - 5)),
             )
         }
 
@@ -2092,12 +2124,8 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             ReferenceTarget::Process(index),
             ReferenceKind::Protection,
         ),
-        (ObjectEditor::SandboxProcessRule(index), 5) => {
-            cycle_prefilter_policy(&mut app.config.sandbox.process.rules[index].prefilter_policy);
-            changed(app);
-        }
-        (ObjectEditor::SandboxProcessRule(index), field) if field >= 6 => {
-            let value = app.config.sandbox.process.rules[index].patterns[field - 6]
+        (ObjectEditor::SandboxProcessRule(index), field) if field >= 5 => {
+            let value = app.config.sandbox.process.rules[index].patterns[field - 5]
                 .executable
                 .clone();
             open_input(
@@ -2105,7 +2133,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
                 "可执行文件正则（可留空）",
                 &value,
                 false,
-                InputAction::ProcessExecutable(index, Some(field - 6)),
+                InputAction::ProcessExecutable(index, Some(field - 5)),
             )
         }
         (ObjectEditor::FileSandboxRule(index), 0) => open_text(
@@ -2149,12 +2177,8 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
         (ObjectEditor::FileSandboxRule(index), 9) => {
             open_reference_picker(app, ReferenceTarget::File(index), ReferenceKind::Protection)
         }
-        (ObjectEditor::FileSandboxRule(index), 10) => {
-            cycle_prefilter_policy(&mut app.config.sandbox.file.rules[index].prefilter_policy);
-            changed(app);
-        }
-        (ObjectEditor::FileSandboxRule(index), field) if field >= 11 => {
-            let value = app.config.sandbox.file.rules[index].patterns[field - 11]
+        (ObjectEditor::FileSandboxRule(index), field) if field >= 10 => {
+            let value = app.config.sandbox.file.rules[index].patterns[field - 10]
                 .pattern
                 .clone();
             open_input(
@@ -2162,7 +2186,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
                 "路径正则",
                 &value,
                 false,
-                InputAction::FilePattern(index, Some(field - 11)),
+                InputAction::FilePattern(index, Some(field - 10)),
             )
         }
 
@@ -2775,47 +2799,15 @@ fn open_target_editor(app: &mut App, route: usize) {
     open_list_editor(app, ListEditorKind::RouteTargets(route));
 }
 
-fn default_prefilter(target: ReferenceTarget) -> PrefilterPolicy {
-    match target {
-        ReferenceTarget::Firewall(_) => PrefilterPolicy::NetworkEgress,
-        ReferenceTarget::Process(_) => PrefilterPolicy::NetworkUpload,
-        ReferenceTarget::File(_) => PrefilterPolicy::SensitiveRead,
-        ReferenceTarget::DefaultRoute | ReferenceTarget::Route(_) => PrefilterPolicy::None,
-    }
-}
-
 fn apply_protection_reference(app: &mut App, target: ReferenceTarget, selected: Option<String>) {
-    let default_policy = default_prefilter(target);
     match target {
         ReferenceTarget::DefaultRoute => app.config.default_route.protection = selected,
         ReferenceTarget::Route(index) => app.config.rules[index].protection = selected,
-        ReferenceTarget::Firewall(index) => {
-            app.config.firewall.rules[index].protection = selected;
-            app.config.firewall.rules[index].prefilter_policy =
-                if app.config.firewall.rules[index].protection.is_some() {
-                    default_policy
-                } else {
-                    PrefilterPolicy::None
-                };
-        }
+        ReferenceTarget::Firewall(index) => app.config.firewall.rules[index].protection = selected,
         ReferenceTarget::Process(index) => {
-            app.config.sandbox.process.rules[index].protection = selected;
-            app.config.sandbox.process.rules[index].prefilter_policy =
-                if app.config.sandbox.process.rules[index].protection.is_some() {
-                    default_policy
-                } else {
-                    PrefilterPolicy::None
-                };
+            app.config.sandbox.process.rules[index].protection = selected
         }
-        ReferenceTarget::File(index) => {
-            app.config.sandbox.file.rules[index].protection = selected;
-            app.config.sandbox.file.rules[index].prefilter_policy =
-                if app.config.sandbox.file.rules[index].protection.is_some() {
-                    default_policy
-                } else {
-                    PrefilterPolicy::None
-                };
-        }
+        ReferenceTarget::File(index) => app.config.sandbox.file.rules[index].protection = selected,
     }
 }
 
@@ -3600,6 +3592,14 @@ fn apply_text_field(app: &mut App, field: TextField, value: &str) -> Result<(), 
             }
             app.config.protections[index].intelligence.timeout_ms = parsed;
         }
+        TextField::ProtectionProvenanceWindow(index) => {
+            let parsed: usize = value.parse().map_err(|_| "来源追踪窗口必须是正整数")?;
+            app.config.protections[index].data.provenance_window_bytes = parsed;
+        }
+        TextField::ProtectionProvenanceMatches(index) => {
+            let parsed: usize = value.parse().map_err(|_| "来源追踪命中阈值必须是正整数")?;
+            app.config.protections[index].data.provenance_min_matches = parsed;
+        }
         TextField::ProtectionMinConfidence(index) => {
             let parsed: f64 = value.parse().map_err(|_| "最低置信度必须是 0-1 数值")?;
             if !(0.0..=1.0).contains(&parsed) {
@@ -3612,10 +3612,18 @@ fn apply_text_field(app: &mut App, field: TextField, value: &str) -> Result<(), 
                 value.parse().map_err(|_| "缓存时间必须是非负整数")?;
         }
         TextField::ProtectionProviderEndpoint(index) => {
-            app.config.protections[index].intelligence.providers[0].endpoint = optional();
+            app.config.protections[index]
+                .intelligence
+                .provider
+                .get_or_insert_with(default_intelligence_provider)
+                .endpoint = optional();
         }
         TextField::ProtectionProviderModel(index) => {
-            app.config.protections[index].intelligence.providers[0].model = optional();
+            app.config.protections[index]
+                .intelligence
+                .provider
+                .get_or_insert_with(default_intelligence_provider)
+                .model = optional();
         }
         TextField::RouteId(index) => {
             app.config.rules[index].id = unique_id(
@@ -3689,7 +3697,11 @@ fn apply_secret_field(app: &mut App, field: SecretField, value: &str) -> Result<
             app.config.plugins[idx].secret = secret;
         }
         SecretField::ProtectionProviderApiKey(index) => {
-            app.config.protections[index].intelligence.providers[0].api_key = secret;
+            app.config.protections[index]
+                .intelligence
+                .provider
+                .get_or_insert_with(default_intelligence_provider)
+                .api_key = secret;
         }
         SecretField::SshPassword(credential, account, password_index) => {
             let idx = credential_plugin_index(&app.config, credential);
@@ -4075,16 +4087,7 @@ fn add_selected(app: &mut App) {
                 mode: ProtectionMode::Observe,
                 data: DataProtectionConfig::default(),
                 intelligence: IntelligenceProtectionConfig {
-                    providers: vec![IntelligenceProviderConfig {
-                        uuid: hyperhub_core::config::new_config_uuid(),
-                        id: "jev-primary".into(),
-                        enabled: false,
-                        provider: IntelligenceProviderKind::Typesafe,
-                        endpoint: None,
-                        model: None,
-                        api_key: None,
-                        mode: ProtectionMode::Enforce,
-                    }],
+                    provider: Some(default_intelligence_provider()),
                     ..IntelligenceProtectionConfig::default()
                 },
             });
@@ -4112,7 +4115,6 @@ fn add_selected(app: &mut App) {
                 endpoints: Vec::new(),
                 legacy: Default::default(),
                 protection: None,
-                prefilter_policy: PrefilterPolicy::None,
             });
             changed(app);
             enter_editor(
@@ -4138,7 +4140,6 @@ fn add_selected(app: &mut App) {
                 action: SandboxAction::Deny,
                 patterns: Vec::new(),
                 protection: None,
-                prefilter_policy: PrefilterPolicy::None,
                 legacy: Default::default(),
             });
             changed(app);
@@ -4161,7 +4162,6 @@ fn add_selected(app: &mut App) {
                 patterns: Vec::new(),
                 operations: vec![FileSandboxOperation::Read],
                 protection: None,
-                prefilter_policy: PrefilterPolicy::None,
                 legacy: Default::default(),
             });
             changed(app);
@@ -4236,22 +4236,22 @@ fn add_editor_pattern(app: &mut App) {
 
 fn delete_editor_pattern(app: &mut App) {
     match app.editor {
-        Some(ObjectEditor::FirewallRule(rule)) if app.field >= 6 => {
+        Some(ObjectEditor::FirewallRule(rule)) if app.field >= 5 => {
             app.config.firewall.rules[rule]
                 .endpoints
-                .remove(app.field - 6);
+                .remove(app.field - 5);
             changed(app);
         }
         Some(ObjectEditor::SandboxProcessRule(rule)) if app.field >= 6 => {
             app.config.sandbox.process.rules[rule]
                 .patterns
-                .remove(app.field - 6);
+                .remove(app.field - 5);
             changed(app);
         }
         Some(ObjectEditor::FileSandboxRule(rule)) if app.field >= 11 => {
             app.config.sandbox.file.rules[rule]
                 .patterns
-                .remove(app.field - 11);
+                .remove(app.field - 10);
             changed(app);
         }
         _ => {
@@ -4651,7 +4651,10 @@ fn detail_lines(app: &App) -> Vec<String> {
                     "Serve             {}",
                     if app.live { "运行中" } else { "未运行" }
                 ),
-                format!("模式              {:?}", app.config.mode),
+                format!(
+                    "网关故障策略      {}",
+                    enforcement_mode_label(app.config.mode)
+                ),
                 format!("SOCKS5            {}", app.config.listener.socks_listen),
                 format!("代理              {} 个", app.config.upstreams.len()),
                 format!("凭证              {credentials} 个"),
@@ -4662,7 +4665,10 @@ fn detail_lines(app: &App) -> Vec<String> {
             ]
         }
         CATEGORY_BASIC => vec![
-            format!("模式              {:?}", app.config.mode),
+            format!(
+                "网关故障策略      {}",
+                enforcement_mode_label(app.config.mode)
+            ),
             format!("SOCKS5            {}", app.config.listener.socks_listen),
             format!(
                 "待激活会话有效期  {} 秒",
@@ -4734,10 +4740,10 @@ fn detail_lines(app: &App) -> Vec<String> {
                 .iter()
                 .map(|item| {
                     format!(
-                        "{} {}  {:?}  数据保护={}  智能判定={}",
+                        "{} {}  {}  本地检测={}  智能判断={}",
                         if item.enabled { "[x]" } else { "[ ]" },
                         item.id,
-                        item.mode,
+                        protection_mode_label(item.mode),
                         yes_no(item.data.enabled),
                         yes_no(item.intelligence.enabled),
                     )
@@ -5139,46 +5145,68 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
         }
         ObjectEditor::Protection(index) => {
             let item = &app.config.protections[index];
-            let provider = item.intelligence.providers.first();
+            let scans = [
+                item.data.detect_managed_secrets,
+                item.data.detect_known_tokens,
+                item.data.detect_private_keys,
+                item.data.detect_prompt_injection,
+            ]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count();
+            let provider = item.intelligence.provider.as_ref();
             vec![
                 format!("ID                {}", item.id),
-                format!("启用              {}", yes_no(item.enabled)),
-                format!("模式              {:?}", item.mode),
-                format!("数据保护          {}", yes_no(item.data.enabled)),
-                format!("最大扫描          {} 字节", item.data.max_scan_bytes),
+                format!("总开关            {}", yes_no(item.enabled)),
+                format!("执行策略          {}", protection_mode_label(item.mode)),
                 format!(
-                    "检测托管秘密      {}",
-                    yes_no(item.data.detect_managed_secrets)
+                    "本地检测          {} · {scans}/4 扫描策略  （Enter 打开）",
+                    if item.data.enabled {
+                        "已开启"
+                    } else {
+                        "已关闭"
+                    }
                 ),
                 format!(
-                    "检测常见 Token    {}",
-                    yes_no(item.data.detect_known_tokens)
+                    "智能判断          {} · {}  （Enter 打开）",
+                    if item.intelligence.enabled {
+                        "已开启"
+                    } else {
+                        "已关闭"
+                    },
+                    provider
+                        .map(|provider| format!(
+                            "{:?} / {}",
+                            provider.provider,
+                            provider.model.as_deref().unwrap_or("官方默认")
+                        ))
+                        .unwrap_or_else(|| "未配置 Provider".into())
                 ),
-                format!(
-                    "检测私钥          {}",
-                    yes_no(item.data.detect_private_keys)
-                ),
-                format!(
-                    "检测提示注入      {}",
-                    yes_no(item.data.detect_prompt_injection)
-                ),
-                format!("智能判定          {}", yes_no(item.intelligence.enabled)),
-                format!("判定超时          {} ms", item.intelligence.timeout_ms),
-                format!("最低置信度        {:.2}", item.intelligence.min_confidence),
-                format!("缓存时间          {} ms", item.intelligence.cache_ttl_ms),
-                format!(
-                    "Provider 启用     {}",
-                    yes_no(provider.is_some_and(|p| p.enabled))
-                ),
+            ]
+        }
+        ObjectEditor::ProtectionLocal(index) => {
+            let data = &app.config.protections[index].data;
+            vec![
+                format!("启用本地检测      {}", yes_no(data.enabled)),
+                format!("最大扫描字节      {}", data.max_scan_bytes),
+                format!("来源追踪窗口      {} 字节", data.provenance_window_bytes),
+                format!("来源命中阈值      {}", data.provenance_min_matches),
+                format!("{} 扫描托管 Secret", checkbox(data.detect_managed_secrets)),
+                format!("{} 扫描常见 Token", checkbox(data.detect_known_tokens)),
+                format!("{} 扫描私钥", checkbox(data.detect_private_keys)),
+                format!("{} 扫描提示注入", checkbox(data.detect_prompt_injection)),
+            ]
+        }
+        ObjectEditor::ProtectionIntelligence(index) => {
+            let intelligence = &app.config.protections[index].intelligence;
+            let provider = intelligence.provider.as_ref();
+            vec![
+                format!("启用智能判断      {}", yes_no(intelligence.enabled)),
                 format!(
                     "Provider 类型     {:?}",
                     provider
                         .map(|p| p.provider)
                         .unwrap_or(IntelligenceProviderKind::Typesafe)
-                ),
-                format!(
-                    "Provider 模式     {:?}",
-                    provider.map(|p| p.mode).unwrap_or(ProtectionMode::Observe)
                 ),
                 format!(
                     "Endpoint          {}",
@@ -5191,6 +5219,17 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!(
                     "API Key           {}",
                     secret_summary(provider.and_then(|p| p.api_key.as_ref()))
+                ),
+                format!("判定超时          {} ms", intelligence.timeout_ms),
+                format!("最低置信度        {:.2}", intelligence.min_confidence),
+                format!("缓存时间          {} ms", intelligence.cache_ttl_ms),
+                format!(
+                    "服务异常时        {}",
+                    protection_action_label(intelligence.error_action)
+                ),
+                format!(
+                    "低置信度时        {}",
+                    protection_action_label(intelligence.low_confidence_action)
                 ),
             ]
         }
@@ -5250,10 +5289,6 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                     "智能防护          {}  （Enter 打开选择）",
                     optional_summary(item.protection.as_deref())
                 ),
-                format!(
-                    "预筛选策略        {}",
-                    prefilter_policy_label(item.prefilter_policy)
-                ),
             ];
             lines.extend(item.endpoints.iter().map(|endpoint| {
                 format!(
@@ -5277,10 +5312,6 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!(
                     "智能防护          {}  （Enter 打开选择）",
                     optional_summary(r.protection.as_deref())
-                ),
-                format!(
-                    "预筛选策略        {}",
-                    prefilter_policy_label(r.prefilter_policy)
                 ),
             ];
             lines.extend(r.patterns.iter().map(|p| {
@@ -5317,10 +5348,6 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!(
                     "智能防护          {}  （Enter 打开选择）",
                     optional_summary(r.protection.as_deref())
-                ),
-                format!(
-                    "预筛选策略        {}",
-                    prefilter_policy_label(r.prefilter_policy)
                 ),
             ];
             lines.extend(r.patterns.iter().map(|p| {
@@ -5456,6 +5483,12 @@ fn detail_title(app: &App) -> String {
         Some(ObjectEditor::Protection(index)) => {
             format!("智能防护 / {}", app.config.protections[index].id)
         }
+        Some(ObjectEditor::ProtectionLocal(index)) => {
+            format!("智能防护 / {} / 本地检测", app.config.protections[index].id)
+        }
+        Some(ObjectEditor::ProtectionIntelligence(index)) => {
+            format!("智能防护 / {} / 智能判断", app.config.protections[index].id)
+        }
         Some(ObjectEditor::Route(index)) => {
             format!("网关 / 路由 / {}", app.config.rules[index].id)
         }
@@ -5497,24 +5530,41 @@ fn firewall_default_label(default: Option<&FirewallDefaultRule>) -> &'static str
 fn sandbox_action_label(action: SandboxAction) -> &'static str {
     allow_deny_label(action == SandboxAction::Deny)
 }
-fn prefilter_policy_label(policy: PrefilterPolicy) -> &'static str {
-    match policy {
-        PrefilterPolicy::None => "未设置",
-        PrefilterPolicy::NetworkUpload => "网络上传",
-        PrefilterPolicy::SensitiveRead => "敏感读取",
-        PrefilterPolicy::ArchiveOrEncode => "归档/编码",
-        PrefilterPolicy::NetworkEgress => "网络出站",
+
+fn enforcement_mode_label(mode: EnforcementMode) -> &'static str {
+    match mode {
+        EnforcementMode::Enforce => "失败关闭",
+        EnforcementMode::Observe => "失败放行",
     }
 }
 
-fn cycle_prefilter_policy(policy: &mut PrefilterPolicy) {
-    *policy = match *policy {
-        PrefilterPolicy::None => PrefilterPolicy::NetworkUpload,
-        PrefilterPolicy::NetworkUpload => PrefilterPolicy::SensitiveRead,
-        PrefilterPolicy::SensitiveRead => PrefilterPolicy::ArchiveOrEncode,
-        PrefilterPolicy::ArchiveOrEncode => PrefilterPolicy::NetworkEgress,
-        PrefilterPolicy::NetworkEgress => PrefilterPolicy::None,
-    };
+fn protection_mode_label(mode: ProtectionMode) -> &'static str {
+    match mode {
+        ProtectionMode::Observe => "仅记录",
+        ProtectionMode::Enforce => "自动阻断",
+    }
+}
+
+fn protection_action_label(action: ProtectionAction) -> &'static str {
+    match action {
+        ProtectionAction::Pass => "放行",
+        ProtectionAction::Deny => "阻断",
+    }
+}
+
+fn opposite_protection_action(action: ProtectionAction) -> ProtectionAction {
+    match action {
+        ProtectionAction::Pass => ProtectionAction::Deny,
+        ProtectionAction::Deny => ProtectionAction::Pass,
+    }
+}
+
+fn checkbox(enabled: bool) -> &'static str {
+    if enabled {
+        "[x]"
+    } else {
+        "[ ]"
+    }
 }
 
 fn opposite_sandbox_action(action: SandboxAction) -> SandboxAction {
@@ -5622,7 +5672,15 @@ fn object_editor_hint(editor: ObjectEditor) -> String {
         ObjectEditor::Upstream(_) => "代理：配置 ID、类型、地址与超时".to_string(),
         ObjectEditor::Credential(_) => "凭证：配置 HTTP 认证或 SSH 账号".to_string(),
         ObjectEditor::AuditProfile(_) => "审计插件：配置事件范围与内容转录".to_string(),
-        ObjectEditor::Protection(_) => "智能防护：本地数据保护与智能判定".to_string(),
+        ObjectEditor::Protection(_) => {
+            "智能防护概览：配置总开关、执行策略并进入功能模块".to_string()
+        }
+        ObjectEditor::ProtectionLocal(_) => {
+            "本地检测：Space 启停扫描策略，Enter 编辑数值".to_string()
+        }
+        ObjectEditor::ProtectionIntelligence(_) => {
+            "智能判断：配置单一 Provider、缓存和失败动作".to_string()
+        }
         ObjectEditor::Route(_) => "路由：配置优先级、目标与动作".to_string(),
         ObjectEditor::FirewallRule(_) => "网络规则：配置优先级、动作、目标与端口".to_string(),
         ObjectEditor::SandboxProcessRule(_) => "子进程沙盒规则".into(),
@@ -5670,7 +5728,7 @@ fn selection_hint(app: &App) -> Option<String> {
     if matches!(app.focus, Focus::Sidebar) {
         return Some(match app.category {
             CATEGORY_GATEWAY => "网关：代理、凭证、审计、路由和证书能力概览".to_string(),
-            CATEGORY_BASIC => "基础：监听地址、运行模式与 Debug 热更新".to_string(),
+            CATEGORY_BASIC => "基础：监听地址、网关故障策略与 Debug 热更新".to_string(),
             CATEGORY_PROXY => "代理：上游代理列表，供路由规则引用".to_string(),
             CATEGORY_CREDENTIAL => "凭证：HTTP 凭证与 SSH 账号、私钥、密码".to_string(),
             CATEGORY_AUDIT => "审计：保留策略与事件转录插件".to_string(),
@@ -5690,8 +5748,8 @@ fn selection_hint(app: &App) -> Option<String> {
         CATEGORY_GATEWAY => Some("网关概览：显示 Serve 与网关配置摘要".to_string()),
         CATEGORY_BASIC => match app.field {
             0 => Some(match app.config.mode {
-                EnforcementMode::Enforce => "Enforce：严格拒绝，失败不兜底直连".to_string(),
-                EnforcementMode::Observe => "Observe：失败时直连兜底".to_string(),
+                EnforcementMode::Enforce => "失败关闭：网关异常时拒绝".to_string(),
+                EnforcementMode::Observe => "失败放行：网关异常时直连兜底".to_string(),
             }),
             1 => Some(format!(
                 "SOCKS5 监听地址：{}",
@@ -5781,10 +5839,10 @@ fn selection_hint(app: &App) -> Option<String> {
             .get(app.field)
             .map(|item| {
                 format!(
-                    "智能防护 {}（UUID={}）：模式={:?}，数据保护={}，智能判定={}",
+                    "智能防护 {}（UUID={}）：执行策略={}，本地检测={}，智能判断={}",
                     item.id,
                     item.uuid,
-                    item.mode,
+                    protection_mode_label(item.mode),
                     yes_no(item.data.enabled),
                     yes_no(item.intelligence.enabled)
                 )
@@ -6323,7 +6381,7 @@ fn draw(frame: &mut Frame, app: &App) {
         } else if app.header_editor.is_some() {
             "↑↓/jk 选择 Header\na 添加，Enter/e 修改选中值，d 删除\n值始终以掩码显示，Esc 返回凭证表单"
         } else {
-            "↑↓/jk 导航，Tab 切换面板\nEnter/e 打开、编辑或切换选项，Space 专用于切换选项或启停路由\nEsc 按层返回：编辑器 → 右侧列表 → 左侧分类；分类中再次按 Esc 退出\na 新增，d 删除，/ 搜索，p 修改密码\n规则内目标/端口/路径/命令均使用列表管理：a 添加，Enter/e 修改，d 删除\n路由目标支持域名、URL 路径、IP 与 CIDR；网络/文件/子进程规则不再限制进程\n进程页面显示当前活跃受管进程，包括 ptrace 与 Gum 后端\n沙盒/文件控制读写、创建、删除、重命名；沙盒/子进程按可执行文件与命令行控制\n基础页模式：Enforce=严格拒绝且失败不兜底，Observe=失败时直连兜底\nCtrl+S 校验并保存，Q 强制放弃修改"
+            "↑↓/jk 导航，Tab 切换面板\nEnter/e 打开、编辑或切换选项，Space 专用于切换选项或启停路由\nEsc 按层返回：编辑器 → 右侧列表 → 左侧分类；分类中再次按 Esc 退出\na 新增，d 删除，/ 搜索，p 修改密码\n规则内目标/端口/路径/命令均使用列表管理：a 添加，Enter/e 修改，d 删除\n路由目标支持域名、URL 路径、IP 与 CIDR；网络/文件/子进程规则不再限制进程\n进程页面显示当前活跃受管进程，包括 ptrace 与 Gum 后端\n沙盒/文件控制读写、创建、删除、重命名；沙盒/子进程按可执行文件与命令行控制\n网关故障策略：失败关闭=异常时拒绝，失败放行=异常时直连兜底\nCtrl+S 校验并保存，Q 强制放弃修改"
         };
         popup(frame, area, "帮助", help, false);
     }
@@ -6809,7 +6867,7 @@ mod tests {
 
         let lines = detail_lines(&app);
         assert_eq!(lines.len(), 4);
-        assert!(lines[0].contains("模式"));
+        assert!(lines[0].contains("网关故障策略"));
         assert!(lines[1].contains("SOCKS5"));
         assert!(lines[2].contains("待激活会话有效期"));
         assert!(lines[3].contains("调试事件"));
@@ -7004,7 +7062,7 @@ mod tests {
         assert_eq!(app.config.firewall.rules.len(), 1);
         assert!(!app.config.firewall.rules[0].enabled);
         assert!(matches!(app.editor, Some(ObjectEditor::FirewallRule(0))));
-        assert_eq!(editor_lines(&app, ObjectEditor::FirewallRule(0)).len(), 6);
+        assert_eq!(editor_lines(&app, ObjectEditor::FirewallRule(0)).len(), 5);
 
         app.field = 3;
         edit_object_field(&mut app, ObjectEditor::FirewallRule(0));
@@ -7035,7 +7093,6 @@ mod tests {
             endpoints: Vec::new(),
             legacy: Default::default(),
             protection: None,
-            prefilter_policy: PrefilterPolicy::None,
         });
 
         apply_list_value(
@@ -8417,7 +8474,7 @@ mod tests {
         app.category = CATEGORY_BASIC;
         assert_eq!(
             selection_hint(&app).unwrap(),
-            "基础：监听地址、运行模式与 Debug 热更新"
+            "基础：监听地址、网关故障策略与 Debug 热更新"
         );
         app.category = CATEGORY_ROUTE;
         assert_eq!(
@@ -8432,12 +8489,12 @@ mod tests {
         app.focus = Focus::Detail;
         app.category = CATEGORY_BASIC;
         app.field = 0;
+        assert_eq!(selection_hint(&app).unwrap(), "失败关闭：网关异常时拒绝");
+        app.config.mode = EnforcementMode::Observe;
         assert_eq!(
             selection_hint(&app).unwrap(),
-            "Enforce：严格拒绝，失败不兜底直连"
+            "失败放行：网关异常时直连兜底"
         );
-        app.config.mode = EnforcementMode::Observe;
-        assert_eq!(selection_hint(&app).unwrap(), "Observe：失败时直连兜底");
 
         app.field = 3;
         assert_eq!(
@@ -8559,5 +8616,58 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn protection_editor_uses_overview_and_two_subpages() {
+        let mut app = test_app();
+        app.category = CATEGORY_PROTECTION;
+        add_selected(&mut app);
+        let overview = editor_lines(&app, ObjectEditor::Protection(0));
+        assert_eq!(overview.len(), 5);
+        assert!(overview[2].contains("仅记录"));
+        assert!(overview[3].contains("本地检测"));
+        assert!(overview[4].contains("智能判断"));
+
+        app.field = 3;
+        edit_selected(&mut app);
+        assert!(matches!(app.editor, Some(ObjectEditor::ProtectionLocal(0))));
+        let local = editor_lines(&app, ObjectEditor::ProtectionLocal(0));
+        assert_eq!(local.len(), 8);
+        assert!(local[4].contains("扫描托管 Secret"));
+        assert!(local[6].contains("扫描私钥"));
+        assert!(local[7].contains("扫描提示注入"));
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+        assert!(matches!(app.editor, Some(ObjectEditor::Protection(0))));
+        app.field = 4;
+        edit_selected(&mut app);
+        assert!(matches!(
+            app.editor,
+            Some(ObjectEditor::ProtectionIntelligence(0))
+        ));
+        assert_eq!(
+            editor_lines(&app, ObjectEditor::ProtectionIntelligence(0)).len(),
+            10
+        );
+    }
+
+    #[test]
+    fn protection_scan_checkboxes_toggle_only_with_space() {
+        let mut app = test_app();
+        app.category = CATEGORY_PROTECTION;
+        add_selected(&mut app);
+        app.editor = Some(ObjectEditor::ProtectionLocal(0));
+        app.field = 6;
+        let enabled = app.config.protections[0].data.detect_private_keys;
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        assert_eq!(app.config.protections[0].data.detect_private_keys, enabled);
+        assert!(app.status.contains("Space"));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        )
+        .unwrap();
+        assert_eq!(app.config.protections[0].data.detect_private_keys, !enabled);
     }
 }

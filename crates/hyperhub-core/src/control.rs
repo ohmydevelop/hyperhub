@@ -5,8 +5,7 @@ use crate::framing::{read_frame, write_frame};
 use crate::runtime::{RuntimeSnapshot, RuntimeState};
 use crate::sandbox::{
     compile_runtime_snapshot, compile_snapshot as compile_sandbox_snapshot, decide_process,
-    decide_process_hook, evaluate_process_prefilter, process_protection_binding,
-    ProcessPrefilterContext,
+    decide_process_hook, process_protection_binding, sanitize_action, ProtectionContext,
 };
 use crate::session::{
     unix_timestamp_after, unix_timestamp_ms, verify_config_update_proof, AgentFlags,
@@ -430,18 +429,21 @@ impl ControlService {
                             if action == crate::config::SandboxAction::Pass {
                                 if let Some(binding) = binding {
                                     rule_id = Some(binding.rule_id.clone());
-                                    let context = ProcessPrefilterContext::default();
-                                    let prefilter = evaluate_process_prefilter(
-                                        binding.prefilter_policy,
-                                        &executable,
-                                        &argv,
-                                        &context,
-                                    );
-                                    audit_features = prefilter.features.clone();
-                                    if prefilter.hard_deny {
-                                        action = crate::config::SandboxAction::Deny;
-                                        reason = "prefilter_hard_deny".into();
-                                    } else if prefilter.should_query_gateway {
+                                    let context = ProtectionContext::default();
+                                    let sanitized = sanitize_action(&executable, &argv, &context);
+                                    audit_features = sanitized.features.clone();
+                                    if sanitized.local_deny {
+                                        action = if runtime
+                                            .protection
+                                            .profile_mode(&binding.protection_id)
+                                            == Some(crate::config::ProtectionMode::Enforce)
+                                        {
+                                            crate::config::SandboxAction::Deny
+                                        } else {
+                                            crate::config::SandboxAction::Pass
+                                        };
+                                        reason = "local_data_protection".into();
+                                    } else {
                                         provider_queried = true;
                                         let outcome = runtime
                                             .protection
@@ -451,16 +453,16 @@ impl ControlService {
                                                 peer_pid.unwrap_or_default(),
                                                 &executable,
                                                 "root_process_create",
-                                                prefilter.redacted_argv,
-                                                prefilter.features,
+                                                sanitized.redacted_argv,
+                                                sanitized.features,
                                                 serde_json::to_value(&context)
                                                     .unwrap_or_else(|_| serde_json::json!({})),
                                             )
                                             .await;
                                         let provider = outcome
-                                            .providers
-                                            .iter()
-                                            .find(|item| item.error.is_none());
+                                            .provider
+                                            .as_ref()
+                                            .filter(|item| item.error.is_none());
                                         action = if outcome.deny {
                                             crate::config::SandboxAction::Deny
                                         } else {
@@ -476,8 +478,6 @@ impl ControlService {
                                             provider.and_then(|item| item.destructive_probability);
                                         blast_radius = provider.and_then(|item| item.blast_radius);
                                         cache_hit = provider.is_some_and(|item| item.cache_hit);
-                                    } else {
-                                        reason = "prefilter_pass".into();
                                     }
                                 }
                             }
@@ -1350,7 +1350,10 @@ impl ControlService {
                             context,
                         )
                         .await;
-                    let provider = outcome.providers.iter().find(|item| item.error.is_none());
+                    let provider = outcome
+                        .provider
+                        .as_ref()
+                        .filter(|item| item.error.is_none());
                     let action = if outcome.deny {
                         crate::config::SandboxAction::Deny
                     } else {
@@ -1359,7 +1362,7 @@ impl ControlService {
                     let reason = outcome
                         .reason
                         .clone()
-                        .unwrap_or_else(|| "prefilter_pass".into());
+                        .unwrap_or_else(|| "provider_pass".into());
                     let risk_level = provider.and_then(|item| item.risk_level.clone());
                     let confidence = provider.and_then(|item| item.confidence);
                     let destructive_probability =
@@ -1433,7 +1436,10 @@ impl ControlService {
                             context,
                         )
                         .await;
-                    let provider = outcome.providers.iter().find(|item| item.error.is_none());
+                    let provider = outcome
+                        .provider
+                        .as_ref()
+                        .filter(|item| item.error.is_none());
                     let action = if outcome.deny {
                         crate::config::SandboxAction::Deny
                     } else {
@@ -1442,7 +1448,7 @@ impl ControlService {
                     let reason = outcome
                         .reason
                         .clone()
-                        .unwrap_or_else(|| "prefilter_pass".into());
+                        .unwrap_or_else(|| "provider_pass".into());
                     let risk_level = provider.and_then(|item| item.risk_level.clone());
                     let confidence = provider.and_then(|item| item.confidence);
                     let destructive_probability =
@@ -2398,7 +2404,6 @@ mod tests {
             }],
             legacy: Default::default(),
             protection: None,
-            prefilter_policy: crate::config::PrefilterPolicy::None,
         });
         let endpoint = format!(r"\\.\pipe\hyperhub-auto-auth-test-{}", std::process::id());
         let service = ControlService::new(
@@ -2626,7 +2631,6 @@ mod tests {
             }],
             legacy: Default::default(),
             protection: None,
-            prefilter_policy: crate::config::PrefilterPolicy::None,
         });
         #[cfg(windows)]
         let endpoint = format!(r"\\.\pipe\hyperhub-test-{}", std::process::id());
@@ -2942,7 +2946,6 @@ mod tests {
                 }],
                 legacy: Default::default(),
                 protection: None,
-                prefilter_policy: crate::config::PrefilterPolicy::None,
             });
             let config_json = serde_json::to_string(&updated).unwrap();
             let proof = crate::session::config_update_proof(&[0; 32], &config_json).unwrap();

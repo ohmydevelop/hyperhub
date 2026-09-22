@@ -466,7 +466,7 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
             }
         }
         ConfigSection::Protection => vec![format!(
-            "{}，模式={}，数据保护={}，智能判定={}，Provider={} 个",
+            "{}，执行策略={}，本地检测={}，智能判断={}，Provider={}",
             enabled.unwrap_or("启用"),
             item.get("mode")
                 .and_then(Value::as_str)
@@ -484,10 +484,10 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
                     .unwrap_or(false)
             ),
             item.get("intelligence")
-                .and_then(|v| v.get("providers"))
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0)
+                .and_then(|v| v.get("provider"))
+                .and_then(|v| v.get("provider"))
+                .and_then(Value::as_str)
+                .unwrap_or("未配置")
         )],
         ConfigSection::Audit => vec![format!(
             "协议={}，HTTP 内容转录={}，SSH 内容转录={}",
@@ -597,7 +597,7 @@ fn field_label(tokens: &[String]) -> Option<String> {
     }
     let joined = tokens.join("/");
     let label = match joined.as_str() {
-        "mode" => "运行模式",
+        "mode" => "执行策略",
         "debug" => "调试事件",
         "listener/socks_listen" => "SOCKS5 监听地址",
         "listener/pending_session_ttl_secs" => "待激活会话有效期",
@@ -611,12 +611,12 @@ fn field_label(tokens: &[String]) -> Option<String> {
         "plugins" => "插件绑定",
         "protection" => "智能防护配置",
         "allow_sensitive_upload" => "允许敏感数据上传",
-        "data/enabled" => "数据保护",
+        "data/enabled" => "本地检测",
         "data/max_scan_bytes" => "最大扫描字节数",
-        "intelligence/enabled" => "智能判定",
+        "intelligence/enabled" => "智能判断",
         "intelligence/min_confidence" => "最低置信度",
         "intelligence/cache_ttl_ms" => "判定缓存时间",
-        "intelligence/providers" => "判定 Provider",
+        "intelligence/provider" => "判定 Provider",
         "http_scheme" => "HTTP 认证方式",
         "secret/value" => "认证值",
         "username" => "用户名",

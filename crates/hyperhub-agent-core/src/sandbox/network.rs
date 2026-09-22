@@ -34,8 +34,6 @@ pub(crate) struct FirewallSnapshotRule {
     pub(crate) endpoints: Vec<FirewallEndpoint>,
     #[serde(default)]
     pub(crate) protection: Option<String>,
-    #[serde(default)]
-    pub(crate) prefilter_policy: super::PrefilterPolicy,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct FirewallEndpoint {
@@ -286,7 +284,6 @@ mod tests {
                 id: "deny-baidu".into(),
                 action: FirewallAction::Deny,
                 protection: None,
-                prefilter_policy: crate::PrefilterPolicy::None,
                 endpoints: vec![FirewallEndpoint {
                     target: FirewallRuleTarget::Domain(FirewallDomainTarget {
                         host: "www.baidu.com".into(),
@@ -325,7 +322,6 @@ mod tests {
                 id: "deny-private".into(),
                 action: FirewallAction::Deny,
                 protection: None,
-                prefilter_policy: crate::PrefilterPolicy::None,
                 endpoints: vec![FirewallEndpoint {
                     target: FirewallRuleTarget::Network("10.0.0.0/8".parse().unwrap()),
                     port: None,

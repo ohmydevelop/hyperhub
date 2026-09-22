@@ -23,7 +23,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 RISK_TIERS = {"safe": 1, "medium_risk": 2, "critical_danger": 3}
-QUERY_THRESHOLD = 60
 LOCAL_P99_GATE_MS = 1.0
 MOCK_P95_GATE_MS = 50.0
 DEFAULT_TIMEOUT_MS = 500
@@ -112,63 +111,55 @@ def redact_argv(argv: Iterable[str], secrets: Iterable[str]) -> List[str]:
     return output
 
 
-def prefilter(case: Dict[str, Any]) -> Dict[str, Any]:
+def sanitize_case(case: Dict[str, Any]) -> Dict[str, Any]:
     command = case["command"]
     executable = str(command["executable"]).lower()
     argv = [str(item) for item in command.get("argv", [])]
     joined = " ".join([executable, *argv]).lower()
     context = case.get("context", {})
     features: List[str] = []
-    score = 0
-
     if executable in NETWORK_TOOLS or any(tool in joined for tool in NETWORK_TOOLS):
-        score += 20
         features.append("network_tool")
     if any(marker.lower() in joined for marker in UPLOAD_MARKERS):
-        score += 20
         features.append("upload_argument")
     if any(method in joined for method in ("--request post", "--request put", "--request patch", "--request delete", " -x post")):
-        score += 10
         features.append("state_change_method")
     if any(marker in joined for marker in ARCHIVE_TOOLS):
-        score += 15
         features.append("archive_or_encode")
     if SENSITIVE_PATH_RE.search(joined):
-        score += 30
         features.append("sensitive_file_reference")
     if context.get("sensitive_files_read", 0):
-        score += 25
         features.append("sensitive_file_read")
     if context.get("external_input_seen"):
         features.append("external_input_seen")
     if context.get("prompt_injection_seen"):
-        score += 20
         features.append("prompt_injection_source")
     if context.get("destination_authorized") is False:
-        score += 10
         features.append("external_destination")
     if any(marker in joined for marker in DANGEROUS_MARKERS):
-        score += 20
         features.append("dangerous_marker")
-    if context.get("force_query"):
-        score = max(score, QUERY_THRESHOLD)
-        features.append("forced_query_for_matrix")
-
-    hard_deny = bool(context.get("static_sandbox_deny") or context.get("managed_secret_match"))
+    redacted = redact_argv(argv, case.get("secrets", []))
+    secret_redacted = redacted != argv
+    if secret_redacted:
+        features.append("secret_argument")
+    local_deny = bool(
+        context.get("static_sandbox_deny")
+        or context.get("managed_secret_match")
+        or secret_redacted
+    )
     if context.get("managed_secret_match"):
         features.append("managed_secret_match")
     return {
-        "score": min(score, 100),
         "features": sorted(set(features)),
-        "hard_deny": hard_deny,
-        "should_query_gateway": not hard_deny and score >= QUERY_THRESHOLD,
+        "local_deny": local_deny,
+        "redacted_argv": redacted,
     }
 
 
 def build_state(
     case: Dict[str, Any],
     redacted_argv: List[str],
-    prefilter_result: Dict[str, Any],
+    sanitization: Dict[str, Any],
     include_mock_behavior: bool,
 ) -> str:
     command = case["command"]
@@ -178,8 +169,7 @@ def build_state(
         "stage": "process_spawn",
         "executable": command["executable"],
         "argv": redacted_argv,
-        "features": prefilter_result["features"],
-        "prefilter_score": prefilter_result["score"],
+        "features": sanitization["features"],
         "context": {
             "sensitive_files_read": context.get("sensitive_files_read", 0),
             "sensitive_bytes_read": context.get("sensitive_bytes_read", 0),
@@ -270,12 +260,12 @@ def run_case(
     timeout_ms: int,
 ) -> Dict[str, Any]:
     started = time.perf_counter_ns()
-    local = prefilter(case)
+    local = sanitize_case(case)
     local_ms = (time.perf_counter_ns() - started) / 1_000_000
-    redacted = redact_argv(case["command"].get("argv", []), case.get("secrets", []))
+    redacted = local["redacted_argv"]
     state = build_state(case, redacted, local, include_mock_behavior=backend == "mock")
     payload_text = state
-    query = local["should_query_gateway"]
+    query = not local["local_deny"]
     provider_error: Optional[str] = None
     provider_ms: Optional[float] = None
     provider_denied = False
@@ -298,15 +288,15 @@ def run_case(
             provider_error = type(error).__name__ + ": " + str(error)
         provider_ms = (time.perf_counter_ns() - provider_started) / 1_000_000
 
-    would_deny = local["hard_deny"] or (provider_denied and not low_confidence and provider_error is None)
+    would_deny = local["local_deny"] or (provider_denied and not low_confidence and provider_error is None)
     if provider_error is not None or low_confidence:
-        would_deny = local["hard_deny"]
+        would_deny = local["local_deny"]
     final_action = "deny" if case.get("mode", "enforce") == "enforce" and would_deny else "allow"
     privacy_leaks = [secret for secret in case.get("secrets", []) if secret and secret in payload_text]
     expected = case["expected"]
     checks = {
-        "hard_deny": local["hard_deny"] == expected["hard_deny"],
-        "should_query_gateway": query == expected["should_query_gateway"],
+        "local_deny": local["local_deny"] == expected["local_deny"],
+        "provider_queried": query == expected["provider_queried"],
         "final_action": final_action == expected["final_action"],
         "would_deny": would_deny == expected.get("would_deny", expected["final_action"] == "deny"),
         "privacy": not privacy_leaks,
@@ -316,7 +306,7 @@ def run_case(
         "case": case["id"],
         "category": case["category"],
         "mode": case.get("mode", "enforce"),
-        "prefilter": local,
+        "sanitization": local,
         "redacted_argv": redacted,
         "provider_queried": query,
         "provider_error": provider_error,
@@ -365,16 +355,12 @@ def verify_hyperhub_smart_protection(config: Dict[str, Any]) -> None:
     for rule in bindings:
         profile = profiles[rule["protection"]]
         intelligence = profile.get("intelligence", {})
-        providers = [
-            provider
-            for provider in intelligence.get("providers", [])
-            if provider.get("enabled", True)
-        ]
-        if intelligence.get("enabled") and providers:
+        provider = intelligence.get("provider")
+        if intelligence.get("enabled") and isinstance(provider, dict):
             active.append((rule, profile))
     if not active:
         raise RuntimeError(
-            "HyperHub protection binding exists, but intelligence.enabled or all providers are disabled"
+            "HyperHub protection binding exists, but intelligence.enabled or provider is not configured"
         )
 
 
@@ -422,10 +408,10 @@ def run_hyperhub_case(
     timeout_ms: int,
 ) -> Tuple[Dict[str, Any], int]:
     local_started = time.perf_counter_ns()
-    local = prefilter(case)
+    local = sanitize_case(case)
     local_ms = (time.perf_counter_ns() - local_started) / 1_000_000
     argv = [str(item) for item in case["command"].get("argv", [])]
-    redacted = redact_argv(argv, case.get("secrets", []))
+    redacted = local["redacted_argv"]
     started = time.perf_counter_ns()
     if case.get("launch") == "child":
         command = [
@@ -471,7 +457,7 @@ def run_hyperhub_case(
     new_offset = audit_offset
     for _ in range(10):
         events, new_offset = read_appended_events(audit_path, audit_offset)
-        if events or not local["should_query_gateway"]:
+        if events or local["local_deny"]:
             break
         time.sleep(0.02)
     smart_events = [event for event in events if event.get("event") == "smart_protection_decision"]
@@ -503,13 +489,13 @@ def run_hyperhub_case(
         sandbox is not None
         and sandbox.get("attributes", {}).get("rule_id") is not None
         and (
-            not local["should_query_gateway"]
+            local["local_deny"]
             or smart is not None
         )
     )
     checks = {
-        "hard_deny": local["hard_deny"] == expected["hard_deny"],
-        "should_query_gateway": queried == expected["should_query_gateway"],
+        "local_deny": local["local_deny"] == expected["local_deny"],
+        "provider_queried": queried == expected["provider_queried"],
         "final_action": final_action == expected["final_action"],
         "would_deny": (final_action == "deny")
         == expected.get("would_deny", expected["final_action"] == "deny"),
@@ -526,7 +512,7 @@ def run_hyperhub_case(
             "category": case["category"],
             "mode": case.get("mode", "enforce"),
             "transport": "hyperhub",
-            "prefilter": local,
+            "sanitization": local,
             "redacted_argv": redacted,
             "provider_queried": queried,
             "provider_error": provider_error,
@@ -583,7 +569,7 @@ def write_report(output_dir: Path, records: List[Dict[str, Any]], summary: Dict[
         f"Cases: {summary['cases']}  ",
         f"Passed: {summary['passed']}  ",
         f"Failed: {summary['failed']}  ",
-        f"Local prefilter p99: {summary['latency_ms']['local_p99']:.4f} ms  ",
+        f"Local sanitizer p99: {summary['latency_ms']['local_p99']:.4f} ms  ",
         f"Provider p95: {summary['latency_ms']['provider_p95']:.4f} ms",
         "",
         "| Case | Category | Query | Action | Local ms | Provider ms | Result |",

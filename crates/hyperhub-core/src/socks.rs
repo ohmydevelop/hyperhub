@@ -582,11 +582,13 @@ impl SocksService {
                                 "hostname": requested.hostnames.first(),
                                 "ip": requested.ip,
                                 "port": requested.port,
-                                "prefilter_policy": firewall_decision.prefilter_policy,
                             }),
                         )
                         .await;
-                    let provider = outcome.providers.iter().find(|item| item.error.is_none());
+                    let provider = outcome
+                        .provider
+                        .as_ref()
+                        .filter(|item| item.error.is_none());
                     let action = if outcome.deny { "deny" } else { "pass" };
                     self.audit.session_event(
                         "smart_protection_decision",

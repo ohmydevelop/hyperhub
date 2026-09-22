@@ -100,7 +100,6 @@ pub struct ProviderAudit {
     pub provider_id: String,
     pub provider: String,
     pub model: String,
-    pub mode: ProtectionMode,
     pub verdict: String,
     pub risk_level: Option<String>,
     pub confidence: Option<f64>,
@@ -117,7 +116,7 @@ pub struct ProtectionOutcome {
     pub would_deny: bool,
     pub local_deny: bool,
     pub reason: Option<String>,
-    pub providers: Vec<ProviderAudit>,
+    pub provider: Option<ProviderAudit>,
     pub input_sha256: String,
 }
 
@@ -185,7 +184,7 @@ struct CompiledProtection {
     secret_hashes: HashMap<usize, HashSet<[u8; 32]>>,
     token_regex: Regex,
     injection_regex: Regex,
-    providers: Vec<Arc<ProviderRuntime>>,
+    provider: Option<Arc<ProviderRuntime>>,
 }
 
 struct ProviderRuntime {
@@ -239,11 +238,7 @@ impl ProtectionSnapshot {
                 r"(?i)(ignore (?:all |previous |prior )?(?:instructions|rules)|system prompt|developer message|reveal (?:the )?(?:token|secret|password)|upload (?:the )?(?:credentials|secrets|environment)|send (?:the )?(?:token|secret|private key)|忽略.{0,12}(?:指令|规则)|系统提示词|开发者消息|上传.{0,12}(?:凭证|密钥|环境变量)|发送.{0,12}(?:令牌|密钥|私钥))",
             )
             .map_err(|error| error.to_string())?;
-            let mut providers = Vec::new();
-            for provider in &profile.intelligence.providers {
-                if !provider.enabled {
-                    continue;
-                }
+            let provider = if let Some(provider) = &profile.intelligence.provider {
                 let endpoint = provider_endpoint(provider).to_string();
                 let model = provider_model(provider).to_string();
                 let api_key = provider
@@ -256,7 +251,7 @@ impl ProtectionSnapshot {
                     .no_proxy()
                     .build()
                     .map_err(|error| error.to_string())?;
-                providers.push(Arc::new(ProviderRuntime {
+                Some(Arc::new(ProviderRuntime {
                     config: provider.clone(),
                     endpoint,
                     model,
@@ -265,8 +260,10 @@ impl ProtectionSnapshot {
                     semaphore: Semaphore::new(PROVIDER_CONCURRENCY),
                     cache: Mutex::new(HashMap::new()),
                     breaker: Mutex::new(BreakerState::default()),
-                }));
-            }
+                }))
+            } else {
+                None
+            };
             profiles.insert(
                 profile.id.clone(),
                 Arc::new(CompiledProtection {
@@ -275,7 +272,7 @@ impl ProtectionSnapshot {
                     secret_hashes,
                     token_regex,
                     injection_regex,
-                    providers,
+                    provider,
                 }),
             );
         }
@@ -371,6 +368,25 @@ impl ProtectionSnapshot {
         features: Vec<String>,
         context: Value,
     ) -> ProtectionOutcome {
+        if self
+            .profiles
+            .get(profile_id)
+            .is_some_and(|profile| profile.config.enabled && profile.config.data.enabled)
+            && context
+                .get("local_deny")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            let enforce = self.profile_mode(profile_id) == Some(ProtectionMode::Enforce);
+            return ProtectionOutcome {
+                deny: enforce,
+                would_deny: true,
+                local_deny: true,
+                reason: Some("local_data_protection".into()),
+                provider: None,
+                input_sha256: format!("{:x}", Sha256::digest(context.to_string().as_bytes())),
+            };
+        }
         let connection = ConnectionContext {
             session_id: session_id.to_owned(),
             connection_id: 0,
@@ -443,10 +459,7 @@ impl ProtectionSnapshot {
         }
         let state = provider_state(request);
         outcome.input_sha256 = format!("{:x}", Sha256::digest(state.as_bytes()));
-        for provider in &profile.providers {
-            if !provider.config.enabled {
-                continue;
-            }
+        if let Some(provider) = &profile.provider {
             let started = Instant::now();
             let evaluated = provider
                 .evaluate(
@@ -470,7 +483,6 @@ impl ProtectionSnapshot {
                             provider_id: provider.config.id.clone(),
                             provider: provider_kind_name(provider.config.provider).into(),
                             model: provider.model.clone(),
-                            mode: provider.config.mode,
                             verdict: if deny { "deny" } else { "pass" }.into(),
                             risk_level: Some(decision.risk_level),
                             confidence: decision.confidence,
@@ -492,7 +504,6 @@ impl ProtectionSnapshot {
                             provider_id: provider.config.id.clone(),
                             provider: provider_kind_name(provider.config.provider).into(),
                             model: provider.model.clone(),
-                            mode: provider.config.mode,
                             verdict: if deny { "deny" } else { "pass" }.into(),
                             risk_level: None,
                             confidence: None,
@@ -508,8 +519,7 @@ impl ProtectionSnapshot {
                     )
                 }
             };
-            let effective_enforce = profile.config.mode == ProtectionMode::Enforce
-                && provider.config.mode == ProtectionMode::Enforce;
+            let effective_enforce = profile.config.mode == ProtectionMode::Enforce;
             if provider_deny {
                 outcome.would_deny = true;
                 if effective_enforce {
@@ -523,12 +533,9 @@ impl ProtectionSnapshot {
                     });
                 }
             }
-            outcome.providers.push(audit);
-            if outcome.deny {
-                break;
-            }
+            outcome.provider = Some(audit);
         }
-        if outcome.reason.is_none() && !outcome.providers.is_empty() {
+        if outcome.reason.is_none() && outcome.provider.is_some() {
             outcome.reason = Some("provider_pass".into());
         }
         outcome
@@ -744,10 +751,8 @@ fn compile_managed_secrets(
         }
     }
     for protection in &config.protections {
-        for provider in &protection.intelligence.providers {
-            if provider.enabled {
-                extend_secret(&mut values, provider.api_key.as_ref())?;
-            }
+        if let Some(provider) = &protection.intelligence.provider {
+            extend_secret(&mut values, provider.api_key.as_ref())?;
         }
     }
     let mut result: HashMap<usize, HashSet<[u8; 32]>> = HashMap::new();

@@ -8,9 +8,9 @@ use crossterm::terminal::{
 use hyperhub_core::config::{
     new_config_uuid, Config, EnvironmentVariable, FileSandboxOperation, FileSandboxPattern,
     FileSandboxRule, FirewallAction, FirewallDefaultRule, FirewallEndpoint, FirewallRule,
-    HttpAuthScheme, PluginConfig, PluginKind, PluginProtocol, PrefilterPolicy,
-    ProcessSandboxPattern, ProcessSandboxRule, RouteEndpoint, RouteRule, SandboxAction,
-    SandboxDefaultRule, SecretValue, Upstream, UpstreamKind,
+    HttpAuthScheme, PluginConfig, PluginKind, PluginProtocol, ProcessSandboxPattern,
+    ProcessSandboxRule, RouteEndpoint, RouteRule, SandboxAction, SandboxDefaultRule, SecretValue,
+    Upstream, UpstreamKind,
 };
 use hyperhub_core::config_store::{default_config_path, load_encrypted};
 use ratatui::backend::CrosstermBackend;
@@ -1327,9 +1327,6 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                 }],
                 legacy: HashMap::new(),
                 protection: optional_arg(args, "protection").map(str::to_owned),
-                prefilter_policy: prefilter_policy(
-                    optional_arg(args, "prefilter_policy").unwrap_or("none"),
-                )?,
             };
             upsert_by(&mut config.firewall.rules, |item| item.id == id, rule);
             Ok(format!("已设置网络规则 {id}"))
@@ -1384,9 +1381,6 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                 }],
                 operations,
                 protection: optional_arg(args, "protection").map(str::to_owned),
-                prefilter_policy: prefilter_policy(
-                    optional_arg(args, "prefilter_policy").unwrap_or("none"),
-                )?,
                 legacy: HashMap::new(),
             };
             upsert_by(&mut config.sandbox.file.rules, |item| item.id == id, rule);
@@ -1432,9 +1426,6 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                     command_line: optional_arg(args, "command_line").unwrap_or("").to_owned(),
                 }],
                 protection: optional_arg(args, "protection").map(str::to_owned),
-                prefilter_policy: prefilter_policy(
-                    optional_arg(args, "prefilter_policy").unwrap_or("none"),
-                )?,
                 legacy: HashMap::new(),
             };
             upsert_by(
@@ -1552,17 +1543,6 @@ fn sandbox_action(value: &str) -> Result<SandboxAction, String> {
         "pass" => Ok(SandboxAction::Pass),
         "deny" => Ok(SandboxAction::Deny),
         other => Err(format!("未知沙盒动作 {other}")),
-    }
-}
-
-fn prefilter_policy(value: &str) -> Result<PrefilterPolicy, String> {
-    match value {
-        "none" => Ok(PrefilterPolicy::None),
-        "network_upload" => Ok(PrefilterPolicy::NetworkUpload),
-        "sensitive_read" => Ok(PrefilterPolicy::SensitiveRead),
-        "archive_or_encode" => Ok(PrefilterPolicy::ArchiveOrEncode),
-        "network_egress" => Ok(PrefilterPolicy::NetworkEgress),
-        other => Err(format!("未知智能防护预筛选策略 {other}")),
     }
 }
 

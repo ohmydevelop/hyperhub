@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 use hyperhub_core::config::{FileSandboxOperation, SandboxAction};
 use hyperhub_core::control::control_request;
 use hyperhub_core::sandbox::{
-    compile_runtime_snapshot, decide_file, decide_process, evaluate_process_prefilter,
-    file_error_decision, file_protection_binding, process_error_decision,
-    process_protection_binding, CompiledSandboxSnapshot, ProcessPrefilterContext,
-    SandboxAuditEvent, SandboxAuditKind, SandboxDecision,
+    compile_runtime_snapshot, decide_file, decide_process, file_error_decision,
+    file_protection_binding, process_error_decision, process_protection_binding, sanitize_action,
+    CompiledSandboxSnapshot, ProtectionContext, SandboxAuditEvent, SandboxAuditKind,
+    SandboxDecision,
 };
 use hyperhub_core::session::{ControlRequest, ControlResponse};
 
@@ -980,43 +980,8 @@ impl Supervisor {
             let Some(binding) = binding else {
                 continue;
             };
-            let context = ProcessPrefilterContext::default();
-            let prefilter = evaluate_process_prefilter(
-                binding.prefilter_policy,
-                target,
-                &[target.clone()],
-                &context,
-            );
-            if !prefilter.should_query_gateway && !prefilter.hard_deny {
-                let decision = SandboxDecision {
-                    action: SandboxAction::Pass,
-                    rule_id: Some(binding.rule_id),
-                    source: "prefilter_pass",
-                };
-                self.report_sandbox(
-                    tid,
-                    SandboxAuditKind::File,
-                    intent.operation_name,
-                    target,
-                    &decision,
-                );
-                continue;
-            }
-            if prefilter.hard_deny {
-                let decision = SandboxDecision {
-                    action: SandboxAction::Deny,
-                    rule_id: Some(binding.rule_id),
-                    source: "prefilter_hard_deny",
-                };
-                self.report_sandbox(
-                    tid,
-                    SandboxAuditKind::File,
-                    intent.operation_name,
-                    target,
-                    &decision,
-                );
-                return Ok(self.enforce);
-            }
+            let context = ProtectionContext::default();
+            let sanitized = sanitize_action(target, &[target.clone()], &context);
             let process_pid = self.ensure_member(tid)? as u32;
             let executable = std::fs::read_link(format!("/proc/{process_pid}/exe"))
                 .map(|path| path.to_string_lossy().into_owned())
@@ -1032,11 +997,11 @@ impl Supervisor {
                     rule_id: Some(binding.rule_id.clone()),
                     stage: format!("file_{}", intent.operation_name),
                     executable,
-                    argv: prefilter.redacted_argv,
-                    features: prefilter.features,
-                    context: serde_json::to_value(&context).map_err(|error| {
-                        format!("cannot encode file protection context: {error}")
-                    })?,
+                    argv: sanitized.redacted_argv,
+                    features: sanitized.features,
+                    context: serde_json::json!({
+                        "local_deny": sanitized.local_deny,
+                    }),
                 },
             ));
             let action = match response {
@@ -1150,43 +1115,8 @@ impl Supervisor {
         else {
             return Ok(false);
         };
-        let context = ProcessPrefilterContext::default();
-        let prefilter = evaluate_process_prefilter(
-            binding.prefilter_policy,
-            &intent.executable,
-            &intent.argv,
-            &context,
-        );
-        if prefilter.hard_deny {
-            let decision = SandboxDecision {
-                action: SandboxAction::Deny,
-                rule_id: Some(binding.rule_id),
-                source: "prefilter_hard_deny",
-            };
-            self.report_sandbox(
-                tid,
-                SandboxAuditKind::Process,
-                "create",
-                &intent.executable,
-                &decision,
-            );
-            return Ok(self.enforce);
-        }
-        if !prefilter.should_query_gateway {
-            let decision = SandboxDecision {
-                action: SandboxAction::Pass,
-                rule_id: Some(binding.rule_id),
-                source: "prefilter_pass",
-            };
-            self.report_sandbox(
-                tid,
-                SandboxAuditKind::Process,
-                "create",
-                &intent.executable,
-                &decision,
-            );
-            return Ok(false);
-        }
+        let context = ProtectionContext::default();
+        let sanitized = sanitize_action(&intent.executable, &intent.argv, &context);
         let process_pid = self.ensure_member(tid)? as u32;
         let response = self.control.block_on(control_request(
             &self.endpoint,
@@ -1199,10 +1129,11 @@ impl Supervisor {
                 rule_id: Some(binding.rule_id.clone()),
                 stage: "process_create".into(),
                 executable: intent.executable.clone(),
-                argv: prefilter.redacted_argv,
-                features: prefilter.features,
-                context: serde_json::to_value(&context)
-                    .map_err(|error| format!("cannot encode smart protection context: {error}"))?,
+                argv: sanitized.redacted_argv,
+                features: sanitized.features,
+                context: serde_json::json!({
+                    "local_deny": sanitized.local_deny,
+                }),
             },
         ));
         match response {
