@@ -1,5 +1,5 @@
 use crate::config::{
-    parse_route_target, Config, PluginConfig, RouteRule, RouteTarget, DEFAULT_ROUTE_ID,
+    parse_route_target, Config, PluginConfig, RouteRule, RouteTarget, RuleAction, DEFAULT_ROUTE_ID,
 };
 use crate::plugin::PluginSet;
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ pub struct ConnectionContext {
 pub struct RouteDecision {
     pub rule_id: Option<String>,
     pub deny: bool,
+    pub smart: bool,
     pub upstream: Option<String>,
     pub plugins: PluginSet,
     pub protection: Option<String>,
@@ -64,6 +65,7 @@ pub struct RouteDecision {
 pub struct HttpRouteDecision {
     pub rule_id: Option<String>,
     pub deny: bool,
+    pub smart: bool,
     pub plugins: PluginSet,
     pub protection: Option<String>,
     pub allow_sensitive_upload: bool,
@@ -91,7 +93,7 @@ pub struct PolicySnapshot {
 
 #[derive(Debug)]
 struct CompiledDefaultRoute {
-    deny: bool,
+    action: RuleAction,
     plugins: PluginSet,
     protection: Option<String>,
     allow_sensitive_upload: bool,
@@ -152,7 +154,7 @@ impl PolicySnapshot {
                     .collect::<Result<Vec<PluginConfig>, _>>()?,
             );
             Some(CompiledDefaultRoute {
-                deny: config.default_route.deny,
+                action: config.default_route.action,
                 plugins,
                 protection: config.default_route.protection.clone(),
                 allow_sensitive_upload: config.default_route.allow_sensitive_upload,
@@ -176,7 +178,8 @@ impl PolicySnapshot {
         match &self.default_route {
             Some(default) => RouteDecision {
                 rule_id: Some(DEFAULT_ROUTE_ID.to_string()),
-                deny: default.deny,
+                deny: default.action == RuleAction::Deny,
+                smart: default.action == RuleAction::Smart,
                 upstream: None,
                 plugins: default.plugins.clone(),
                 protection: default.protection.clone(),
@@ -186,6 +189,7 @@ impl PolicySnapshot {
             None => RouteDecision {
                 rule_id: None,
                 deny: false,
+                smart: false,
                 upstream: None,
                 plugins: PluginSet::default(),
                 protection: None,
@@ -204,7 +208,8 @@ impl PolicySnapshot {
             if entry.matches_connection(context) && entry.matches_http(context, path_and_query) {
                 return HttpRouteDecision {
                     rule_id: Some(entry.rule.id.clone()),
-                    deny: entry.rule.deny,
+                    deny: entry.rule.action == RuleAction::Deny,
+                    smart: entry.rule.action == RuleAction::Smart,
                     plugins: entry.plugins.clone(),
                     protection: entry.rule.protection.clone(),
                     allow_sensitive_upload: entry.rule.allow_sensitive_upload,
@@ -214,7 +219,8 @@ impl PolicySnapshot {
         match &self.default_route {
             Some(default) => HttpRouteDecision {
                 rule_id: Some(DEFAULT_ROUTE_ID.to_string()),
-                deny: default.deny,
+                deny: default.action == RuleAction::Deny,
+                smart: default.action == RuleAction::Smart,
                 plugins: default.plugins.clone(),
                 protection: default.protection.clone(),
                 allow_sensitive_upload: default.allow_sensitive_upload,
@@ -222,6 +228,7 @@ impl PolicySnapshot {
             None => HttpRouteDecision {
                 rule_id: None,
                 deny: false,
+                smart: false,
                 plugins: PluginSet::default(),
                 protection: None,
                 allow_sensitive_upload: false,
@@ -311,7 +318,8 @@ impl CompiledRule {
         }
         RouteDecision {
             rule_id: Some(self.rule.id.clone()),
-            deny: self.rule.deny,
+            deny: self.rule.action == RuleAction::Deny,
+            smart: self.rule.action == RuleAction::Smart,
             upstream: self.rule.upstream.clone(),
             plugins: self.plugins.clone(),
             protection: self.rule.protection.clone(),
@@ -391,7 +399,7 @@ mod tests {
                 enabled: true,
                 priority: 1,
                 endpoints: endpoints(&["github.com"]),
-                deny: true,
+                action: crate::config::RuleAction::Deny,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream: None,
@@ -406,7 +414,7 @@ mod tests {
                 enabled: true,
                 priority: 5,
                 endpoints: endpoints(&["github.com"]),
-                deny: false,
+                action: crate::config::RuleAction::Pass,
                 rewrite_host: Some("10.0.0.2".into()),
                 rewrite_port: Some(2222),
                 upstream: None,
@@ -431,7 +439,7 @@ mod tests {
             enabled: false,
             priority: 100,
             endpoints: endpoints(&["github.com"]),
-            deny: true,
+            action: crate::config::RuleAction::Deny,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -456,7 +464,7 @@ mod tests {
             protocols: vec![PluginProtocol::Http],
             ..PluginConfig::default()
         });
-        config.default_route.deny = true;
+        config.default_route.action = crate::config::RuleAction::Deny;
         config.default_route.plugins = vec!["audit-all".into()];
         let policy = PolicySnapshot::compile(&config).unwrap();
         let decision = policy.decide(&context());
@@ -480,7 +488,7 @@ mod tests {
             enabled: true,
             priority: 100,
             endpoints: endpoints(&["baidu.com"]),
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -518,7 +526,7 @@ mod tests {
                 target: "example.com".into(),
                 port: Some(443),
             }],
-            deny: true,
+            action: crate::config::RuleAction::Deny,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -551,7 +559,7 @@ mod tests {
             enabled: true,
             priority: 100,
             endpoints: endpoints(&["*.github.com", "1.2.3.4", "10.0.0.0/8"]),
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -598,7 +606,7 @@ mod tests {
             enabled: true,
             priority: 1,
             endpoints: endpoints(&["api.example.com/v1", "cdn.example.com"]),
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -675,7 +683,7 @@ mod tests {
             enabled: true,
             priority: 1,
             endpoints: endpoints(&["git.example.com/repo"]),
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,

@@ -1,4 +1,4 @@
-use crate::config_semantics::{allow_deny_label, route_behavior_label, ConfigSection};
+use crate::config_semantics::ConfigSection;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -11,8 +11,9 @@ use hyperhub_core::config::{
     FirewallEndpoint, FirewallRule, HttpAuthScheme, IntelligenceProtectionConfig,
     IntelligenceProviderConfig, IntelligenceProviderKind, PluginConfig, PluginKind, PluginProtocol,
     ProcessSandboxPattern, ProcessSandboxRule, ProtectionAction, ProtectionMode, ProtectionProfile,
-    RootCertificate, RouteEndpoint, RouteRule, RouteTarget, SandboxAction, SecretValue, SshAccount,
-    SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture, DEFAULT_ROUTE_ID,
+    RootCertificate, RouteEndpoint, RouteRule, RouteTarget, RuleAction, SandboxAction, SecretValue,
+    SshAccount, SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture,
+    DEFAULT_ROUTE_ID,
 };
 use hyperhub_core::config_store;
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
@@ -1998,7 +1999,17 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             changed(app);
         }
         (ObjectEditor::DefaultRoute, 2) => {
-            app.config.default_route.deny = !app.config.default_route.deny;
+            let action = cycle_rule_action(app.config.default_route.action);
+            app.config.default_route.action = action;
+            if action != RuleAction::Smart {
+                app.config.default_route.protection = None;
+            } else if app.config.default_route.protection.is_none() {
+                open_reference_picker(
+                    app,
+                    ReferenceTarget::DefaultRoute,
+                    ReferenceKind::Protection,
+                );
+            }
             changed(app);
         }
         (ObjectEditor::DefaultRoute, 3) => open_reference_picker(
@@ -2033,7 +2044,17 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
         ),
         (ObjectEditor::Route(index), 3) => open_target_editor(app, index),
         (ObjectEditor::Route(index), 4) => {
-            app.config.rules[index].deny = !app.config.rules[index].deny;
+            let action = cycle_rule_action(app.config.rules[index].action);
+            app.config.rules[index].action = action;
+            if action != RuleAction::Smart {
+                app.config.rules[index].protection = None;
+            } else if app.config.rules[index].protection.is_none() {
+                open_reference_picker(
+                    app,
+                    ReferenceTarget::Route(index),
+                    ReferenceKind::Protection,
+                );
+            }
             changed(app);
         }
         (ObjectEditor::Route(index), 5) => {
@@ -2075,8 +2096,17 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
             TextField::FirewallPriority(index),
         ),
         (ObjectEditor::FirewallRule(index), 3) => {
-            let rule = &mut app.config.firewall.rules[index];
-            rule.action = opposite_firewall_action(rule.action);
+            let action = cycle_firewall_action(app.config.firewall.rules[index].action);
+            app.config.firewall.rules[index].action = action;
+            if action != FirewallAction::Smart {
+                app.config.firewall.rules[index].protection = None;
+            } else if app.config.firewall.rules[index].protection.is_none() {
+                open_reference_picker(
+                    app,
+                    ReferenceTarget::Firewall(index),
+                    ReferenceKind::Protection,
+                );
+            }
             changed(app);
         }
         (ObjectEditor::FirewallRule(index), 4) => open_reference_picker(
@@ -2116,7 +2146,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
         ),
         (ObjectEditor::SandboxProcessRule(index), 3) => {
             app.config.sandbox.process.rules[index].action =
-                opposite_sandbox_action(app.config.sandbox.process.rules[index].action);
+                cycle_sandbox_action(app.config.sandbox.process.rules[index].action);
             changed(app);
         }
         (ObjectEditor::SandboxProcessRule(index), 4) => open_reference_picker(
@@ -2155,7 +2185,7 @@ fn edit_object_field(app: &mut App, editor: ObjectEditor) {
         ),
         (ObjectEditor::FileSandboxRule(index), 3) => {
             app.config.sandbox.file.rules[index].action =
-                opposite_sandbox_action(app.config.sandbox.file.rules[index].action);
+                cycle_sandbox_action(app.config.sandbox.file.rules[index].action);
             changed(app);
         }
         (ObjectEditor::FileSandboxRule(index), field @ 4..=8) => {
@@ -4181,7 +4211,7 @@ fn add_selected(app: &mut App) {
                 enabled: true,
                 priority: 0,
                 endpoints: Vec::new(),
-                deny: false,
+                action: RuleAction::Pass,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream: None,
@@ -4758,7 +4788,7 @@ fn detail_lines(app: &App) -> Vec<String> {
                 "[ ]"
             },
             DEFAULT_ROUTE_ID,
-            route_behavior_label(app.config.default_route.deny, false)
+            rule_action_label(app.config.default_route.action, false)
         ))
         .chain(app.config.rules.iter().map(|item| {
             format!(
@@ -4766,7 +4796,7 @@ fn detail_lines(app: &App) -> Vec<String> {
                 if item.enabled { "[x]" } else { "[ ]" },
                 item.id,
                 item.priority,
-                route_behavior_label(item.deny, item.upstream.is_some())
+                rule_action_label(item.action, item.upstream.is_some())
             )
         }))
         .collect(),
@@ -4982,8 +5012,8 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 yes_no(app.config.default_route.enabled)
             ),
             format!(
-                "拒绝              {}",
-                yes_no(app.config.default_route.deny)
+                "动作              {}",
+                rule_action_label(app.config.default_route.action, false)
             ),
             format!(
                 "凭证              {}  （Enter 打开选择）",
@@ -5240,7 +5270,10 @@ fn editor_lines(app: &App, editor: ObjectEditor) -> Vec<String> {
                 format!("启用              {}", yes_no(item.enabled)),
                 format!("优先级            {}", item.priority),
                 format!("目标              {}", route_targets_summary(item)),
-                format!("拒绝              {}", yes_no(item.deny)),
+                format!(
+                    "动作              {}",
+                    rule_action_label(item.action, item.upstream.is_some())
+                ),
                 format!(
                     "代理              {}  （Enter 打开选择）",
                     optional_summary(item.upstream.as_deref())
@@ -5518,7 +5551,11 @@ fn optional_summary(value: Option<&str>) -> &str {
 }
 
 fn firewall_action_label(action: FirewallAction) -> &'static str {
-    allow_deny_label(action == FirewallAction::Deny)
+    match action {
+        FirewallAction::Pass => "放行",
+        FirewallAction::Deny => "阻断",
+        FirewallAction::Smart => "智能防护",
+    }
 }
 
 fn firewall_default_label(default: Option<&FirewallDefaultRule>) -> &'static str {
@@ -5528,7 +5565,11 @@ fn firewall_default_label(default: Option<&FirewallDefaultRule>) -> &'static str
 }
 
 fn sandbox_action_label(action: SandboxAction) -> &'static str {
-    allow_deny_label(action == SandboxAction::Deny)
+    match action {
+        SandboxAction::Pass => "放行",
+        SandboxAction::Deny => "阻断",
+        SandboxAction::Smart => "智能防护",
+    }
 }
 
 fn enforcement_mode_label(mode: EnforcementMode) -> &'static str {
@@ -5567,25 +5608,63 @@ fn checkbox(enabled: bool) -> &'static str {
     }
 }
 
+fn rule_action_label(action: RuleAction, has_upstream: bool) -> &'static str {
+    match action {
+        RuleAction::Pass => {
+            if has_upstream {
+                "代理"
+            } else {
+                "放行"
+            }
+        }
+        RuleAction::Deny => "阻断",
+        RuleAction::Smart => "智能防护",
+    }
+}
+
+fn cycle_rule_action(action: RuleAction) -> RuleAction {
+    match action {
+        RuleAction::Pass => RuleAction::Deny,
+        RuleAction::Deny => RuleAction::Smart,
+        RuleAction::Smart => RuleAction::Pass,
+    }
+}
+
 fn opposite_sandbox_action(action: SandboxAction) -> SandboxAction {
     match action {
-        SandboxAction::Pass => SandboxAction::Deny,
         SandboxAction::Deny => SandboxAction::Pass,
+        _ => SandboxAction::Deny,
+    }
+}
+
+fn cycle_sandbox_action(action: SandboxAction) -> SandboxAction {
+    match action {
+        SandboxAction::Pass => SandboxAction::Deny,
+        SandboxAction::Deny => SandboxAction::Smart,
+        SandboxAction::Smart => SandboxAction::Pass,
     }
 }
 
 fn opposite_firewall_action(action: FirewallAction) -> FirewallAction {
     match action {
-        FirewallAction::Pass => FirewallAction::Deny,
         FirewallAction::Deny => FirewallAction::Pass,
+        _ => FirewallAction::Deny,
+    }
+}
+
+fn cycle_firewall_action(action: FirewallAction) -> FirewallAction {
+    match action {
+        FirewallAction::Pass => FirewallAction::Deny,
+        FirewallAction::Deny => FirewallAction::Smart,
+        FirewallAction::Smart => FirewallAction::Pass,
     }
 }
 
 fn cycle_firewall_default(default: &mut Option<FirewallDefaultRule>) {
     *default = Some(FirewallDefaultRule {
         action: match default.as_ref().map(|rule| rule.action) {
-            Some(FirewallAction::Deny) => FirewallAction::Pass,
-            None | Some(FirewallAction::Pass) => FirewallAction::Deny,
+            Some(FirewallAction::Pass) | None => FirewallAction::Deny,
+            Some(FirewallAction::Deny) | Some(FirewallAction::Smart) => FirewallAction::Pass,
         },
     });
 }
@@ -5854,13 +5933,13 @@ fn selection_hint(app: &App) -> Option<String> {
                 Some(format!(
                     "默认路由 {}：内置兜底，{}",
                     DEFAULT_ROUTE_ID,
-                    route_behavior_label(default.deny, false)
+                    rule_action_label(default.action, false)
                 ))
             } else {
                 let field = app.field - 1;
                 if field < app.config.rules.len() {
                     let rule = &app.config.rules[field];
-                    let action = route_behavior_label(rule.deny, rule.upstream.is_some());
+                    let action = rule_action_label(rule.action, rule.upstream.is_some());
                     Some(format!(
                         "路由 {}（UUID={}）：优先级={}，{action}，目标={}",
                         rule.id,
@@ -7066,7 +7145,7 @@ mod tests {
 
         app.field = 3;
         edit_object_field(&mut app, ObjectEditor::FirewallRule(0));
-        assert_eq!(app.config.firewall.rules[0].action, FirewallAction::Pass);
+        assert_eq!(app.config.firewall.rules[0].action, FirewallAction::Smart);
 
         app.editor = None;
         app.field = 3;
@@ -7399,17 +7478,17 @@ mod tests {
         let mut app = test_app();
         app.editor = Some(ObjectEditor::DefaultRoute);
         app.field = 2;
-        let deny = app.config.default_route.deny;
+        let deny = app.config.default_route.action == RuleAction::Deny;
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
-        assert_eq!(app.config.default_route.deny, !deny);
+        assert_eq!(app.config.default_route.action == RuleAction::Deny, !deny);
 
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
         )
         .unwrap();
-        assert_eq!(app.config.default_route.deny, deny);
+        assert_eq!(app.config.default_route.action == RuleAction::Deny, deny);
     }
 
     #[test]

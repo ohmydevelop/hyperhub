@@ -1493,7 +1493,7 @@ mod tests {
             enabled: true,
             priority: 1,
             endpoints: Vec::new(),
-            deny: false,
+            action: hyperhub_core::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,

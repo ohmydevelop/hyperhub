@@ -25,7 +25,7 @@ enabled = false
 
 [default_route]
 enabled = true
-deny = false
+action = "pass"
 plugins = []
 
 [[plugins]]

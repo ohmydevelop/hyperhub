@@ -134,11 +134,11 @@ pub(crate) struct SandboxAuditEvent {
 
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn file_allows(path: &str, op: FileSandboxOperation) -> bool {
-    file_decision_with_protection(path, op).0 == SandboxAction::Pass
+    file_decision_with_protection(path, op).0 != SandboxAction::Deny
 }
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn process_allows(exe: &str, cmd: &str) -> bool {
-    process_decision_with_protection(exe, cmd).0 == SandboxAction::Pass
+    process_decision_with_protection(exe, cmd).0 != SandboxAction::Deny
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]

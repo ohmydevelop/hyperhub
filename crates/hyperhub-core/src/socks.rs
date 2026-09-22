@@ -561,7 +561,7 @@ impl SocksService {
                 );
                 return Ok(());
             }
-            if firewall_decision.action == crate::config::FirewallAction::Pass {
+            if firewall_decision.action != crate::config::FirewallAction::Deny {
                 if let Some(profile_id) = firewall_decision.protection.as_deref() {
                     let destination = requested
                         .hostnames
@@ -627,6 +627,47 @@ impl SocksService {
             }
         }
         let mut decision = policy.decide(&context);
+        if decision.smart {
+            if let Some(profile_id) = decision.protection.as_deref() {
+                let destination = requested
+                    .hostnames
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| requested.ip.to_string());
+                let outcome = protection
+                    .evaluate_agent(
+                        profile_id,
+                        &session.session_id,
+                        session.pid,
+                        &session.executable,
+                        "route_connect",
+                        vec![format!("{destination}:{}", requested.port)],
+                        vec!["smart_route".into()],
+                        json!({
+                            "destination_authorized": false,
+                            "hostname": requested.hostnames.first(),
+                            "ip": requested.ip,
+                            "port": requested.port,
+                        }),
+                    )
+                    .await;
+                self.audit.session_event(
+                    "smart_protection_decision",
+                    &session.session_id,
+                    Some(session.pid),
+                    Some(&session.executable),
+                    json!({
+                        "protection": profile_id,
+                        "rule_id": decision.rule_id,
+                        "stage": "route_connect",
+                        "action": if outcome.deny { "deny" } else { "pass" },
+                        "reason": outcome.reason,
+                        "provider": outcome.provider,
+                    }),
+                );
+                decision.deny = outcome.deny;
+            }
+        }
         active.update(
             &decision.destination,
             context.protocol,
@@ -1570,7 +1611,7 @@ mod tests {
                 target: "http://localhost/probe".into(),
                 port: Some(origin_address.port()),
             }],
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,

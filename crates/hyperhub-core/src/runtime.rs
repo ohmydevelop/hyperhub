@@ -155,7 +155,7 @@ mod tests {
                 target: target.into(),
                 port: None,
             }],
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -207,7 +207,7 @@ mod tests {
         let mut broken = Config::default();
         broken.rules.push(RouteRule {
             uuid: crate::config::new_config_uuid(),
-            deny: true,
+            action: crate::config::RuleAction::Deny,
             upstream: Some("missing".into()),
             ..rule("broken", "example.com")
         });

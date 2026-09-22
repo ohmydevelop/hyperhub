@@ -9,8 +9,8 @@ use hyperhub_core::config::{
     new_config_uuid, Config, EnvironmentVariable, FileSandboxOperation, FileSandboxPattern,
     FileSandboxRule, FirewallAction, FirewallDefaultRule, FirewallEndpoint, FirewallRule,
     HttpAuthScheme, PluginConfig, PluginKind, PluginProtocol, ProcessSandboxPattern,
-    ProcessSandboxRule, RouteEndpoint, RouteRule, SandboxAction, SandboxDefaultRule, SecretValue,
-    Upstream, UpstreamKind,
+    ProcessSandboxRule, RouteEndpoint, RouteRule, RuleAction, SandboxAction, SandboxDefaultRule,
+    SecretValue, Upstream, UpstreamKind,
 };
 use hyperhub_core::config_store::{default_config_path, load_encrypted};
 use ratatui::backend::CrosstermBackend;
@@ -1185,7 +1185,7 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                 }
             }
             let enabled = boolean_arg(args, "enabled").unwrap_or(true);
-            let deny = boolean_arg(args, "deny").unwrap_or(false);
+            let action = route_action(optional_arg(args, "action").unwrap_or("pass"))?;
             let priority = integer_arg(args, "priority").unwrap_or(100) as i32;
             let uuid = config
                 .rules
@@ -1199,7 +1199,7 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
                 enabled,
                 priority,
                 endpoints: vec![RouteEndpoint { target, port: None }],
-                deny,
+                action,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream,
@@ -1222,15 +1222,8 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
         }
         "set_default_route" => {
             config.default_route.enabled = required_bool(args, "enabled")?;
-            config.default_route.deny = required_bool(args, "deny")?;
-            Ok(format!(
-                "已设置默认路由：{}",
-                if config.default_route.deny {
-                    "拒绝"
-                } else {
-                    "放行"
-                }
-            ))
+            config.default_route.action = route_action(required_arg(args, "action")?)?;
+            Ok(format!("已设置默认路由：{:?}", config.default_route.action))
         }
         "set_runtime_mode" => {
             config.mode = match required_arg(args, "mode")? {
@@ -1534,7 +1527,17 @@ fn firewall_action(value: &str) -> Result<FirewallAction, String> {
     match value {
         "pass" => Ok(FirewallAction::Pass),
         "deny" => Ok(FirewallAction::Deny),
+        "smart" => Ok(FirewallAction::Smart),
         other => Err(format!("未知网络动作 {other}")),
+    }
+}
+
+fn route_action(value: &str) -> Result<RuleAction, String> {
+    match value {
+        "pass" => Ok(RuleAction::Pass),
+        "deny" => Ok(RuleAction::Deny),
+        "smart" => Ok(RuleAction::Smart),
+        other => Err(format!("未知路由动作 {other}")),
     }
 }
 
@@ -1542,6 +1545,7 @@ fn sandbox_action(value: &str) -> Result<SandboxAction, String> {
     match value {
         "pass" => Ok(SandboxAction::Pass),
         "deny" => Ok(SandboxAction::Deny),
+        "smart" => Ok(SandboxAction::Smart),
         other => Err(format!("未知沙盒动作 {other}")),
     }
 }

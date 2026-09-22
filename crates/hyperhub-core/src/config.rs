@@ -645,14 +645,41 @@ impl Config {
             }
         }
 
+        if self.sandbox.process.error_action == SandboxAction::Smart
+            || self.sandbox.file.error_action == SandboxAction::Smart
+            || self.firewall.error_action == FirewallAction::Smart
+        {
+            return Err(ConfigError::Validation(
+                "sandbox/firewall error_action cannot be smart".into(),
+            ));
+        }
+        if self.sandbox.process.default.action == SandboxAction::Smart
+            || self.sandbox.file.default.action == SandboxAction::Smart
+            || self
+                .firewall
+                .default
+                .as_ref()
+                .is_some_and(|rule| rule.action == FirewallAction::Smart)
+        {
+            return Err(ConfigError::Validation(
+                "sandbox/firewall default action cannot be smart".into(),
+            ));
+        }
         if self.default_route.allow_sensitive_upload {
             return Err(ConfigError::Validation(
                 "default_route cannot allow sensitive uploads".into(),
             ));
         }
-        if self.default_route.deny && self.default_route.protection.is_some() {
+        if self.default_route.action == RuleAction::Smart && self.default_route.protection.is_none()
+        {
             return Err(ConfigError::Validation(
-                "default_route cannot configure protection while deny is true".into(),
+                "default_route smart action requires protection".into(),
+            ));
+        }
+        if self.default_route.action != RuleAction::Smart && self.default_route.protection.is_some()
+        {
+            return Err(ConfigError::Validation(
+                "default_route protection requires smart action".into(),
             ));
         }
         validate_optional_protection(
@@ -797,6 +824,16 @@ impl Config {
             }
         }
 
+        if self
+            .firewall
+            .default
+            .as_ref()
+            .is_some_and(|rule| rule.action == FirewallAction::Smart)
+        {
+            return Err(ConfigError::Validation(
+                "firewall default action cannot be smart without a protection reference".into(),
+            ));
+        }
         let mut firewall_rule_ids = HashSet::new();
         for rule in &self.firewall.rules {
             if rule.id.trim().is_empty() || !firewall_rule_ids.insert(rule.id.clone()) {
@@ -912,10 +949,21 @@ impl Config {
                     }
                 }
             }
-            if rule.deny
+            if rule.action == RuleAction::Smart && rule.protection.is_none() {
+                return Err(ConfigError::Validation(format!(
+                    "smart route '{}' requires protection",
+                    rule.id
+                )));
+            }
+            if rule.action != RuleAction::Smart && rule.protection.is_some() {
+                return Err(ConfigError::Validation(format!(
+                    "route '{}' protection requires smart action",
+                    rule.id
+                )));
+            }
+            if rule.action == RuleAction::Deny
                 && (rule.upstream.is_some()
                     || !rule.plugins.is_empty()
-                    || rule.protection.is_some()
                     || rule.allow_sensitive_upload
                     || rule.rewrite_host.is_some()
                     || rule.rewrite_port.is_some())
@@ -1523,10 +1571,20 @@ pub enum EnforcementMode {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RuleAction {
+    #[default]
+    Pass,
+    Deny,
+    Smart,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum FirewallAction {
     #[default]
     Pass,
     Deny,
+    Smart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1541,6 +1599,7 @@ pub enum SandboxAction {
     #[default]
     Pass,
     Deny,
+    Smart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1841,7 +1900,7 @@ pub struct DefaultRoute {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
-    pub deny: bool,
+    pub action: RuleAction,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1856,7 +1915,7 @@ impl Default for DefaultRoute {
     fn default() -> Self {
         Self {
             enabled: true,
-            deny: false,
+            action: RuleAction::Pass,
             plugins: Vec::new(),
             protection: None,
             allow_sensitive_upload: false,
@@ -1913,7 +1972,7 @@ pub struct RouteRule {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<RouteEndpoint>,
     #[serde(default)]
-    pub deny: bool,
+    pub action: RuleAction,
     pub rewrite_host: Option<String>,
     pub rewrite_port: Option<u16>,
     pub upstream: Option<String>,
@@ -2420,7 +2479,7 @@ targets = ["example.com"]"#,
                 target: "one.example".into(),
                 port: Some(443),
             }],
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -2545,7 +2604,7 @@ targets = ["example.com"]"#,
             enabled: true,
             priority: 0,
             endpoints: Vec::new(),
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
@@ -2860,7 +2919,7 @@ targets = ["example.com"]"#,
                 target: "http://[invalid".into(),
                 port: None,
             }],
-            deny: true,
+            action: crate::config::RuleAction::Deny,
             rewrite_host: None,
             rewrite_port: None,
             upstream: Some("missing".into()),
@@ -3257,7 +3316,7 @@ aktion = "deny""#,
                 target: "api.example.com".into(),
                 port: Some(443),
             }],
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,

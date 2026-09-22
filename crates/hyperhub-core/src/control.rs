@@ -426,7 +426,7 @@ impl ControlService {
                             let mut destructive_probability = None;
                             let mut blast_radius = None;
                             let mut provider_queried = false;
-                            if action == crate::config::SandboxAction::Pass {
+                            if action != crate::config::SandboxAction::Deny {
                                 if let Some(binding) = binding {
                                     rule_id = Some(binding.rule_id.clone());
                                     let context = ProtectionContext::default();
@@ -1210,6 +1210,7 @@ impl ControlService {
                     let event_name = match event.decision {
                         crate::config::FirewallAction::Pass => "firewall_allowed",
                         crate::config::FirewallAction::Deny => "firewall_denied",
+                        crate::config::FirewallAction::Smart => "firewall_allowed",
                     };
                     self.audit.session_event(
                         event_name,
@@ -1256,6 +1257,7 @@ impl ControlService {
                     let event_name = match event.decision {
                         crate::config::SandboxAction::Pass => "sandbox_allowed",
                         crate::config::SandboxAction::Deny => "sandbox_denied",
+                        crate::config::SandboxAction::Smart => "sandbox_allowed",
                     };
                     self.audit.session_event(
                         event_name,
@@ -1296,6 +1298,7 @@ impl ControlService {
                     let event_name = match event.decision {
                         crate::config::SandboxAction::Pass => "sandbox_allowed",
                         crate::config::SandboxAction::Deny => "sandbox_denied",
+                        crate::config::SandboxAction::Smart => "sandbox_allowed",
                     };
                     self.audit.session_event(event_name, &session_id, Some(event.process_pid), self.sessions.member_executable(event.process_pid).as_deref(), serde_json::json!({
                         "kind": event.kind, "decision": event.decision, "rule_id": event.rule_id, "decision_source": event.source,
@@ -3056,7 +3059,7 @@ mod tests {
         );
 
         let mut next = config.clone();
-        next.default_route.deny = true;
+        next.default_route.action = crate::config::RuleAction::Deny;
         next.debug = true;
         let config_json = serde_json::to_string(&next).unwrap();
         let proof = crate::session::config_update_proof(&[0; 32], &config_json).unwrap();
@@ -3086,7 +3089,7 @@ mod tests {
         let response = send_update(service.clone(), config_json.clone(), proof).await;
         assert!(matches!(response, ControlResponse::Ok));
         assert!(
-            runtime.snapshot().config.default_route.deny,
+            runtime.snapshot().config.default_route.action == crate::config::RuleAction::Deny,
             "hot update must replace the runtime snapshot"
         );
         assert!(audit.debug_enabled(), "hot update must toggle debug output");
@@ -3124,7 +3127,7 @@ mod tests {
             ControlResponse::Error { ref message } if message.contains("proof")
         ));
         assert!(
-            runtime.snapshot().config.default_route.deny,
+            runtime.snapshot().config.default_route.action == crate::config::RuleAction::Deny,
             "rejected update must keep the previous snapshot"
         );
         let snapshot = runtime.snapshot().config;
