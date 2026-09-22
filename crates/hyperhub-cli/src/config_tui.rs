@@ -4847,6 +4847,7 @@ fn detail_lines(app: &App) -> Vec<String> {
                     if m.enabled { "启用" } else { "停用" }
                 )
             }));
+            lines.push("新增模型映射（按 a）".into());
             lines
         }
         CATEGORY_BASIC => vec![
