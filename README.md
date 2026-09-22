@@ -75,6 +75,30 @@ hyperhub run bash       # Linux
 hyperhub.exe run cmd    # Windows
 ```
 
+### 隔离运行实例
+
+HyperHub 默认使用当前用户的 `HOME` 和用户级控制 socket。需要运行完全独立的测试实例时，同时设置独立的 `HOME`、`XDG_RUNTIME_DIR` 和 `HYPERHUB_CONTROL_ENDPOINT`：
+
+```bash
+sandbox=$(mktemp -d)
+mkdir -p "$sandbox/home" "$sandbox/runtime"
+chmod 700 "$sandbox/runtime"
+printf '%s\n' 'local-test-password' > "$sandbox/password"
+chmod 600 "$sandbox/password"
+
+HOME="$sandbox/home" \
+XDG_RUNTIME_DIR="$sandbox/runtime" \
+HYPERHUB_CONTROL_ENDPOINT="$sandbox/runtime/hyperhub-control.sock" \
+  ./target/release/hyperhub start --password-file "$sandbox/password"
+
+HOME="$sandbox/home" \
+XDG_RUNTIME_DIR="$sandbox/runtime" \
+HYPERHUB_CONTROL_ENDPOINT="$sandbox/runtime/hyperhub-control.sock" \
+  ./target/release/hyperhub status --json
+```
+
+该实例的配置、脱敏视图、日志、Skill 安装目录和控制 socket 都与默认用户实例分离。结束后使用同样的环境变量运行 `hyperhub stop`，再删除临时目录。
+
 ### Agent Skill 自动安装
 
 HyperHub CLI 内嵌用于 Agent 操作配置的 `hyperhub-cli` Skill。每次执行 `hyperhub start`（包括 `restart`）时都会检查用户级通用目录：

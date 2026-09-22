@@ -21,14 +21,28 @@ pub const DISCOVERY_CONTROL_ENDPOINT: &str = r"\\.\pipe\hyperhub-control";
 #[cfg(unix)]
 pub const DISCOVERY_CONTROL_ENDPOINT: &str = "/tmp/hyperhub-control.sock";
 
+pub const CONTROL_ENDPOINT_ENV: &str = "HYPERHUB_CONTROL_ENDPOINT";
+
+fn configured_control_endpoint() -> Option<String> {
+    std::env::var_os(CONTROL_ENDPOINT_ENV)
+        .filter(|value| !value.is_empty())
+        .map(|value| std::path::PathBuf::from(value).display().to_string())
+}
+
 #[cfg(windows)]
 pub fn discovery_control_endpoint() -> String {
+    if let Some(endpoint) = configured_control_endpoint() {
+        return endpoint;
+    }
     let suffix =
         crate::config_store::current_user_sid_string().unwrap_or_else(|_| "unknown".into());
     format!("{DISCOVERY_CONTROL_ENDPOINT}-{suffix}")
 }
 #[cfg(target_os = "linux")]
 pub fn discovery_control_endpoint() -> String {
+    if let Some(endpoint) = configured_control_endpoint() {
+        return endpoint;
+    }
     use std::os::unix::fs::MetadataExt;
 
     let uid = linux_effective_uid().unwrap_or(0);
@@ -37,6 +51,23 @@ pub fn discovery_control_endpoint() -> String {
         metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o077 == 0
     });
     control_endpoint_for_uid(uid, runtime_is_private)
+        .display()
+        .to_string()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn discovery_control_endpoint() -> String {
+    if let Some(endpoint) = configured_control_endpoint() {
+        return endpoint;
+    }
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            std::path::PathBuf::from(value)
+                .join("hyperhub")
+                .join("control.sock")
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(DISCOVERY_CONTROL_ENDPOINT))
         .display()
         .to_string()
 }
@@ -59,20 +90,6 @@ fn control_endpoint_for_uid(uid: u32, runtime_available: bool) -> std::path::Pat
 fn linux_effective_uid() -> io::Result<u32> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata("/proc/self").map(|metadata| metadata.uid())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-pub fn discovery_control_endpoint() -> String {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            std::path::PathBuf::from(value)
-                .join("hyperhub")
-                .join("control.sock")
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from(DISCOVERY_CONTROL_ENDPOINT))
-        .display()
-        .to_string()
 }
 
 fn compile_agent_snapshots(
