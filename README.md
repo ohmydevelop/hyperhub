@@ -227,7 +227,7 @@ Chat 已通过主密码解锁配置，因此模型工具调用会在完整校验
 
 ```bash
 hyperhub show
-hyperhub config patch patch.json --password-file ./password
+hyperhub config patch patch.json
 
 # 人工在真实终端执行，并按提示输入 HyperHub 密码
 hyperhub approve

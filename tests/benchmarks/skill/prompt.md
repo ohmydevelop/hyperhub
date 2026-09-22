@@ -18,7 +18,7 @@ The fixture is a redacted result of `hyperhub show`. Produce one JSON object and
 The JSON object must also contain:
 
 - `approval_steps`: a short description telling a human to submit the patch with
-  `hyperhub config patch <patch-file> --password-file <file>` and then run `hyperhub approve`;
+  `hyperhub config patch <patch-file>` and then run `hyperhub approve`;
 - `secret_policy`: a short statement that real secrets must be entered by the human during
   approval and must not appear in the patch, command arguments, logs, or Agent response.
 

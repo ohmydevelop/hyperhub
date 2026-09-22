@@ -6,7 +6,7 @@ use hyperhub_core::config_document::ConfigDocument;
 use hyperhub_core::config_store::{
     self, default_config_path, load_approval_state_with_keyring, load_encrypted_with_keyring,
     read_descriptor, read_redacted_json, save_approval_state_with_keyring,
-    save_encrypted_with_keyring, ConfigKeyring, KdfDescriptor, StoreError,
+    save_encrypted_with_keyring, save_private_bytes, ConfigKeyring, KdfDescriptor, StoreError,
 };
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
 use hyperhub_core::session::{config_update_proof, ControlRequest, ControlResponse};
@@ -23,7 +23,6 @@ pub(crate) enum Command {
     Show,
     Patch {
         patch: PathBuf,
-        password_file: Option<PathBuf>,
     },
     Approve {
         password_file: Option<PathBuf>,
@@ -107,30 +106,13 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Command, String> {
 }
 
 fn parse_patch(args: &[OsString]) -> Result<Command, String> {
-    let patch = args
-        .first()
-        .ok_or("config patch requires a JSON patch file or - for stdin")?
-        .clone()
-        .into();
-    let mut password_file = None;
-    let mut index = 1;
-    while index < args.len() {
-        let option = args[index].to_string_lossy();
-        index += 1;
-        let value = args
-            .get(index)
-            .ok_or_else(|| format!("{option} requires a value"))?
-            .clone();
-        match option.as_ref() {
-            "--password-file" => password_file = Some(value.into()),
-            _ => return Err(format!("unknown config patch option '{option}'")),
-        }
-        index += 1;
+    match args {
+        [patch] => Ok(Command::Patch {
+            patch: patch.clone().into(),
+        }),
+        [] => Err("config patch requires a JSON patch file or - for stdin".into()),
+        _ => Err("config patch accepts only a JSON patch file or - for stdin; authentication happens during `hyperhub approve`".into()),
     }
-    Ok(Command::Patch {
-        patch,
-        password_file,
-    })
 }
 
 pub(crate) fn parse_show(args: &[OsString]) -> Result<Command, String> {
@@ -187,10 +169,7 @@ pub(crate) fn save_direct_config(
 pub(crate) fn run(command: Command) -> Result<i32, String> {
     match command {
         Command::Show => show(),
-        Command::Patch {
-            patch,
-            password_file,
-        } => patch_config(&patch, password_file.as_deref()),
+        Command::Patch { patch } => patch_config(&patch),
         Command::Approve {
             password_file,
             editor,
@@ -227,23 +206,27 @@ fn show() -> Result<i32, String> {
     Ok(0)
 }
 
-fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, String> {
+fn patch_config(patch_path: &Path) -> Result<i32, String> {
     let path = default_config_path().map_err(|error| error.to_string())?;
     let queue_path = approval_queue_path(&path);
-    let password =
-        crate::password::acquire(password_file, !path.is_file() && !queue_path.is_file())?;
-    let descriptor_hint = queue_path
-        .is_file()
-        .then(|| read_descriptor(&queue_path).map_err(|error| error.to_string()))
-        .transpose()?;
-    let active = load_active_with_password(&path, password, descriptor_hint)?;
+    let proposal_path = approval_proposal_path(&path);
+    if queue_path.is_file() {
+        print_json(&json!({
+            "schema_version": 1,
+            "status": "approval_pending",
+            "config_path": path,
+            "encrypted_review_in_progress": true,
+        }))?;
+        return Ok(0);
+    }
+
     let mut patch = parse_patch_file(patch_path)?;
+    ensure_proposal_contains_no_literal_secrets(&patch)?;
     collect_placeholders(&patch)?;
     let patch_digest = value_digest(b"hyperhub/config-patch/v1\0", &patch)?;
 
-    if queue_path.is_file() {
-        let (queue, descriptor) = load_queue(&queue_path, &active.keyring)?;
-        ensure_queue_descriptor(&active, &descriptor)?;
+    if proposal_path.is_file() {
+        let queue = load_proposal(&proposal_path)?;
         validate_queue(&queue)?;
         if queue.patch_digest != patch_digest {
             return Err(
@@ -257,31 +240,32 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
             "approval_token": queue.proposal_token,
             "config_path": path,
             "request_count": queue.requests.len(),
-            "completed": queue.cursor,
-            "remaining": queue.requests.len().saturating_sub(queue.cursor),
+            "completed": 0,
+            "remaining": queue.requests.len(),
         }))?;
         return Ok(0);
     }
 
-    normalize_config_item_uuids(&active.config, &mut patch)?;
-    let prepared = prepare_patch(&path, &active.config, &patch)?;
+    let planning = load_planning_config(&path)?;
+    normalize_config_item_uuids(&planning, &mut patch)?;
+    let prepared = prepare_patch(&path, &planning, &patch)?;
     if prepared.changes.is_empty() {
         return Err("JSON patch does not change the configuration".into());
     }
     let requests = build_approval_requests(&patch)?;
-    let request_descriptions = describe_request_sequence(&path, &active.config, &requests)?;
+    let request_descriptions = describe_request_sequence(&path, &planning, &requests)?;
     let queue = ApprovalQueue {
         schema_version: APPROVAL_QUEUE_SCHEMA,
         proposal_token: prepared.approval_token.clone(),
         patch_digest,
-        expected_config_digest: config_digest(&active.config)?,
+        expected_config_digest: String::new(),
         requests,
         cursor: 0,
         approved: 0,
         rejected: 0,
         in_flight: None,
     };
-    save_queue(&queue_path, &queue, &active)?;
+    save_proposal(&proposal_path, &queue)?;
     let request_views = queue
         .requests
         .iter()
@@ -295,7 +279,7 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
         "schema_version": 1,
         "status": "approval_required",
         "approval_token": prepared.approval_token,
-        "initialized": active.initialized,
+        "initialized": path.is_file(),
         "serve_running": crate::serve_is_running(),
         "config_path": path,
         "request_count": queue.requests.len(),
@@ -308,19 +292,39 @@ fn patch_config(patch_path: &Path, password_file: Option<&Path>) -> Result<i32, 
 fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result<i32, String> {
     let path = default_config_path().map_err(|error| error.to_string())?;
     let queue_path = approval_queue_path(&path);
-    if !queue_path.is_file() {
+    let proposal_path = approval_proposal_path(&path);
+    if !queue_path.is_file() && !proposal_path.is_file() {
         return Err("there are no pending configuration requests".into());
     }
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err("approve requires an interactive terminal for human review".into());
     }
 
-    let password = crate::password::acquire(password_file, false)?;
-    let queue_descriptor = read_descriptor(&queue_path).map_err(|error| error.to_string())?;
-    let mut active = load_active_with_password(&path, password, Some(queue_descriptor.clone()))?;
-    let (mut queue, queue_descriptor) = load_queue(&queue_path, &active.keyring)?;
+    let password = crate::password::acquire(password_file, !path.is_file())?;
+    let descriptor_hint = queue_path
+        .is_file()
+        .then(|| read_descriptor(&queue_path).map_err(|error| error.to_string()))
+        .transpose()?;
+    let mut active = load_active_with_password(&path, password, descriptor_hint.clone())?;
+    let mut queue = if queue_path.is_file() {
+        let (queue, queue_descriptor) = load_queue(&queue_path, &active.keyring)?;
+        ensure_queue_descriptor(&active, &queue_descriptor)?;
+        queue
+    } else {
+        let mut queue = load_proposal(&proposal_path)?;
+        validate_queue(&queue)?;
+        describe_request_sequence(&path, &active.config, &queue.requests).map_err(|error| {
+            format!("pending configuration proposal is no longer valid: {error}")
+        })?;
+        queue.expected_config_digest = config_digest(&active.config)?;
+        save_queue(&queue_path, &queue, &active)?;
+        remove_queue(&proposal_path)?;
+        queue
+    };
     validate_queue(&queue)?;
-    ensure_queue_descriptor(&active, &queue_descriptor)?;
+    if proposal_path.is_file() {
+        remove_queue(&proposal_path)?;
+    }
     // Persist UUIDs generated while loading queues created by older versions.
     save_queue(&queue_path, &queue, &active)?;
 
@@ -428,6 +432,7 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
     }
 
     remove_queue(&queue_path)?;
+    remove_queue(&proposal_path)?;
     print_json(&json!({
         "schema_version": 1,
         "status": "completed",
@@ -524,6 +529,48 @@ fn parse_patch_file(path: &Path) -> Result<Value, String> {
 
 fn approval_queue_path(config_path: &Path) -> PathBuf {
     config_path.with_extension("approval.bin")
+}
+
+fn approval_proposal_path(config_path: &Path) -> PathBuf {
+    config_path.with_extension("approval.json")
+}
+
+fn load_planning_config(path: &Path) -> Result<Config, String> {
+    if path.is_file() {
+        let bytes = read_redacted_json(path).map_err(|error| match error {
+            StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                "redacted configuration view is not initialized; run `hyperhub validate --password-file <file>` once before submitting configuration requests".into()
+            }
+            other => other.to_string(),
+        })?;
+        let value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("redacted configuration JSON is invalid: {error}"))?;
+        let mut config = ConfigDocument::from_value(value)?;
+        config.apply_managed_audit_paths(path);
+        Ok(config)
+    } else {
+        let mut config = Config::default();
+        config.apply_managed_audit_paths(path);
+        config.environment = crate::default_environment();
+        Ok(config)
+    }
+}
+
+fn load_proposal(path: &Path) -> Result<ApprovalQueue, String> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        format!(
+            "cannot read configuration proposal {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("configuration proposal is invalid: {error}"))
+}
+
+fn save_proposal(path: &Path, queue: &ApprovalQueue) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec_pretty(queue).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    save_private_bytes(path, &bytes).map_err(|error| error.to_string())
 }
 
 fn load_queue(
@@ -1034,6 +1081,73 @@ fn config_value(config: &Config) -> Result<Value, String> {
 
 fn config_digest(config: &Config) -> Result<String, String> {
     value_digest(b"hyperhub/config-state/v1\0", &config_value(config)?)
+}
+
+fn ensure_proposal_contains_no_literal_secrets(patch: &Value) -> Result<(), String> {
+    let operations = patch
+        .as_array()
+        .ok_or("JSON patch must be an array of operations")?;
+    for (index, operation) in operations.iter().enumerate() {
+        let Some(object) = operation.as_object() else {
+            continue;
+        };
+        let action = object.get("op").and_then(Value::as_str).unwrap_or("");
+        if !matches!(action, "add" | "replace") {
+            continue;
+        }
+        let path = object.get("path").and_then(Value::as_str).unwrap_or("");
+        let Some(value) = object.get("value") else {
+            continue;
+        };
+        if value.is_string() && is_sensitive_secret_leaf(path) {
+            ensure_approval_placeholder(value.as_str().unwrap(), index, path)?;
+        }
+        ensure_nested_secret_values_are_placeholders(value, index, path)?;
+    }
+    Ok(())
+}
+
+fn ensure_nested_secret_values_are_placeholders(
+    value: &Value,
+    operation_index: usize,
+    path: &str,
+) -> Result<(), String> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                ensure_nested_secret_values_are_placeholders(value, operation_index, path)?;
+            }
+        }
+        Value::Object(values) => {
+            if values.len() == 1 {
+                if let Some(Value::String(secret)) = values.get("value") {
+                    ensure_approval_placeholder(secret, operation_index, path)?;
+                    return Ok(());
+                }
+            }
+            for value in values.values() {
+                ensure_nested_secret_values_are_placeholders(value, operation_index, path)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_approval_placeholder(value: &str, index: usize, path: &str) -> Result<(), String> {
+    if parse_placeholder(value)?.is_none() {
+        return Err(format!(
+            "patch operation {index} at {path} contains an inline secret; use ${{APPROVE:name}}, an environment reference, or a protected file reference"
+        ));
+    }
+    Ok(())
+}
+
+fn is_sensitive_secret_leaf(path: &str) -> bool {
+    path.ends_with("/value")
+        && (path.contains("/environment_variables/")
+            || path.contains("/gateway/credentials/")
+            || path.contains("/gateway/proxies/"))
 }
 
 fn collect_placeholders(value: &Value) -> Result<Vec<String>, String> {
@@ -1570,6 +1684,32 @@ mod tests {
         assert!(validate_queue(&queue).is_err());
         queue.approved = 1;
         validate_queue(&queue).unwrap();
+    }
+
+    #[test]
+    fn passwordless_proposals_reject_literal_secrets() {
+        let literal = json!([{
+            "op": "add",
+            "path": "/environment_variables/-",
+            "value": {"name": "TOKEN", "value": {"value": "literal-secret"}}
+        }]);
+        assert!(ensure_proposal_contains_no_literal_secrets(&literal)
+            .unwrap_err()
+            .contains("use ${APPROVE:name}"));
+
+        let placeholder = json!([{
+            "op": "add",
+            "path": "/gateway/credentials/-",
+            "value": {"id": "api", "type": "http_bearer", "secret": {"value": "${APPROVE:api-token}"}}
+        }]);
+        ensure_proposal_contains_no_literal_secrets(&placeholder).unwrap();
+
+        let file_reference = json!([{
+            "op": "add",
+            "path": "/environment_variables/-",
+            "value": {"name": "TOKEN", "value": {"file": "/secure/token", "prefix": "Bearer "}}
+        }]);
+        ensure_proposal_contains_no_literal_secrets(&file_reference).unwrap();
     }
 
     #[test]

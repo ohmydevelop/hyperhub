@@ -535,7 +535,7 @@ patch = [
 ]
 path.write_text(json.dumps(patch, indent=2) + "\n", encoding="utf-8")
 PYCODE
-"$hyperhub" config patch "$hot_patch" --password-file "$password_file" \
+"$hyperhub" config patch "$hot_patch" \
   >"$temporary/hot-update/patch.out"
 python3 - "$hyperhub" "$password_file" "$temporary/hot-update/approve.log" <<'PYCODE'
 import os, pathlib, pty, select, subprocess, sys, time

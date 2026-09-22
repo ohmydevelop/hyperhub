@@ -42,12 +42,24 @@ cat > "$patch_file" <<'JSON'
 JSON
 chmod 0600 "$patch_file"
 
+literal_secret_patch="$temporary/literal-secret-patch.json"
+printf '%s\n' '[{"op":"add","path":"/environment_variables/-","value":{"name":"FORBIDDEN_LITERAL","value":{"value":"must-not-enter-proposal"}}}]' > "$literal_secret_patch"
+chmod 0600 "$literal_secret_patch"
+if "$hyperhub" config patch "$literal_secret_patch" >"$temporary/literal-secret.stdout" 2>"$temporary/literal-secret.stderr"; then
+  echo 'config patch unexpectedly accepted a literal inline secret without approval' >&2
+  exit 1
+fi
+grep -q 'use ${APPROVE:name}' "$temporary/literal-secret.stderr"
+
 plan="$temporary/plan.json"
-"$hyperhub" config patch "$patch_file" --password-file "$password_file" > "$plan"
+"$hyperhub" config patch "$patch_file" > "$plan"
 [[ ! -e $HOME/.hyperhub/config.bin ]] || { echo 'planning unexpectedly modified config' >&2; exit 1; }
+proposal="$HOME/.hyperhub/config.approval.json"
 queue="$HOME/.hyperhub/config.approval.bin"
-[[ -f $queue ]] || { echo 'planning did not persist the approval queue' >&2; exit 1; }
-[[ $(stat -c %a "$queue") == 600 ]]
+[[ -f $proposal ]] || { echo 'planning did not persist the approval proposal' >&2; exit 1; }
+[[ ! -e $queue ]] || { echo 'planning created an encrypted review queue before approval' >&2; exit 1; }
+[[ $(stat -c %a "$proposal") == 600 ]]
+! grep -q 'real-github-api-key' "$proposal"
 python3 - "$plan" <<'PY'
 import json
 import re
@@ -73,7 +85,7 @@ assert any("example.com" in detail for detail in requests[2]["details"])
 PY
 
 pending="$temporary/pending.json"
-"$hyperhub" config patch "$patch_file" --password-file "$password_file" > "$pending"
+"$hyperhub" config patch "$patch_file" > "$pending"
 python3 - "$pending" <<'PY'
 import json
 import pathlib
@@ -86,7 +98,7 @@ PY
 other_patch="$temporary/other-patch.json"
 printf '[{"op":"replace","path":"/gateway/debug","value":false}]\n' > "$other_patch"
 chmod 0600 "$other_patch"
-if "$hyperhub" config patch "$other_patch" --password-file "$password_file" >/dev/null 2>&1; then
+if "$hyperhub" config patch "$other_patch" >/dev/null 2>&1; then
   echo 'a different patch unexpectedly replaced the pending approval queue' >&2
   exit 1
 fi
@@ -125,6 +137,7 @@ if pid == 0:
 
 output = bytearray()
 password_sent = False
+confirmation_sent = False
 secret_sent = False
 decisions_sent = 0
 killed = False
@@ -145,6 +158,10 @@ while True:
         time.sleep(0.05)
         os.write(fd, password.encode() + b"\n")
         password_sent = True
+    if password_sent and not confirmation_sent and "Confirm password:" in text:
+        time.sleep(0.05)
+        os.write(fd, password.encode() + b"\n")
+        confirmation_sent = True
     if not secret_sent and "Enter value (masked):" in text:
         time.sleep(0.05)
         os.write(fd, secret.encode() + b"\n")
@@ -212,7 +229,8 @@ assert "位置          网关 / 基础" in text
 assert "位置          环境变量" in text
 assert "位置          网关 / 路由" in text
 PY
-[[ -f $queue ]] || { echo 'interruption removed the pending approval queue' >&2; exit 1; }
+[[ -f $queue ]] || { echo 'approval did not migrate the proposal to the encrypted queue' >&2; exit 1; }
+[[ ! -e $proposal ]] || { echo 'approval left the plain proposal after encrypted migration' >&2; exit 1; }
 
 partial="$temporary/partial-show.json"
 "$hyperhub" show > "$partial"
@@ -245,6 +263,7 @@ assert uuids[-1] in text
 assert all(uuid not in text for uuid in uuids[:-1])
 PY
 [[ ! -e $queue ]] || { echo 'completed approval queue was not removed' >&2; exit 1; }
+[[ ! -e $proposal ]] || { echo 'completed approval proposal was not removed' >&2; exit 1; }
 
 shown="$temporary/show.json"
 "$hyperhub" show > "$shown"
@@ -310,7 +329,7 @@ PY
   live_patch="$temporary/live-patch.json"
   printf '[{"op":"replace","path":"/gateway/debug","value":true}]\n' > "$live_patch"
   chmod 0600 "$live_patch"
-  "$hyperhub" config patch "$live_patch" --password-file "$password_file" > "$temporary/live-plan.json"
+  "$hyperhub" config patch "$live_patch" > "$temporary/live-plan.json"
   live_transcript="$temporary/live-approve.transcript"
   drive_approve apply "$live_transcript"
   grep -q '\[1/1\] 已批准（live_update=true）' "$live_transcript"

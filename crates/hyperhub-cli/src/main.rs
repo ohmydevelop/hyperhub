@@ -1176,7 +1176,7 @@ configuration and Agent guidance:
   hyperhub chat [--password-file file]  edit configuration with the local chat assistant
   hyperhub config [--password-file file] open the interactive configuration editor
   hyperhub show                         show the redacted JSON configuration
-  hyperhub config patch <file|-> ...    queue a JSON Patch for human approval
+  hyperhub config patch <file|->        queue a JSON Patch without requiring a password
   hyperhub approve ...                  review, edit, approve, or reject queued changes
   hyperhub import <file> ...            import and encrypt a configuration
   hyperhub export <file> ...            export configuration (redacted by default)
@@ -1336,22 +1336,20 @@ mod tests {
         assert!(removed_alias.contains("use `hyperhub show`"));
         assert!(parse_args(vec![os("show"), os("--password-file"), os("password.txt")]).is_err());
 
-        let Command::ConfigCli(config_cli::Command::Patch {
-            patch,
-            password_file,
-        }) = parse_args(vec![
+        let Command::ConfigCli(config_cli::Command::Patch { patch }) =
+            parse_args(vec![os("config"), os("patch"), os("patch.json")]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(patch, PathBuf::from("patch.json"));
+        assert!(parse_args(vec![
             os("config"),
             os("patch"),
             os("patch.json"),
             os("--password-file"),
             os("password.txt"),
         ])
-        .unwrap()
-        else {
-            panic!()
-        };
-        assert_eq!(patch, PathBuf::from("patch.json"));
-        assert_eq!(password_file, Some("password.txt".into()));
+        .is_err());
 
         let Command::ConfigCli(config_cli::Command::Approve {
             password_file,

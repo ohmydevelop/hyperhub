@@ -58,7 +58,7 @@ LLM 使用 JSON Patch 描述意图。支持 `add`、`replace`、`remove`、`test
 LLM 只运行提交命令：
 
 ```sh
-hyperhub config patch patch.json --password-file ./password
+hyperhub config patch patch.json
 ```
 
 该命令会完成全量配置校验并返回：
@@ -69,7 +69,7 @@ hyperhub config patch patch.json --password-file ./password
 - 已脱敏的整体 `changes`；
 - Serve 是否正在运行。
 
-活动配置不会在此阶段改变。请求会写入 `config.approval.bin` 加密队列；文件使用与配置分离的加密密钥域和当前用户独占权限。相同 patch 可以安全重试并返回当前进度，不同 patch 不会覆盖未完成队列。
+活动配置不会在此阶段改变。请求首先写入权限为当前用户独占的 `config.approval.json` Proposal。CLI 拒绝其中出现真实 inline Secret，只允许 `${APPROVE:name}`、环境变量引用或受保护文件引用。人工首次运行 `approve` 并通过主密码解锁配置后，Proposal 会立即迁移到使用独立密钥域的 `config.approval.bin` 加密队列并删除明文 Proposal。相同 Patch 可以安全重试，不同 Patch 不会覆盖未完成队列。
 
 ## 3. 人工逐条审批
 
@@ -108,7 +108,7 @@ hyperhub approve --password-file ./password --editor /path/to/editor
 
 ## 4. 初始化与密码
 
-配置不存在时，`config patch` 以默认配置为基线并创建加密审批队列，首次批准请求时才创建活动配置。密码通过权限受限的文件或 `HYPERHUB_CONFIG_PASSWORD` 提供。例如：
+配置不存在时，`config patch` 以默认配置为基线并创建不含真实 Secret 的权限受限 Proposal，首次 `approve` 时才创建活动配置。密码只在人工审批阶段通过权限受限的文件或 `HYPERHUB_CONFIG_PASSWORD` 提供。例如：
 
 ```sh
 printf 'replace-with-a-long-password

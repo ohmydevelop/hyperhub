@@ -35,7 +35,7 @@ hyperhub show
 2. `config patch` 的第一个参数是 **Patch 文件路径**，不是内联 JSON；需要通过标准输入提交时使用 `-`：
 
    ```sh
-   cat patch.json | hyperhub config patch - --password-file /path/to/password
+   cat patch.json | hyperhub config patch -
    ```
 
 3. 每个修改操作必须是可独立校验的完整配置请求。新增凭证后，再新增引用该凭证 ID 的路由；不要在同一个路由中绑定同协议的多个同类凭证。
@@ -57,7 +57,7 @@ hyperhub show
 6. 提交审批队列：
 
    ```sh
-   hyperhub config patch <patch-file> --password-file /path/to/password
+   hyperhub config patch <patch-file>
    ```
 
    例如，新增 Bearer 凭证和路由时，Patch 的核心对象应类似：
@@ -71,7 +71,7 @@ hyperhub show
 
    真实 token 只在人工 `approve` 时由用户输入；不得放入 Patch、命令行参数、日志或 Agent 回复。
 
-该命令只写入加密审批队列，不直接应用配置。已有未完成队列时，不得用不同 patch 覆盖；不要把 `config patch` 当作直接生效命令。向用户汇报时必须同时说明“Agent 已提交 Patch，用户需要在真实终端运行 `hyperhub approve`”，不得只给出审批命令而省略 Patch 提交步骤。
+该命令不需要密码，只写入权限受限且禁止包含真实 Secret 的待审批 Proposal，不直接应用配置。首次人工运行 `approve` 并输入主密码后，Proposal 会迁移到加密审批队列；已有未完成请求时不得用不同 Patch 覆盖。不要把 `config patch` 当作直接生效命令。向用户汇报时必须同时说明“Agent 已提交 Patch，用户需要在真实终端运行 `hyperhub approve`”，不得只给出审批命令而省略 Patch 提交步骤。
 
 ## 人工审批边界
 

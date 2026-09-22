@@ -156,6 +156,10 @@ pub fn read_redacted_json(config_path: &Path) -> Result<Vec<u8>, StoreError> {
     read(&redacted_config_path(config_path))
 }
 
+pub fn save_private_bytes(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    atomic_write(path, bytes)
+}
+
 pub fn new_descriptor() -> KdfDescriptor {
     let mut config_id = [0u8; 16];
     let mut salt = [0u8; 16];
