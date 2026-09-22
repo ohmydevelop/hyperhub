@@ -112,6 +112,9 @@ pub(crate) fn evaluate(
         || lower.contains("secret")
     {
         score += 30;
+        if matches!(policy, PrefilterPolicy::SensitiveRead) {
+            score += 30;
+        }
         features.insert("sensitive_file_reference".to_owned());
     }
     if context.sensitive_files_read > 0 {

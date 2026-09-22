@@ -561,6 +561,68 @@ impl SocksService {
                 );
                 return Ok(());
             }
+            if firewall_decision.action == crate::config::FirewallAction::Pass {
+                if let Some(profile_id) = firewall_decision.protection.as_deref() {
+                    let destination = requested
+                        .hostnames
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| requested.ip.to_string());
+                    let outcome = protection
+                        .evaluate_agent(
+                            profile_id,
+                            &session.session_id,
+                            session.pid,
+                            &session.executable,
+                            "network_connect",
+                            vec![format!("{destination}:{}", requested.port)],
+                            vec!["network_egress".into()],
+                            serde_json::json!({
+                                "destination_authorized": false,
+                                "hostname": requested.hostnames.first(),
+                                "ip": requested.ip,
+                                "port": requested.port,
+                                "prefilter_policy": firewall_decision.prefilter_policy,
+                            }),
+                        )
+                        .await;
+                    let provider = outcome.providers.iter().find(|item| item.error.is_none());
+                    let action = if outcome.deny { "deny" } else { "pass" };
+                    self.audit.session_event(
+                        "smart_protection_decision",
+                        &session.session_id,
+                        Some(session.pid),
+                        Some(&session.executable),
+                        json!({
+                            "protection": profile_id,
+                            "rule_id": firewall_decision.rule_id,
+                            "stage": "network_connect",
+                            "action": action,
+                            "reason": outcome.reason,
+                            "features": ["network_egress"],
+                            "risk_level": provider.and_then(|item| item.risk_level.clone()),
+                            "confidence": provider.and_then(|item| item.confidence),
+                            "destructive_probability": provider.and_then(|item| item.destructive_probability),
+                            "blast_radius": provider.and_then(|item| item.blast_radius),
+                            "cache_hit": provider.is_some_and(|item| item.cache_hit),
+                            "reporter": "gateway-firewall",
+                        }),
+                    );
+                    if outcome.deny {
+                        active.update(
+                            &requested,
+                            context.protocol,
+                            firewall_decision.rule_id.as_deref(),
+                            "deny",
+                            None,
+                            None,
+                            "smart-firewall-denied",
+                        );
+                        write_reply(&mut client, 2).await?;
+                        return Ok(());
+                    }
+                }
+            }
         }
         let mut decision = policy.decide(&context);
         active.update(

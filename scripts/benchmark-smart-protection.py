@@ -427,19 +427,30 @@ def run_hyperhub_case(
     argv = [str(item) for item in case["command"].get("argv", [])]
     redacted = redact_argv(argv, case.get("secrets", []))
     started = time.perf_counter_ns()
-    command = [
-        binary,
-        "run",
-        "--password-file",
-        str(password_file),
-        "--",
-        "/bin/sh",
-        "-c",
-        'exec "$@"',
-        "hyperhub-benchmark",
-        str(wrapper),
-        *argv,
-    ]
+    if case.get("launch") == "child":
+        command = [
+            binary,
+            "run",
+            "--password-file",
+            str(password_file),
+            "--",
+            "/bin/sh",
+            "-c",
+            'exec "$@"',
+            "hyperhub-benchmark",
+            str(wrapper),
+            *argv,
+        ]
+    else:
+        command = [
+            binary,
+            "run",
+            "--password-file",
+            str(password_file),
+            "--",
+            str(wrapper),
+            *argv,
+        ]
     run_error: Optional[str] = None
     try:
         process = subprocess.run(
@@ -484,7 +495,10 @@ def run_hyperhub_case(
     privacy_leaks = [
         secret for secret in case.get("secrets", []) if secret and secret in appended_text
     ]
-    queried = smart is not None
+    queried = bool(
+        smart is not None
+        and smart.get("attributes", {}).get("provider_queried", True)
+    )
     full_chain = (
         sandbox is not None
         and sandbox.get("attributes", {}).get("rule_id") is not None

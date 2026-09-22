@@ -982,6 +982,17 @@ impl SessionRegistry {
             .cloned()
     }
 
+    pub fn authenticate_pending(&self, session_id: &str, token: &str) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        cleanup(&mut state, Instant::now());
+        state.sessions.get(session_id).is_some_and(|record| {
+            record.lifecycle == SessionLifecycle::Pending
+                && constant_time_eq(record.token.as_bytes(), token.as_bytes())
+        })
+    }
+
     pub fn authenticate_control(&self, session_id: &str, token: &str) -> bool {
         let Ok(mut state) = self.0.lock() else {
             return false;
@@ -1266,6 +1277,12 @@ pub enum ControlRequest {
         token: String,
         executable: String,
         root: bool,
+    },
+    CheckRootProcessProtection {
+        session_id: String,
+        token: String,
+        executable: String,
+        argv: Vec<String>,
     },
     RegisterChild {
         session_id: String,

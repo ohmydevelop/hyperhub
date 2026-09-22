@@ -72,6 +72,8 @@ pub struct FirewallDecision {
     pub action: FirewallAction,
     pub rule_id: Option<String>,
     pub source: FirewallDecisionSource,
+    pub protection: Option<String>,
+    pub prefilter_policy: PrefilterPolicy,
 }
 
 pub fn decide(
@@ -97,6 +99,8 @@ pub fn decide(
                 action: rule.action,
                 rule_id: Some(rule.id.clone()),
                 source: FirewallDecisionSource::Rule,
+                protection: rule.protection.clone(),
+                prefilter_policy: rule.prefilter_policy,
             };
         }
     }
@@ -104,6 +108,8 @@ pub fn decide(
         action: snapshot.default_action.unwrap_or(FirewallAction::Pass),
         rule_id: None,
         source: FirewallDecisionSource::Default,
+        protection: None,
+        prefilter_policy: PrefilterPolicy::None,
     }
 }
 

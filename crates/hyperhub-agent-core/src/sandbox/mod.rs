@@ -150,10 +150,7 @@ pub(crate) struct SandboxAuditEvent {
 
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn file_allows(path: &str, op: FileSandboxOperation) -> bool {
-    let Some(s) = file_sandbox_snapshot() else {
-        return true;
-    };
-    file_sandbox_decision(&s, path, op).0 == SandboxAction::Pass
+    file_decision_with_protection(path, op).0 == SandboxAction::Pass
 }
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn process_allows(exe: &str, cmd: &str) -> bool {
@@ -236,6 +233,71 @@ pub(crate) fn process_sandbox_decision(
         return (rule.action, rule_id, "rule".into());
     }
     (snapshot.default_action, None, "default".into())
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn file_decision_with_protection(
+    path: &str,
+    operation: FileSandboxOperation,
+) -> (SandboxAction, Option<String>, String) {
+    let Some(snapshot) = file_sandbox_snapshot() else {
+        return (SandboxAction::Pass, None, "disabled".into());
+    };
+    let (action, rule_id, source) = file_sandbox_decision(&snapshot, path, operation);
+    if action == SandboxAction::Deny {
+        return (action, rule_id, source);
+    }
+    let Some((matched_rule_id, protection_id)) = file_protection_id(&snapshot, path, operation)
+    else {
+        return (action, rule_id, source);
+    };
+    let context = PrefilterContext::default();
+    let Some((_, prefilter)) = file_prefilter(&snapshot, path, operation, &context) else {
+        return (action, Some(matched_rule_id), "protection".into());
+    };
+    if prefilter.hard_deny {
+        return (
+            SandboxAction::Deny,
+            Some(matched_rule_id),
+            "prefilter_hard_deny".into(),
+        );
+    }
+    if !prefilter.should_query_gateway {
+        return (
+            SandboxAction::Pass,
+            Some(matched_rule_id),
+            "prefilter_pass".into(),
+        );
+    }
+    let executable = std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    match query_prefilter_gateway(
+        &protection_id,
+        Some(&matched_rule_id),
+        &format!("file_{operation:?}").to_ascii_lowercase(),
+        &executable,
+        &prefilter.redacted_argv,
+        &prefilter.features,
+        &context,
+    ) {
+        Ok(true) => (
+            SandboxAction::Deny,
+            Some(matched_rule_id),
+            "smart_protection".into(),
+        ),
+        Ok(false) => (
+            SandboxAction::Pass,
+            Some(matched_rule_id),
+            "smart_protection_pass".into(),
+        ),
+        Err(_) => (
+            snapshot.error_action,
+            Some(matched_rule_id),
+            "smart_protection_error".into(),
+        ),
+    }
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]

@@ -116,6 +116,8 @@ struct CompiledFileSandboxRule {
     action: SandboxAction,
     patterns: Vec<regex::Regex>,
     operations: Vec<FileSandboxOperation>,
+    protection: Option<String>,
+    prefilter_policy: PrefilterPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +125,13 @@ pub struct SandboxDecision {
     pub action: SandboxAction,
     pub rule_id: Option<String>,
     pub source: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileProtectionBinding {
+    pub rule_id: String,
+    pub protection_id: String,
+    pub prefilter_policy: PrefilterPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +224,8 @@ pub fn compile_runtime_snapshot(
                             .map(|pattern| regex::Regex::new(&pattern))
                             .collect::<Result<Vec<_>, _>>()?,
                         operations: rule.operations,
+                        protection: rule.protection,
+                        prefilter_policy: rule.prefilter_policy,
                     })
                 })
                 .collect::<Result<Vec<_>, regex::Error>>()?;
@@ -283,6 +294,23 @@ pub fn decide_process(
         rule_id: None,
         source: "default",
     }
+}
+
+pub fn file_protection_binding(
+    snapshot: &CompiledFileSandboxSnapshot,
+    path: &str,
+    operation: FileSandboxOperation,
+) -> Option<FileProtectionBinding> {
+    snapshot.rules.iter().find_map(|rule| {
+        let protection_id = rule.protection.as_ref()?;
+        (rule.operations.contains(&operation)
+            && rule.patterns.iter().any(|pattern| pattern.is_match(path)))
+        .then(|| FileProtectionBinding {
+            rule_id: rule.id.clone(),
+            protection_id: protection_id.clone(),
+            prefilter_policy: rule.prefilter_policy,
+        })
+    })
 }
 
 pub fn process_protection_binding(
@@ -400,6 +428,9 @@ pub fn evaluate_process_prefilter(
         || lower.contains("secret")
     {
         score += 30;
+        if matches!(policy, PrefilterPolicy::SensitiveRead) {
+            score += 30;
+        }
         features.insert("sensitive_file_reference".to_owned());
     }
     if context.sensitive_files_read > 0 {

@@ -1,4 +1,4 @@
-use hyperhub_core::config::{Config, EnvironmentVariable, SecretValue};
+use hyperhub_core::config::{Config, EnvironmentVariable, SandboxAction, SecretValue};
 use hyperhub_core::config_store::{
     self, default_config_path, derive_session_auth_key, load_encrypted, ExportFormat,
 };
@@ -527,6 +527,44 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
         return Err("HyperHub serve rejected session registration".into());
     };
     let session_token = token.clone();
+    if !run.dry_run {
+        let root_argv = std::iter::once(run.target.to_string_lossy().into_owned())
+            .chain(
+                run.target_args
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned()),
+            )
+            .collect::<Vec<_>>();
+        let root_decision = runtime
+            .block_on(control_request(
+                &control_endpoint,
+                &ControlRequest::CheckRootProcessProtection {
+                    session_id: session_id.clone(),
+                    token: session_token.clone(),
+                    executable: target.to_string_lossy().into_owned(),
+                    argv: root_argv,
+                },
+            ))
+            .map_err(|error| format!("cannot check root process protection: {error}"))?;
+        match root_decision {
+            ControlResponse::SmartProtectionDecision {
+                action: SandboxAction::Deny,
+                reason,
+                ..
+            } => {
+                let _ = runtime.block_on(control_request(
+                    &control_endpoint,
+                    &ControlRequest::RevokeSession {
+                        session_id: session_id.clone(),
+                    },
+                ));
+                return Err(format!("root process denied by smart protection: {reason}"));
+            }
+            ControlResponse::SmartProtectionDecision { .. } => {}
+            ControlResponse::Error { message } => return Err(message),
+            _ => return Err("HyperHub serve returned an invalid root protection response".into()),
+        }
+    }
     let environment_keys = environment
         .iter()
         .map(|variable| variable.name.clone())

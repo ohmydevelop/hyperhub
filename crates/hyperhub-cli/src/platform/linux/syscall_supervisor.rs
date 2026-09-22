@@ -8,9 +8,9 @@ use hyperhub_core::config::{FileSandboxOperation, SandboxAction};
 use hyperhub_core::control::control_request;
 use hyperhub_core::sandbox::{
     compile_runtime_snapshot, decide_file, decide_process, evaluate_process_prefilter,
-    file_error_decision, process_error_decision, process_protection_binding,
-    CompiledSandboxSnapshot, ProcessPrefilterContext, SandboxAuditEvent, SandboxAuditKind,
-    SandboxDecision,
+    file_error_decision, file_protection_binding, process_error_decision,
+    process_protection_binding, CompiledSandboxSnapshot, ProcessPrefilterContext,
+    SandboxAuditEvent, SandboxAuditKind, SandboxDecision,
 };
 use hyperhub_core::session::{ControlRequest, ControlResponse};
 
@@ -953,28 +953,133 @@ impl Supervisor {
     }
 
     fn file_denied(&mut self, tid: libc::pid_t, intent: &FileIntent) -> Result<bool, String> {
-        let Some(snapshot) = self
-            .sandbox
-            .as_ref()
-            .and_then(|snapshot| snapshot.file.as_ref())
-        else {
-            return Ok(false);
-        };
-        let denied = intent.targets.iter().find_map(|target| {
-            let decision = decide_file(snapshot, target, intent.operation);
-            (decision.action == SandboxAction::Deny).then(|| (target.clone(), decision))
-        });
-        let Some((target, decision)) = denied else {
-            return Ok(false);
-        };
-        self.report_sandbox(
-            tid,
-            SandboxAuditKind::File,
-            intent.operation_name,
-            &target,
-            &decision,
-        );
-        Ok(self.enforce)
+        for target in &intent.targets {
+            let (decision, binding) = {
+                let Some(snapshot) = self
+                    .sandbox
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.file.as_ref())
+                else {
+                    return Ok(false);
+                };
+                (
+                    decide_file(snapshot, target, intent.operation),
+                    file_protection_binding(snapshot, target, intent.operation),
+                )
+            };
+            if decision.action == SandboxAction::Deny {
+                self.report_sandbox(
+                    tid,
+                    SandboxAuditKind::File,
+                    intent.operation_name,
+                    target,
+                    &decision,
+                );
+                return Ok(self.enforce);
+            }
+            let Some(binding) = binding else {
+                continue;
+            };
+            let context = ProcessPrefilterContext::default();
+            let prefilter = evaluate_process_prefilter(
+                binding.prefilter_policy,
+                target,
+                &[target.clone()],
+                &context,
+            );
+            if !prefilter.should_query_gateway && !prefilter.hard_deny {
+                let decision = SandboxDecision {
+                    action: SandboxAction::Pass,
+                    rule_id: Some(binding.rule_id),
+                    source: "prefilter_pass",
+                };
+                self.report_sandbox(
+                    tid,
+                    SandboxAuditKind::File,
+                    intent.operation_name,
+                    target,
+                    &decision,
+                );
+                continue;
+            }
+            if prefilter.hard_deny {
+                let decision = SandboxDecision {
+                    action: SandboxAction::Deny,
+                    rule_id: Some(binding.rule_id),
+                    source: "prefilter_hard_deny",
+                };
+                self.report_sandbox(
+                    tid,
+                    SandboxAuditKind::File,
+                    intent.operation_name,
+                    target,
+                    &decision,
+                );
+                return Ok(self.enforce);
+            }
+            let process_pid = self.ensure_member(tid)? as u32;
+            let executable = std::fs::read_link(format!("/proc/{process_pid}/exe"))
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".into());
+            let response = self.control.block_on(control_request(
+                &self.endpoint,
+                &ControlRequest::StaticSmartProtectionCheck {
+                    session_id: self.session_id.clone(),
+                    token: String::from_utf8_lossy(&self.password).into_owned(),
+                    root_pid: self.root_pid as u32,
+                    process_pid,
+                    protection_id: binding.protection_id,
+                    rule_id: Some(binding.rule_id.clone()),
+                    stage: format!("file_{}", intent.operation_name),
+                    executable,
+                    argv: prefilter.redacted_argv,
+                    features: prefilter.features,
+                    context: serde_json::to_value(&context).map_err(|error| {
+                        format!("cannot encode file protection context: {error}")
+                    })?,
+                },
+            ));
+            let action = match response {
+                Ok(ControlResponse::SmartProtectionDecision { action, .. }) => action,
+                Ok(ControlResponse::Error { message }) => {
+                    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                        eprintln!("hyperhub: file smart protection failed: {message}");
+                    }
+                    self.sandbox
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.file.as_ref())
+                        .map(file_error_decision)
+                        .map_or(SandboxAction::Pass, |decision| decision.action)
+                }
+                _ => self
+                    .sandbox
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.file.as_ref())
+                    .map(file_error_decision)
+                    .map_or(SandboxAction::Pass, |decision| decision.action),
+            };
+            let denied = action == SandboxAction::Deny;
+            let decision = SandboxDecision {
+                action,
+                rule_id: Some(binding.rule_id),
+                source: if denied {
+                    "smart_protection"
+                } else {
+                    "smart_protection_pass"
+                },
+            };
+            self.report_sandbox(
+                tid,
+                SandboxAuditKind::File,
+                intent.operation_name,
+                target,
+                &decision,
+            );
+            if denied {
+                return Ok(self.enforce);
+            }
+        }
+        Ok(false)
     }
 
     fn file_error_denied(&mut self, tid: libc::pid_t, error: &str) -> bool {
