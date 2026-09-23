@@ -422,8 +422,9 @@ def run_hyperhub_case(
         executable_wrapper = "/usr/bin/python3"
     else:
         executable_wrapper = "/bin/true"
-    shutil.copy2(executable_wrapper, wrapper)
-    wrapper.chmod(0o700)
+    actual_wrapper = wrapper.parent / str(case["command"]["executable"])
+    shutil.copy2(executable_wrapper, actual_wrapper)
+    actual_wrapper.chmod(0o700)
     if case.get("launch") == "child":
         command = [
             binary,
@@ -435,7 +436,7 @@ def run_hyperhub_case(
             "-c",
             'exec "$@"',
             "hyperhub-benchmark",
-            str(wrapper),
+            str(actual_wrapper),
             *argv,
         ]
     else:
@@ -445,7 +446,7 @@ def run_hyperhub_case(
             "--password-file",
             str(password_file),
             "--",
-            str(wrapper),
+            str(actual_wrapper),
             *argv,
         ]
     run_error: Optional[str] = None
