@@ -66,6 +66,7 @@ impl ProcessSandboxPlugin {
                 source,
                 operation: "create".into(),
                 target,
+                argv_redacted: None,
                 process_pid: unsafe { GetCurrentProcessId() },
                 process_tid: unsafe { GetCurrentThreadId() },
                 snapshot_version: crate::sandbox_version(),

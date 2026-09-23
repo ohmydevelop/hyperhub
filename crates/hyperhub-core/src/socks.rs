@@ -568,6 +568,7 @@ impl SocksService {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| requested.ip.to_string());
+                    let audit_argv = vec![format!("{destination}:{}", requested.port)];
                     let outcome = protection
                         .evaluate_agent(
                             profile_id,
@@ -575,7 +576,7 @@ impl SocksService {
                             session.pid,
                             &session.executable,
                             "network_connect",
-                            vec![format!("{destination}:{}", requested.port)],
+                            audit_argv.clone(),
                             vec!["network_egress".into()],
                             serde_json::json!({
                                 "destination_authorized": false,
@@ -590,26 +591,29 @@ impl SocksService {
                         .as_ref()
                         .filter(|item| item.error.is_none());
                     let action = if outcome.deny { "deny" } else { "pass" };
-                    self.audit.session_event(
-                        "smart_protection_decision",
-                        &session.session_id,
-                        Some(session.pid),
-                        Some(&session.executable),
-                        json!({
-                            "protection": profile_id,
-                            "rule_id": firewall_decision.rule_id,
-                            "stage": "network_connect",
-                            "action": action,
-                            "reason": outcome.reason,
-                            "features": ["network_egress"],
-                            "risk_level": provider.and_then(|item| item.risk_level.clone()),
-                            "confidence": provider.and_then(|item| item.confidence),
-                            "destructive_probability": provider.and_then(|item| item.destructive_probability),
-                            "blast_radius": provider.and_then(|item| item.blast_radius),
-                            "cache_hit": provider.is_some_and(|item| item.cache_hit),
-                            "reporter": "gateway-firewall",
-                        }),
-                    );
+                    if outcome.deny || self.audit.debug_enabled() {
+                        self.audit.session_event(
+                            "smart_protection_decision",
+                            &session.session_id,
+                            Some(session.pid),
+                            Some(&session.executable),
+                            json!({
+                                "protection": profile_id,
+                                "rule_id": firewall_decision.rule_id,
+                                "stage": "network_connect",
+                                "action": action,
+                                "reason": outcome.reason,
+                                "argv_redacted": audit_argv,
+                                "features": ["network_egress"],
+                                "risk_level": provider.and_then(|item| item.risk_level.clone()),
+                                "confidence": provider.and_then(|item| item.confidence),
+                                "destructive_probability": provider.and_then(|item| item.destructive_probability),
+                                "blast_radius": provider.and_then(|item| item.blast_radius),
+                                "cache_hit": provider.is_some_and(|item| item.cache_hit),
+                                "reporter": "gateway-firewall",
+                            }),
+                        );
+                    }
                     if outcome.deny {
                         active.update(
                             &requested,
@@ -634,6 +638,7 @@ impl SocksService {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| requested.ip.to_string());
+                let audit_argv = vec![format!("{destination}:{}", requested.port)];
                 let outcome = protection
                     .evaluate_agent(
                         profile_id,
@@ -641,7 +646,7 @@ impl SocksService {
                         session.pid,
                         &session.executable,
                         "route_connect",
-                        vec![format!("{destination}:{}", requested.port)],
+                        audit_argv.clone(),
                         vec!["smart_route".into()],
                         json!({
                             "destination_authorized": false,
@@ -651,20 +656,23 @@ impl SocksService {
                         }),
                     )
                     .await;
-                self.audit.session_event(
-                    "smart_protection_decision",
-                    &session.session_id,
-                    Some(session.pid),
-                    Some(&session.executable),
-                    json!({
-                        "protection": profile_id,
-                        "rule_id": decision.rule_id,
-                        "stage": "route_connect",
-                        "action": if outcome.deny { "deny" } else { "pass" },
-                        "reason": outcome.reason,
-                        "provider": outcome.provider,
-                    }),
-                );
+                if outcome.deny || self.audit.debug_enabled() {
+                    self.audit.session_event(
+                        "smart_protection_decision",
+                        &session.session_id,
+                        Some(session.pid),
+                        Some(&session.executable),
+                        json!({
+                            "protection": profile_id,
+                            "rule_id": decision.rule_id,
+                            "stage": "route_connect",
+                            "action": if outcome.deny { "deny" } else { "pass" },
+                            "reason": outcome.reason,
+                            "argv_redacted": audit_argv,
+                            "provider": outcome.provider,
+                        }),
+                    );
+                }
                 decision.deny = outcome.deny;
             }
         }

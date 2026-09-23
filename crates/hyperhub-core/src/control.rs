@@ -79,6 +79,14 @@ fn compile_agent_snapshots(
     Ok((firewall, sandbox))
 }
 
+fn should_record_smart_audit(debug_enabled: bool, action: crate::config::SandboxAction) -> bool {
+    action != crate::config::SandboxAction::Pass || debug_enabled
+}
+
+fn should_record_sandbox_audit(debug_enabled: bool, source: &str) -> bool {
+    source != "smart_protection_pass" || debug_enabled
+}
+
 #[derive(Clone)]
 pub struct ControlService {
     sessions: SessionRegistry,
@@ -410,14 +418,16 @@ impl ControlService {
                             let mut confidence = None;
                             let mut cache_hit = false;
                             let mut audit_features = Vec::new();
+                            let context = ProtectionContext::default();
+                            let sanitized = sanitize_action(&executable, &argv, &context);
+                            let audit_argv = sanitized.redacted_argv.clone();
                             let mut destructive_probability = None;
                             let mut blast_radius = None;
                             let mut provider_queried = false;
+                            let smart_binding = binding.is_some();
                             if action != crate::config::SandboxAction::Deny {
                                 if let Some(binding) = binding {
                                     rule_id = Some(binding.rule_id.clone());
-                                    let context = ProtectionContext::default();
-                                    let sanitized = sanitize_action(&executable, &argv, &context);
                                     audit_features = sanitized.features.clone();
                                     if sanitized.local_deny {
                                         action = if runtime
@@ -440,8 +450,8 @@ impl ControlService {
                                                 peer_pid.unwrap_or_default(),
                                                 &executable,
                                                 "root_process_create",
-                                                sanitized.redacted_argv,
-                                                sanitized.features,
+                                                sanitized.redacted_argv.clone(),
+                                                sanitized.features.clone(),
                                                 serde_json::to_value(&context)
                                                     .unwrap_or_else(|_| serde_json::json!({})),
                                             )
@@ -468,27 +478,35 @@ impl ControlService {
                                     }
                                 }
                             }
-                            let event_name = if action == crate::config::SandboxAction::Deny {
-                                "sandbox_denied"
-                            } else {
-                                "sandbox_allowed"
-                            };
-                            self.audit.session_event(
-                                event_name,
-                                &session_id,
-                                peer_pid,
-                                Some(&executable),
-                                serde_json::json!({
-                                    "kind": "process",
-                                    "decision": action,
-                                    "rule_id": rule_id,
-                                    "decision_source": reason,
-                                    "operation": "root_create",
-                                    "target": executable,
-                                    "reporter": "root-launcher",
-                                }),
-                            );
-                            if !audit_features.is_empty() {
+                            let smart_pass =
+                                action == crate::config::SandboxAction::Pass && smart_binding;
+                            if !smart_pass || self.audit.debug_enabled() {
+                                let event_name = if action == crate::config::SandboxAction::Deny {
+                                    "sandbox_denied"
+                                } else {
+                                    "sandbox_allowed"
+                                };
+                                self.audit.session_event(
+                                    event_name,
+                                    &session_id,
+                                    peer_pid,
+                                    Some(&executable),
+                                    serde_json::json!({
+                                        "kind": "process",
+                                        "decision": action,
+                                        "rule_id": rule_id,
+                                        "decision_source": reason,
+                                        "operation": "root_create",
+                                        "target": executable,
+                                        "argv_redacted": audit_argv.clone(),
+                                        "reporter": "root-launcher",
+                                    }),
+                                );
+                            }
+                            if smart_binding
+                                && (action != crate::config::SandboxAction::Pass
+                                    || self.audit.debug_enabled())
+                            {
                                 self.audit.session_event(
                                     "smart_protection_decision",
                                     &session_id,
@@ -499,6 +517,7 @@ impl ControlService {
                                         "stage": "root_process_create",
                                         "action": action,
                                         "reason": reason,
+                                        "argv_redacted": audit_argv,
                                         "features": audit_features,
                                         "risk_level": risk_level,
                                         "confidence": confidence,
@@ -1241,30 +1260,33 @@ impl ControlService {
                             .authenticate_member(&session_id, &token, event.process_pid)
                 });
                 if authenticated {
-                    let event_name = match event.decision {
-                        crate::config::SandboxAction::Pass => "sandbox_allowed",
-                        crate::config::SandboxAction::Deny => "sandbox_denied",
-                        crate::config::SandboxAction::Smart => "sandbox_allowed",
-                    };
-                    self.audit.session_event(
-                        event_name,
-                        &session_id,
-                        Some(event.process_pid),
-                        self.sessions
-                            .member_executable(event.process_pid)
-                            .as_deref(),
-                        serde_json::json!({
-                            "kind": event.kind,
-                            "decision": event.decision,
-                            "rule_id": event.rule_id,
-                            "decision_source": event.source,
-                            "operation": event.operation,
-                            "target": event.target,
-                            "process_tid": event.process_tid,
-                            "snapshot_version": event.snapshot_version,
-                            "reporter": "static-supervisor",
-                        }),
-                    );
+                    if should_record_sandbox_audit(self.audit.debug_enabled(), &event.source) {
+                        let event_name = match event.decision {
+                            crate::config::SandboxAction::Pass => "sandbox_allowed",
+                            crate::config::SandboxAction::Deny => "sandbox_denied",
+                            crate::config::SandboxAction::Smart => "sandbox_allowed",
+                        };
+                        self.audit.session_event(
+                            event_name,
+                            &session_id,
+                            Some(event.process_pid),
+                            self.sessions
+                                .member_executable(event.process_pid)
+                                .as_deref(),
+                            serde_json::json!({
+                                "kind": event.kind,
+                                "decision": event.decision,
+                                "rule_id": event.rule_id,
+                                "decision_source": event.source,
+                                "operation": event.operation,
+                                "target": event.target,
+                                "argv_redacted": event.argv_redacted,
+                                "process_tid": event.process_tid,
+                                "snapshot_version": event.snapshot_version,
+                                "reporter": "static-supervisor",
+                            }),
+                        );
+                    }
                     ControlResponse::Ok
                 } else {
                     ControlResponse::Error {
@@ -1282,16 +1304,18 @@ impl ControlService {
                         && self.sessions.authenticate_member(&session_id, &token, pid)
                 });
                 if authenticated {
-                    let event_name = match event.decision {
-                        crate::config::SandboxAction::Pass => "sandbox_allowed",
-                        crate::config::SandboxAction::Deny => "sandbox_denied",
-                        crate::config::SandboxAction::Smart => "sandbox_allowed",
-                    };
-                    self.audit.session_event(event_name, &session_id, Some(event.process_pid), self.sessions.member_executable(event.process_pid).as_deref(), serde_json::json!({
-                        "kind": event.kind, "decision": event.decision, "rule_id": event.rule_id, "decision_source": event.source,
-                        "operation": event.operation, "target": event.target, "process_tid": event.process_tid,
-                        "snapshot_version": event.snapshot_version,
-                    }));
+                    if should_record_sandbox_audit(self.audit.debug_enabled(), &event.source) {
+                        let event_name = match event.decision {
+                            crate::config::SandboxAction::Pass => "sandbox_allowed",
+                            crate::config::SandboxAction::Deny => "sandbox_denied",
+                            crate::config::SandboxAction::Smart => "sandbox_allowed",
+                        };
+                        self.audit.session_event(event_name, &session_id, Some(event.process_pid), self.sessions.member_executable(event.process_pid).as_deref(), serde_json::json!({
+                            "kind": event.kind, "decision": event.decision, "rule_id": event.rule_id, "decision_source": event.source,
+                            "operation": event.operation, "target": event.target, "argv_redacted": event.argv_redacted, "process_tid": event.process_tid,
+                            "snapshot_version": event.snapshot_version,
+                        }));
+                    }
                     ControlResponse::Ok
                 } else {
                     ControlResponse::Error {
@@ -1326,6 +1350,7 @@ impl ControlService {
                         message: "invalid static smart protection reporter".into(),
                     }
                 } else {
+                    let audit_argv = argv.clone();
                     let audit_features = features.clone();
                     let outcome = runtime
                         .protection
@@ -1359,26 +1384,29 @@ impl ControlService {
                         provider.and_then(|item| item.destructive_probability);
                     let blast_radius = provider.and_then(|item| item.blast_radius);
                     let cache_hit = provider.is_some_and(|item| item.cache_hit);
-                    self.audit.session_event(
-                        "smart_protection_decision",
-                        &session_id,
-                        Some(process_pid),
-                        Some(&executable),
-                        serde_json::json!({
-                            "protection": protection_id,
-                            "rule_id": rule_id,
-                            "stage": stage,
-                            "action": action,
-                            "reason": reason,
-                            "features": audit_features,
-                            "risk_level": risk_level,
-                            "confidence": confidence,
-                            "destructive_probability": destructive_probability,
-                            "blast_radius": blast_radius,
-                            "cache_hit": cache_hit,
-                            "reporter": "static-supervisor",
-                        }),
-                    );
+                    if should_record_smart_audit(self.audit.debug_enabled(), action) {
+                        self.audit.session_event(
+                            "smart_protection_decision",
+                            &session_id,
+                            Some(process_pid),
+                            Some(&executable),
+                            serde_json::json!({
+                                "protection": protection_id,
+                                "rule_id": rule_id,
+                                "stage": stage,
+                                "action": action,
+                                "reason": reason,
+                                "argv_redacted": audit_argv,
+                                "features": audit_features,
+                                "risk_level": risk_level,
+                                "confidence": confidence,
+                                "destructive_probability": destructive_probability,
+                                "blast_radius": blast_radius,
+                                "cache_hit": cache_hit,
+                                "reporter": "static-supervisor",
+                            }),
+                        );
+                    }
                     ControlResponse::SmartProtectionDecision {
                         action,
                         reason,
@@ -1412,6 +1440,7 @@ impl ControlService {
                     }
                 } else {
                     let reporter_pid = peer_pid.unwrap();
+                    let audit_argv = argv.clone();
                     let audit_features = features.clone();
                     let outcome = runtime
                         .protection
@@ -1445,25 +1474,28 @@ impl ControlService {
                         provider.and_then(|item| item.destructive_probability);
                     let blast_radius = provider.and_then(|item| item.blast_radius);
                     let cache_hit = provider.is_some_and(|item| item.cache_hit);
-                    self.audit.session_event(
-                        "smart_protection_decision",
-                        &session_id,
-                        Some(reporter_pid),
-                        Some(&executable),
-                        serde_json::json!({
-                            "protection": protection_id,
-                            "rule_id": rule_id,
-                            "stage": stage,
-                            "action": action,
-                            "reason": reason,
-                            "features": audit_features,
-                            "risk_level": risk_level,
-                            "confidence": confidence,
-                            "destructive_probability": destructive_probability,
-                            "blast_radius": blast_radius,
-                            "cache_hit": cache_hit,
-                        }),
-                    );
+                    if should_record_smart_audit(self.audit.debug_enabled(), action) {
+                        self.audit.session_event(
+                            "smart_protection_decision",
+                            &session_id,
+                            Some(reporter_pid),
+                            Some(&executable),
+                            serde_json::json!({
+                                "protection": protection_id,
+                                "rule_id": rule_id,
+                                "stage": stage,
+                                "action": action,
+                                "reason": reason,
+                                "argv_redacted": audit_argv,
+                                "features": audit_features,
+                                "risk_level": risk_level,
+                                "confidence": confidence,
+                                "destructive_probability": destructive_probability,
+                                "blast_radius": blast_radius,
+                                "cache_hit": cache_hit,
+                            }),
+                        );
+                    }
                     ControlResponse::SmartProtectionDecision {
                         action,
                         reason,
@@ -2294,6 +2326,30 @@ pub async fn control_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_pass_audits_are_debug_only() {
+        assert!(!should_record_smart_audit(
+            false,
+            crate::config::SandboxAction::Pass
+        ));
+        assert!(should_record_smart_audit(
+            true,
+            crate::config::SandboxAction::Pass
+        ));
+        assert!(should_record_smart_audit(
+            false,
+            crate::config::SandboxAction::Deny
+        ));
+    }
+
+    #[test]
+    fn only_smart_pass_sandbox_audits_are_filtered() {
+        assert!(!should_record_sandbox_audit(false, "smart_protection_pass"));
+        assert!(should_record_sandbox_audit(true, "smart_protection_pass"));
+        assert!(should_record_sandbox_audit(false, "smart_protection"));
+        assert!(should_record_sandbox_audit(false, "rule"));
+    }
 
     #[cfg(unix)]
     #[test]

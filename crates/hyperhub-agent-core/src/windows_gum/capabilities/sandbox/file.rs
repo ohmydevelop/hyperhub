@@ -81,6 +81,7 @@ impl FileSandboxPlugin {
                 source,
                 operation: format!("{op:?}").to_ascii_lowercase(),
                 target: path,
+                argv_redacted: None,
                 process_pid: unsafe { GetCurrentProcessId() },
                 process_tid: unsafe { GetCurrentThreadId() },
                 snapshot_version: crate::sandbox_version(),

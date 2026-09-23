@@ -954,6 +954,8 @@ impl Supervisor {
 
     fn file_denied(&mut self, tid: libc::pid_t, intent: &FileIntent) -> Result<bool, String> {
         for target in &intent.targets {
+            let context = ProtectionContext::default();
+            let sanitized = sanitize_action(target, &[target.clone()], &context);
             let (decision, binding) = {
                 let Some(snapshot) = self
                     .sandbox
@@ -974,14 +976,13 @@ impl Supervisor {
                     intent.operation_name,
                     target,
                     &decision,
+                    Some(sanitized.redacted_argv.clone()),
                 );
                 return Ok(self.enforce);
             }
             let Some(binding) = binding else {
                 continue;
             };
-            let context = ProtectionContext::default();
-            let sanitized = sanitize_action(target, &[target.clone()], &context);
             let process_pid = self.ensure_member(tid)? as u32;
             let executable = std::fs::read_link(format!("/proc/{process_pid}/exe"))
                 .map(|path| path.to_string_lossy().into_owned())
@@ -997,7 +998,7 @@ impl Supervisor {
                     rule_id: Some(binding.rule_id.clone()),
                     stage: format!("file_{}", intent.operation_name),
                     executable,
-                    argv: sanitized.redacted_argv,
+                    argv: sanitized.redacted_argv.clone(),
                     features: sanitized.features,
                     context: serde_json::json!({
                         "local_deny": sanitized.local_deny,
@@ -1039,6 +1040,7 @@ impl Supervisor {
                 intent.operation_name,
                 target,
                 &decision,
+                Some(sanitized.redacted_argv),
             );
             if denied {
                 return Ok(self.enforce);
@@ -1065,6 +1067,7 @@ impl Supervisor {
             "inspect",
             &format!("<unresolved: {error}>"),
             &decision,
+            None,
         );
         self.enforce
     }
@@ -1087,6 +1090,7 @@ impl Supervisor {
             "inspect",
             &format!("<unresolved: {error}>"),
             &decision,
+            None,
         );
         self.enforce
     }
@@ -1100,6 +1104,8 @@ impl Supervisor {
             return Ok(false);
         };
         let command_line = intent.command_line();
+        let context = ProtectionContext::default();
+        let sanitized = sanitize_action(&intent.executable, &intent.argv, &context);
         let decision = decide_process(snapshot, &intent.executable, &command_line);
         if decision.action == SandboxAction::Deny {
             self.report_sandbox(
@@ -1108,6 +1114,7 @@ impl Supervisor {
                 "create",
                 &intent.executable,
                 &decision,
+                Some(sanitized.redacted_argv.clone()),
             );
             return Ok(self.enforce);
         }
@@ -1115,8 +1122,6 @@ impl Supervisor {
         else {
             return Ok(false);
         };
-        let context = ProtectionContext::default();
-        let sanitized = sanitize_action(&intent.executable, &intent.argv, &context);
         let process_pid = self.ensure_member(tid)? as u32;
         let response = self.control.block_on(control_request(
             &self.endpoint,
@@ -1129,7 +1134,7 @@ impl Supervisor {
                 rule_id: Some(binding.rule_id.clone()),
                 stage: "process_create".into(),
                 executable: intent.executable.clone(),
-                argv: sanitized.redacted_argv,
+                argv: sanitized.redacted_argv.clone(),
                 features: sanitized.features,
                 context: serde_json::json!({
                     "local_deny": sanitized.local_deny,
@@ -1154,6 +1159,7 @@ impl Supervisor {
                     "create",
                     &intent.executable,
                     &decision,
+                    Some(sanitized.redacted_argv),
                 );
                 Ok(denied && self.enforce)
             }
@@ -1201,6 +1207,7 @@ impl Supervisor {
             "create",
             executable,
             &decision,
+            None,
         );
         if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
             eprintln!("hyperhub: smart protection check failed: {error}");
@@ -1215,6 +1222,7 @@ impl Supervisor {
         operation: &str,
         target: &str,
         decision: &SandboxDecision,
+        argv_redacted: Option<Vec<String>>,
     ) {
         let process_pid = match self.ensure_member(tid) {
             Ok(pid) => pid,
@@ -1232,6 +1240,7 @@ impl Supervisor {
             source: decision.source.into(),
             operation: operation.into(),
             target: target.into(),
+            argv_redacted,
             process_pid: process_pid as u32,
             process_tid: tid as u32,
             snapshot_version: self.sandbox.as_ref().map_or(0, |snapshot| snapshot.version),

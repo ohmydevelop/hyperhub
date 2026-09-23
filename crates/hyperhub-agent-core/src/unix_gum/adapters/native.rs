@@ -486,6 +486,7 @@ fn audit(kind: crate::SandboxAuditKind, operation: &str, target: &str) {
         source: "rule".into(),
         operation: operation.into(),
         target: target.into(),
+        argv_redacted: None,
         process_pid: unsafe { libc::getpid() as u32 },
         process_tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
         snapshot_version: crate::sandbox_version(),

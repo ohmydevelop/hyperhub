@@ -65,6 +65,8 @@ pub struct SandboxAuditEvent {
     pub source: String,
     pub operation: String,
     pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv_redacted: Option<Vec<String>>,
     pub process_pid: u32,
     pub process_tid: u32,
     pub snapshot_version: u64,
