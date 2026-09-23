@@ -10,7 +10,8 @@
   "gateway": {
     "mode": "enforce",
     "debug": false,
-    "listener": {},
+    "listener": {"socks_address":"127.0.0.1:18444","pending_session_ttl_seconds":60},
+    "protections": [],
     "proxies": [],
     "credentials": [],
     "audit": {"settings": {}, "profiles": []},
@@ -22,7 +23,7 @@
 }
 ```
 
-## Patch 与 UUID
+## Patch、UUID 与 Secret
 
 - 只使用 RFC 6902 `add`、`replace`、`remove`、`test`。
 - 新增集合对象使用 `/-` 并省略 `uuid`，由 CLI 生成。
@@ -37,6 +38,7 @@
 
 - 整体替换现有对象时必须保留原 UUID；不得复制其他对象的 UUID。
 - 真实敏感值只能使用审批占位符：`{"value":"${APPROVE:meaningful-name}"}`。
+- `config patch` 不需要密码；它只提交禁止包含真实 Secret 的 Proposal。真实 Secret、Provider API Key 和私钥只能在人工 `approve` 时输入。
 
 ## 环境变量
 
@@ -71,8 +73,6 @@
 
 凭证位于 `/gateway/credentials`，每种类型只包含自身需要的字段。
 
-### HTTP Bearer
-
 ```json
 {"id":"example-bearer","type":"http_bearer","secret":{"value":"${APPROVE:example-bearer-token}"}}
 ```
@@ -88,19 +88,106 @@
 {"id":"headers","type":"http_custom_headers","headers":{"Authorization":{"value":"${APPROVE:authorization-header}"}}}
 ```
 
-### SSH
+SSH 凭证：
 
 ```json
 {
   "id":"example-ssh",
   "type":"ssh",
-  "accounts":[{
-    "username":"deploy",
-    "passwords":[{"value":"${APPROVE:ssh-password}"}],
-    "private_keys":[]
-  }]
+  "accounts":[{"username":"deploy","passwords":[{"value":"${APPROVE:ssh-password}"}],"private_keys":[]}]
 }
 ```
+
+## 智能防护 Profile
+
+Profile 位于 `/gateway/protections`。建议先创建 `observe` Profile，确认审计结果后再切换到 `enforce`。新增 Profile 省略 `uuid`：
+
+```json
+{
+  "op":"add",
+  "path":"/gateway/protections/-",
+  "value":{
+    "id":"agent-egress",
+    "enabled":true,
+    "mode":"observe",
+    "data":{
+      "enabled":true,
+      "max_scan_bytes":1048576,
+      "detect_managed_secrets":true,
+      "detect_known_tokens":true,
+      "detect_private_keys":true,
+      "detect_prompt_injection":true,
+      "provenance_window_bytes":64,
+      "provenance_min_matches":3
+    },
+    "intelligence":{
+      "enabled":true,
+      "timeout_ms":2000,
+      "min_confidence":0.6,
+      "error_action":"pass",
+      "low_confidence_action":"pass",
+      "cache_ttl_ms":30000,
+      "provider":{
+        "id":"jev-primary",
+        "protocol":"system_one",
+        "endpoint":"https://guard.example.test/system-one",
+        "model":"jev-latest",
+        "api_key":{"value":"${APPROVE:jev-api-key}"}
+      }
+    }
+  }
+}
+```
+
+约束：
+
+- `mode` 只能是 `observe` 或 `enforce`；`enabled` 必须为 `true` 才会生效。
+- `intelligence.enabled=true` 时必须提供完整 Provider；远程 Endpoint 使用 HTTPS，只有回环地址可以使用 HTTP。
+- `error_action` 和 `low_confidence_action` 为 `pass` 或 `deny`，默认建议 `pass`。
+- Provider API Key 是敏感值，只能使用 `${APPROVE:name}`，不能写真实值。
+- 远程 Provider 只接收脱敏动作和检测结果摘要，不发送真实凭证、Header、Query、私钥或原始正文。
+
+## 路由与智能防护绑定
+
+普通路由：
+
+```json
+{
+  "op":"add",
+  "path":"/gateway/routing/routes/-",
+  "value":{
+    "id":"example-api",
+    "enabled":true,
+    "priority":300,
+    "endpoints":[{"target":"https://api.example.com/v1","port":443}],
+    "decision":{"action":"allow","credentials":["example-bearer"]}
+  }
+}
+```
+
+智能防护路由必须同时设置 `action: "smart"` 和 `protection`：
+
+```json
+{
+  "op":"add",
+  "path":"/gateway/routing/routes/-",
+  "value":{
+    "id":"protected-api",
+    "enabled":true,
+    "priority":300,
+    "endpoints":[{"target":"https://api.example.com/v1","port":443}],
+    "decision":{"action":"smart","protection":"agent-egress"}
+  }
+}
+```
+
+- 路由动作只能是 `allow`、`deny` 或 `smart`。
+- `smart` 必须引用已存在的 `/gateway/protections` ID；`allow`/`deny` 不应设置 `protection`。
+- `deny` 不能同时配置 `proxy`、`rewrite`、`credentials` 或 `audit_profiles`。
+- `proxy` 引用 `/gateway/proxies` 中的 ID；`credentials` 与 `audit_profiles` 分别引用对应集合的 ID。
+- 默认路由 `/gateway/routing/default` 使用相同的 `action`、`protection`、`credentials` 和 `audit_profiles` 语义。
+- `allow_sensitive_upload` 只有用户明确要求时才设置为 `true`。
+- 高 `priority` 优先；同优先级保持配置顺序。
 
 ## 审计
 
@@ -123,41 +210,67 @@
 
 `websocket` 可为 `off`、`frames`、`messages`。只有用户明确要求时才开启内容转录。
 
-## 路由
+## 沙盒与智能防护
 
-```json
-{
-  "op":"add",
-  "path":"/gateway/routing/routes/-",
-  "value":{
-    "id":"example-api",
-    "enabled":true,
-    "priority":300,
-    "endpoints":[{"target":"https://api.example.com/v1","port":443}],
-    "decision":{
-      "action":"allow",
-      "credentials":["example-bearer"]
-    }
-  }
-}
-```
-
-- `action` 只能是 `allow` 或 `deny`。
-- `deny` 不能同时配置 `proxy`、`rewrite`、`credentials` 或 `audit_profiles`。
-- `proxy` 引用 `/gateway/proxies` 中的 ID。
-- `credentials` 与 `audit_profiles` 分别引用对应集合的 ID。
-- 默认路由位于 `/gateway/routing/default`，使用相同的 `action`、`credentials` 和 `audit_profiles` 语义。
-- 高 `priority` 优先；同优先级保持配置顺序。
-
-## 沙盒
-
-三个策略统一使用 `enabled`、`default_action`、`error_action` 和 `rules`；动作只能是 `allow` 或 `deny`。
+三个策略统一使用 `enabled`、`default_action`、`error_action` 和 `rules`：
 
 - 网络：`/sandbox/network`
 - 文件：`/sandbox/file`
 - 子进程：`/sandbox/process`
 
-网络规则使用 `endpoints`；文件规则使用正则 `patterns` 和 `operations`；进程规则使用包含 `executable`、`command_line` 的正则 `patterns`。
+规则动作支持 `allow`、`deny`、`smart`。使用 `smart` 时必须在规则上设置 `protection`，并引用已存在的 Profile；`allow`/`deny` 规则不要设置 `protection`。默认动作和错误动作不要使用 `smart`。
+
+网络规则示例：
+
+```json
+{
+  "op":"add",
+  "path":"/sandbox/network/rules/-",
+  "value":{
+    "id":"protected-egress",
+    "enabled":true,
+    "priority":300,
+    "action":"smart",
+    "protection":"agent-egress",
+    "endpoints":[{"target":"api.example.com","port":443}]
+  }
+}
+```
+
+文件规则使用正则 `patterns` 和 `operations`：
+
+```json
+{
+  "op":"add",
+  "path":"/sandbox/file/rules/-",
+  "value":{
+    "id":"protected-secret-read",
+    "enabled":true,
+    "priority":300,
+    "action":"smart",
+    "protection":"agent-egress",
+    "patterns":[{"enabled":true,"pattern":"^/home/user/\\.ssh/.*$"}],
+    "operations":["read"]
+  }
+}
+```
+
+进程规则使用包含 `executable`、`command_line` 的正则 `patterns`：
+
+```json
+{
+  "op":"add",
+  "path":"/sandbox/process/rules/-",
+  "value":{
+    "id":"protected-upload-command",
+    "enabled":true,
+    "priority":300,
+    "action":"smart",
+    "protection":"agent-egress",
+    "patterns":[{"enabled":true,"executable":"^curl$","command_line":".*"}]
+  }
+}
+```
 
 ## TLS 与 SSH 主机信任
 
@@ -166,4 +279,17 @@
 - `/gateway/trust/tls_certificates`
 - `/gateway/trust/ssh_host_keys`
 
-TLS `scope` 为 `{"type":"global"}` 或 `{"type":"host","authority":"host:port"}`。不要凭空生成证书指纹或 SSH 公钥；需要采集或导入时让用户运行 `hyperhub config`。
+TLS `scope` 为 `{"type":"global"}` 或 `{"type":"host","authority":"host:port"}`。不要凭空生成证书指纹或 SSH 公钥；需要采集或导入时让用户运行 `hyperhub config`。首次信任和后续证书/主机密钥变化会由 HyperHub 管理并审计。
+
+## 变更后的验证
+
+用户完成 `approve` 后再执行：
+
+```sh
+hyperhub validate --password-file /path/to/password
+hyperhub show
+hyperhub status --json
+hyperhub logs --lines 100
+```
+
+智能防护重点确认 Profile、规则引用、`observe/enforce` 模式、Provider 状态和审计事件；发现校验失败或 Provider 异常时，不要重复提交相同 Patch。

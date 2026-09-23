@@ -4,6 +4,7 @@
     "mode": "enforce",
     "debug": false,
     "listener": {"socks_address":"127.0.0.1:18444","pending_session_ttl_seconds":60},
+    "protections": [],
     "proxies": [],
     "credentials": [
       {

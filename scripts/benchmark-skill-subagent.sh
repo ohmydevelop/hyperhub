@@ -114,7 +114,14 @@ require(skill, "${APPROVE:", "approval placeholder")
 require(skill, "uuid", "UUID identity")
 require(skill, "test", "UUID guard")
 require(skill, "不得代替用户运行", "approval boundary")
+require(skill, "/gateway/protections", "smart protection path")
+require(skill, "mode: observe", "observe-first guidance")
+require(skill, 'action: smart', "smart action guidance")
+require(skill, "System One", "provider protocol guidance")
 require(reference, '"type":"http_bearer"', "Bearer schema")
+require(reference, '"path":"/gateway/protections/-"', "protection append example")
+require(reference, '"action":"smart"', "smart action schema")
+require(reference, '"protocol":"system_one"', "System One schema")
 require(skill, '"path":"/gateway/credentials/-"', "credential append example")
 require(reference, '"path":"/gateway/routing/routes/-"', "route append example")
 require(reference, '"op":"test"', "UUID test example")
@@ -223,7 +230,9 @@ else:
     mutations = [item for item in patch if isinstance(item, dict) and item.get("op") != "test"]
     tests = [item for item in patch if isinstance(item, dict) and item.get("op") == "test"]
     credential_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/gateway/credentials/-"), None)
-    route_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/gateway/routing/routes/-"), None)
+    route_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/gateway/routing/routes/-" and item.get("value", {}).get("decision", {}).get("action") != "smart"), None)
+    smart_route_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/gateway/routing/routes/-" and item.get("value", {}).get("decision", {}).get("action") == "smart"), None)
+    protection_add = next((item for item in mutations if item.get("op") == "add" and item.get("path") == "/gateway/protections/-"), None)
     if not credential_add:
         errors.append("missing /gateway/credentials/- credential addition")
     else:
@@ -248,6 +257,35 @@ else:
             errors.append("new route must omit uuid so CLI can generate it")
         if credential_add and credential_add.get("value", {}).get("id") not in value.get("decision", {}).get("credentials", []):
             errors.append("new route does not reference the added credential by id")
+    if not protection_add:
+        errors.append("missing /gateway/protections/- smart protection addition")
+    else:
+        value = protection_add.get("value", {})
+        if value.get("mode") != "observe":
+            errors.append("new smart protection must default to observe mode")
+        intelligence = value.get("intelligence", {})
+        provider = intelligence.get("provider", {})
+        if not intelligence.get("enabled") or provider.get("protocol") != "system_one":
+            errors.append("smart protection must enable a System One provider")
+        if not isinstance(provider.get("endpoint"), str) or not provider.get("endpoint", "").startswith("https://"):
+            errors.append("smart protection provider must use an HTTPS endpoint")
+        api_key = provider.get("api_key", {}).get("value")
+        if not isinstance(api_key, str) or not re.fullmatch(r"\$\{APPROVE:[^}]+\}", api_key):
+            errors.append("provider API key must use ${APPROVE:name}")
+        if "uuid" in value:
+            errors.append("new smart protection must omit uuid so CLI can generate it")
+    if not smart_route_add:
+        errors.append("missing smart route addition")
+    else:
+        value = smart_route_add.get("value", {})
+        if not any(e.get("target") == "https://protected.example.test/v1" and e.get("port") == 443 for e in value.get("endpoints", []) if isinstance(e, dict)):
+            errors.append("smart route does not target https://protected.example.test/v1:443")
+        if not value.get("decision", {}).get("protection"):
+            errors.append("smart route does not reference a protection Profile")
+        if protection_add and value.get("decision", {}).get("protection") != protection_add.get("value", {}).get("id"):
+            errors.append("smart route does not reference the added protection by id")
+        if "uuid" in value:
+            errors.append("new smart route must omit uuid so CLI can generate it")
     route_uuid = "22222222-2222-4222-8222-222222222222"
     credential_uuid = "11111111-1111-4111-8111-111111111111"
     route_test = any(item.get("path") == "/gateway/routing/routes/0/uuid" and item.get("value") == route_uuid for item in tests)

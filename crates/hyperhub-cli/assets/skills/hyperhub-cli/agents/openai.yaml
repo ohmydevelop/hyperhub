@@ -1,4 +1,4 @@
 interface:
   display_name: "HyperHub CLI 配置"
-  short_description: "通过 CLI 规划、审批并应用 HyperHub 配置"
-  default_prompt: "使用 $hyperhub-cli 检查当前 HyperHub 配置并提交脱敏变更请求；由我在终端完成人工审批后，再验证配置和运行状态。"
+  short_description: "通过 CLI 规划、审批并验证路由、沙盒与智能防护配置"
+  default_prompt: "使用 $hyperhub-cli 检查当前 HyperHub 配置，按需生成脱敏变更请求；智能防护先使用 observe，由我在终端完成人工审批后，再验证配置和运行状态。"
