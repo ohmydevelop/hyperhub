@@ -64,6 +64,17 @@ pub(crate) enum AgentControlRequest<'a> {
         token: &'a str,
         event: &'a SandboxAuditEvent,
     },
+    SmartProtectionCheck {
+        session_id: &'a str,
+        token: &'a str,
+        protection_id: &'a str,
+        rule_id: Option<&'a str>,
+        stage: &'a str,
+        executable: &'a str,
+        argv: &'a [String],
+        features: &'a [String],
+        context: &'a serde_json::Value,
+    },
     #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
     RegisterChild {
         session_id: &'a str,
@@ -134,6 +145,16 @@ pub(crate) enum AgentControlRequest<'a> {
 pub(crate) enum AgentControlResponse {
     #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
     Ok,
+    SmartProtectionDecision {
+        action: String,
+        reason: String,
+        #[serde(default)]
+        risk_level: Option<String>,
+        #[serde(default)]
+        confidence: Option<f64>,
+        #[serde(default)]
+        cache_hit: bool,
+    },
     ResolvedName {
         address: String,
         #[serde(rename = "ttl_secs")]
@@ -392,6 +413,36 @@ pub(crate) fn decide_process_hook(
             source: "fallback".into(),
             version: 0,
         },
+    }
+}
+
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
+pub(crate) fn smart_protection_check(
+    endpoint: &str,
+    session_id: &str,
+    token: &str,
+    protection_id: &str,
+    rule_id: Option<&str>,
+    stage: &str,
+    executable: &str,
+    argv: &[String],
+    features: &[String],
+    context: &serde_json::Value,
+) -> Result<bool, i32> {
+    let request = AgentControlRequest::SmartProtectionCheck {
+        session_id,
+        token,
+        protection_id,
+        rule_id,
+        stage,
+        executable,
+        argv,
+        features,
+        context,
+    };
+    match exchange_control(endpoint, &request)? {
+        AgentControlResponse::SmartProtectionDecision { action, .. } => Ok(action == "deny"),
+        _ => Err(HH_ERR_PROTOCOL),
     }
 }
 

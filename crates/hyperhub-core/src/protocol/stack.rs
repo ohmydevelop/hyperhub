@@ -134,7 +134,13 @@ pub(crate) async fn run_stack(
         inner.context.protocol = inspection.protocol;
     }
     // 连接级决策门控：命中 MITM 能力层但该路由未绑定 http/ws 插件时出栈透传。
-    if layer.kind().audited(&inner.decision.plugins) == Some(false) {
+    if layer.kind().audited(&inner.decision.plugins) == Some(false)
+        && !inner
+            .decision
+            .protection
+            .as_deref()
+            .is_some_and(|id| inner.protection.profile_enabled(id))
+    {
         return RawLayer
             .serve(LayerContext {
                 inner,
@@ -264,6 +270,7 @@ mod tests {
             host: "example.com".into(),
             mitm: TlsMitm::generate().unwrap(),
             ssh_mitm_key: Arc::new(crate::ssh_mitm::server_key_from_master(b"test")),
+            protection: Arc::new(crate::protection::ProtectionSnapshot::compile(&config).unwrap()),
             config,
             policy,
             audit: AuditWriter::open(None).unwrap(),

@@ -8,6 +8,7 @@ pub(crate) enum ConfigSection {
     Proxy,
     Credential,
     Audit,
+    Protection,
     Route,
     Certificate,
     Sandbox,
@@ -26,6 +27,7 @@ impl ConfigSection {
             Self::Proxy => "代理",
             Self::Credential => "凭证",
             Self::Audit => "审计",
+            Self::Protection => "智能防护",
             Self::Route => "路由",
             Self::Certificate => "证书",
             Self::Sandbox => "沙盒",
@@ -39,9 +41,11 @@ impl ConfigSection {
 
     pub(crate) fn breadcrumb(self) -> String {
         match self {
-            Self::Gateway | Self::Sandbox | Self::Process | Self::Environment => {
-                self.label().into()
-            }
+            Self::Gateway
+            | Self::Sandbox
+            | Self::Protection
+            | Self::Process
+            | Self::Environment => self.label().into(),
             Self::Basic
             | Self::Proxy
             | Self::Credential
@@ -211,6 +215,20 @@ fn item_context(current: &Value, mutation: &Value, tokens: &[String]) -> ItemCon
                 3,
                 ConfigSection::Proxy,
                 "代理",
+                "id",
+                rest,
+            )
+        }
+        [gateway, collection, _, rest @ ..]
+            if gateway == "gateway" && collection == "protections" =>
+        {
+            collection_context(
+                current,
+                value,
+                tokens,
+                3,
+                ConfigSection::Protection,
+                "智能防护",
                 "id",
                 rest,
             )
@@ -482,6 +500,30 @@ fn item_details(section: ConfigSection, item: &Value) -> Vec<String> {
                 )]
             }
         }
+        ConfigSection::Protection => vec![format!(
+            "{}，执行策略={}，本地检测={}，智能判断={}，Provider={}",
+            enabled.unwrap_or("启用"),
+            item.get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("observe"),
+            yes_no(
+                item.get("data")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            ),
+            yes_no(
+                item.get("intelligence")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            ),
+            item.get("intelligence")
+                .and_then(|v| v.get("provider"))
+                .and_then(|v| v.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("未配置"),
+        )],
         ConfigSection::Audit => vec![format!(
             "协议={}，HTTP 内容转录={}，SSH 内容转录={}",
             string_array(item.get("protocols")),
@@ -614,6 +656,14 @@ fn field_label(tokens: &[String]) -> Option<String> {
         "decision/credentials" => "凭证绑定",
         "decision/audit_profiles" => "审计绑定",
         "type" => "凭证类型",
+        "protection" => "智能防护配置",
+        "allow_sensitive_upload" => "允许敏感数据上传",
+        "data/enabled" => "本地检测",
+        "data/max_scan_bytes" => "最大扫描字节数",
+        "intelligence/enabled" => "智能判断",
+        "intelligence/min_confidence" => "最低置信度",
+        "intelligence/cache_ttl_ms" => "判定缓存时间",
+        "intelligence/provider" => "判定 Provider",
         "secret/value" => "认证值",
         "username" => "用户名",
         "password/value" => "密码",

@@ -55,7 +55,7 @@ impl FileSandboxPlugin {
             FileOperation::Delete => crate::FileSandboxOperation::Delete,
             FileOperation::Rename => crate::FileSandboxOperation::Rename,
         };
-        crate::file_sandbox_decision(&s, path.unwrap_or_default(), mapped)
+        crate::file_decision_with_protection(path.unwrap_or_default(), mapped)
     }
     fn failure_mode(&self) -> HookFailureMode {
         match crate::file_sandbox_snapshot() {

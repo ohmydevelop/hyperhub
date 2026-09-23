@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod plugin;
 pub mod policy;
 pub mod process;
+pub mod protection;
 pub(crate) mod protocol;
 pub(crate) mod retention;
 pub mod runtime;

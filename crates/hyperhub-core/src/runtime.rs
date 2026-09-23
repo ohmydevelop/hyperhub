@@ -6,6 +6,7 @@
 
 use crate::config::{Config, ConfigError};
 use crate::policy::PolicySnapshot;
+use crate::protection::ProtectionSnapshot;
 use crate::session::{unix_timestamp_ms, SessionEnvironmentVariable};
 use std::sync::{Arc, RwLock};
 
@@ -14,6 +15,7 @@ use std::sync::{Arc, RwLock};
 pub struct RuntimeSnapshot {
     pub config: Arc<Config>,
     pub policy: Arc<PolicySnapshot>,
+    pub protection: Arc<ProtectionSnapshot>,
     pub environment: Arc<Vec<SessionEnvironmentVariable>>,
     /// 快照创建 / 最近一次热更新的时间（毫秒），供 `status` 验证重载是否生效。
     pub updated_at_ms: u64,
@@ -32,10 +34,13 @@ impl RuntimeState {
         config.validate()?;
         let config = Arc::new(config);
         let policy = Arc::new(PolicySnapshot::compile(&config).map_err(ConfigError::Validation)?);
+        let protection =
+            Arc::new(ProtectionSnapshot::compile(&config).map_err(ConfigError::Validation)?);
         let environment = Arc::new(resolve_environment(&config)?);
         let snapshot = RuntimeSnapshot {
             config,
             policy,
+            protection,
             environment,
             updated_at_ms: unix_timestamp_ms(),
         };
@@ -65,11 +70,13 @@ impl RuntimeState {
         config.validate().map_err(|error| error.to_string())?;
         let config = Arc::new(config);
         let policy = Arc::new(PolicySnapshot::compile(&config)?);
+        let protection = Arc::new(ProtectionSnapshot::compile(&config)?);
         let environment =
             Arc::new(resolve_environment(&config).map_err(|error| error.to_string())?);
         Ok(RuntimeSnapshot {
             config,
             policy,
+            protection,
             environment,
             updated_at_ms: unix_timestamp_ms().max(previous.updated_at_ms.saturating_add(1)),
         })
@@ -148,11 +155,13 @@ mod tests {
                 target: target.into(),
                 port: None,
             }],
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
             plugins: vec![],
+            protection: None,
+            allow_sensitive_upload: false,
             legacy: Default::default(),
         }
     }
@@ -198,7 +207,7 @@ mod tests {
         let mut broken = Config::default();
         broken.rules.push(RouteRule {
             uuid: crate::config::new_config_uuid(),
-            deny: true,
+            action: crate::config::RuleAction::Deny,
             upstream: Some("missing".into()),
             ..rule("broken", "example.com")
         });

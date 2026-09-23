@@ -3,9 +3,9 @@ use crate::config::{
     FileSandboxOperation, FileSandboxPattern, FileSandboxRule, FirewallAction, FirewallConfig,
     FirewallDefaultRule, FirewallEndpoint, FirewallRule, HttpAuthScheme, ListenerConfig,
     PluginConfig, PluginKind, PluginProtocol, ProcessSandboxConfig, ProcessSandboxPattern,
-    ProcessSandboxRule, RootCertificate, RouteEndpoint, RouteRule, SandboxAction, SandboxConfig,
-    SandboxDefaultRule, SecretValue, SshAccount, SshHostKey, Upstream, UpstreamKind,
-    WebSocketCapture,
+    ProcessSandboxRule, ProtectionProfile, RootCertificate, RouteEndpoint, RouteRule,
+    SandboxAction, SandboxConfig, SandboxDefaultRule, SecretValue, SshAccount, SshHostKey,
+    Upstream, UpstreamKind, WebSocketCapture,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,6 +29,8 @@ pub struct GatewayDocument {
     pub mode: EnforcementMode,
     pub debug: bool,
     pub listener: ListenerDocument,
+    #[serde(default)]
+    pub protections: Vec<ProtectionProfile>,
     #[serde(default)]
     pub proxies: Vec<ProxyDocument>,
     #[serde(default)]
@@ -189,6 +191,10 @@ pub struct DefaultRouteDocument {
 #[serde(deny_unknown_fields)]
 pub struct DefaultDecisionDocument {
     pub action: DecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub allow_sensitive_upload: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -211,6 +217,10 @@ pub struct RouteDocument {
 #[serde(deny_unknown_fields)]
 pub struct RouteDecisionDocument {
     pub action: DecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
+    #[serde(default)]
+    pub allow_sensitive_upload: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +245,7 @@ pub struct RouteRewriteDocument {
 pub enum DecisionAction {
     Allow,
     Deny,
+    Smart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +321,8 @@ pub struct NetworkRuleDocument {
     pub enabled: bool,
     pub priority: i32,
     pub action: DecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
     pub endpoints: Vec<FirewallEndpoint>,
 }
 
@@ -322,6 +335,8 @@ pub struct FileRuleDocument {
     pub enabled: bool,
     pub priority: i32,
     pub action: DecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
     pub patterns: Vec<FileSandboxPattern>,
     pub operations: Vec<FileSandboxOperation>,
 }
@@ -335,6 +350,8 @@ pub struct ProcessRuleDocument {
     pub enabled: bool,
     pub priority: i32,
     pub action: DecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
     pub patterns: Vec<ProcessSandboxPattern>,
 }
 
@@ -375,6 +392,7 @@ impl ConfigDocument {
                     socks_address: config.listener.socks_listen.clone(),
                     pending_session_ttl_seconds: config.listener.pending_session_ttl_secs,
                 },
+                protections: config.protections.clone(),
                 proxies: config
                     .upstreams
                     .iter()
@@ -404,7 +422,9 @@ impl ConfigDocument {
                     default: DefaultRouteDocument {
                         enabled: config.default_route.enabled,
                         decision: DefaultDecisionDocument {
-                            action: decision(config.default_route.deny),
+                            action: decision_action(config.default_route.action),
+                            protection: config.default_route.protection.clone(),
+                            allow_sensitive_upload: config.default_route.allow_sensitive_upload,
                             credentials: default_credentials,
                             audit_profiles: default_audits,
                         },
@@ -421,7 +441,9 @@ impl ConfigDocument {
                                 priority: route.priority,
                                 endpoints: route.endpoints.clone(),
                                 decision: RouteDecisionDocument {
-                                    action: decision(route.deny),
+                                    action: decision_action(route.action),
+                                    protection: route.protection.clone(),
+                                    allow_sensitive_upload: route.allow_sensitive_upload,
                                     proxy: route.upstream.clone(),
                                     rewrite: (route.rewrite_host.is_some()
                                         || route.rewrite_port.is_some())
@@ -572,11 +594,19 @@ impl ConfigDocument {
             },
             default_route: DefaultRoute {
                 enabled: self.gateway.routing.default.enabled,
-                deny: self.gateway.routing.default.decision.action == DecisionAction::Deny,
+                action: into_rule_action(self.gateway.routing.default.decision.action),
                 plugins: join_bindings(
                     self.gateway.routing.default.decision.credentials,
                     self.gateway.routing.default.decision.audit_profiles,
                 ),
+                protection: self.gateway.routing.default.decision.protection,
+                allow_sensitive_upload: self
+                    .gateway
+                    .routing
+                    .default
+                    .decision
+                    .allow_sensitive_upload,
+                legacy: HashMap::new(),
             },
             listener: ListenerConfig {
                 socks_listen: self.gateway.listener.socks_address,
@@ -597,6 +627,7 @@ impl ConfigDocument {
                 .map(ProxyDocument::into_upstream)
                 .collect::<Result<Vec<_>, _>>()?,
             plugins,
+            protections: self.gateway.protections,
             root_certificates: self
                 .gateway
                 .trust
@@ -624,7 +655,7 @@ impl ConfigDocument {
                     enabled: route.enabled,
                     priority: route.priority,
                     endpoints: route.endpoints,
-                    deny: route.decision.action == DecisionAction::Deny,
+                    action: into_rule_action(route.decision.action),
                     rewrite_host: route.decision.rewrite.as_ref().and_then(|v| v.host.clone()),
                     rewrite_port: route.decision.rewrite.and_then(|v| v.port),
                     upstream: route.decision.proxy,
@@ -632,6 +663,8 @@ impl ConfigDocument {
                         route.decision.credentials,
                         route.decision.audit_profiles,
                     ),
+                    protection: route.decision.protection,
+                    allow_sensitive_upload: route.decision.allow_sensitive_upload,
                     legacy: HashMap::new(),
                 })
                 .collect(),
@@ -886,6 +919,7 @@ impl From<&FirewallRule> for NetworkRuleDocument {
             enabled: value.enabled,
             priority: value.priority,
             action: firewall_action(value.action),
+            protection: value.protection.clone(),
             endpoints: value.endpoints.clone(),
         }
     }
@@ -899,6 +933,7 @@ impl From<NetworkRuleDocument> for FirewallRule {
             priority: value.priority,
             action: into_firewall_action(value.action),
             endpoints: value.endpoints,
+            protection: value.protection,
             legacy: HashMap::new(),
         }
     }
@@ -911,6 +946,7 @@ impl From<&FileSandboxRule> for FileRuleDocument {
             enabled: value.enabled,
             priority: value.priority,
             action: sandbox_action(value.action),
+            protection: value.protection.clone(),
             patterns: value.patterns.clone(),
             operations: value.operations.clone(),
         }
@@ -926,6 +962,7 @@ impl From<FileRuleDocument> for FileSandboxRule {
             action: into_sandbox_action(value.action),
             patterns: value.patterns,
             operations: value.operations,
+            protection: value.protection,
             legacy: HashMap::new(),
         }
     }
@@ -938,6 +975,7 @@ impl From<&ProcessSandboxRule> for ProcessRuleDocument {
             enabled: value.enabled,
             priority: value.priority,
             action: sandbox_action(value.action),
+            protection: value.protection.clone(),
             patterns: value.patterns.clone(),
         }
     }
@@ -951,6 +989,7 @@ impl From<ProcessRuleDocument> for ProcessSandboxRule {
             priority: value.priority,
             action: into_sandbox_action(value.action),
             patterns: value.patterns,
+            protection: value.protection,
             legacy: HashMap::new(),
         }
     }
@@ -962,11 +1001,11 @@ fn empty_secret() -> SecretValue {
     }
 }
 
-fn decision(deny: bool) -> DecisionAction {
-    if deny {
-        DecisionAction::Deny
-    } else {
-        DecisionAction::Allow
+fn decision_action(action: crate::config::RuleAction) -> DecisionAction {
+    match action {
+        crate::config::RuleAction::Pass => DecisionAction::Allow,
+        crate::config::RuleAction::Deny => DecisionAction::Deny,
+        crate::config::RuleAction::Smart => DecisionAction::Smart,
     }
 }
 
@@ -974,6 +1013,7 @@ fn firewall_action(action: FirewallAction) -> DecisionAction {
     match action {
         FirewallAction::Pass => DecisionAction::Allow,
         FirewallAction::Deny => DecisionAction::Deny,
+        FirewallAction::Smart => DecisionAction::Smart,
     }
 }
 
@@ -981,6 +1021,7 @@ fn sandbox_action(action: SandboxAction) -> DecisionAction {
     match action {
         SandboxAction::Pass => DecisionAction::Allow,
         SandboxAction::Deny => DecisionAction::Deny,
+        SandboxAction::Smart => DecisionAction::Smart,
     }
 }
 
@@ -988,6 +1029,15 @@ fn into_firewall_action(action: DecisionAction) -> FirewallAction {
     match action {
         DecisionAction::Allow => FirewallAction::Pass,
         DecisionAction::Deny => FirewallAction::Deny,
+        DecisionAction::Smart => FirewallAction::Smart,
+    }
+}
+
+fn into_rule_action(action: DecisionAction) -> crate::config::RuleAction {
+    match action {
+        DecisionAction::Allow => crate::config::RuleAction::Pass,
+        DecisionAction::Deny => crate::config::RuleAction::Deny,
+        DecisionAction::Smart => crate::config::RuleAction::Smart,
     }
 }
 
@@ -995,6 +1045,7 @@ fn into_sandbox_action(action: DecisionAction) -> SandboxAction {
     match action {
         DecisionAction::Allow => SandboxAction::Pass,
         DecisionAction::Deny => SandboxAction::Deny,
+        DecisionAction::Smart => SandboxAction::Smart,
     }
 }
 
@@ -1031,11 +1082,13 @@ mod tests {
                 target: "https://api.example.test/v1".into(),
                 port: Some(443),
             }],
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
             plugins: vec!["api-token".into()],
+            protection: None,
+            allow_sensitive_upload: false,
             legacy: HashMap::new(),
         });
         let value = ConfigDocument::to_value(&config.redacted()).unwrap();

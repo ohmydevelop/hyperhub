@@ -8,7 +8,8 @@ use hyperhub_core::config::{FileSandboxOperation, SandboxAction};
 use hyperhub_core::control::control_request;
 use hyperhub_core::sandbox::{
     compile_runtime_snapshot, decide_file, decide_process, file_error_decision,
-    process_error_decision, CompiledSandboxSnapshot, SandboxAuditEvent, SandboxAuditKind,
+    file_protection_binding, process_error_decision, process_protection_binding, sanitize_action,
+    CompiledSandboxSnapshot, ProtectionContext, SandboxAuditEvent, SandboxAuditKind,
     SandboxDecision,
 };
 use hyperhub_core::session::{ControlRequest, ControlResponse};
@@ -50,6 +51,17 @@ struct FileIntent {
     targets: Vec<String>,
     operation: FileSandboxOperation,
     operation_name: &'static str,
+}
+
+struct ProcessIntent {
+    executable: String,
+    argv: Vec<String>,
+}
+
+impl ProcessIntent {
+    fn command_line(&self) -> String {
+        self.argv.join(" ")
+    }
 }
 
 #[derive(Debug)]
@@ -735,9 +747,7 @@ impl Supervisor {
         }
 
         match self.process_intent(tid, number, registers) {
-            Ok(Some((executable, command_line)))
-                if self.process_denied(tid, &executable, &command_line)? =>
-            {
+            Ok(Some(intent)) if self.process_denied(tid, &intent)? => {
                 return Ok(Some(deny_syscall(registers, libc::EACCES)));
             }
             Err(error) if self.process_error_denied(tid, &error) => {
@@ -884,7 +894,7 @@ impl Supervisor {
         tid: libc::pid_t,
         number: i64,
         registers: &Registers,
-    ) -> Result<Option<(String, String)>, String> {
+    ) -> Result<Option<ProcessIntent>, String> {
         if self
             .sandbox
             .as_ref()
@@ -907,14 +917,13 @@ impl Supervisor {
                 .map_err(|error| format!("cannot resolve process executable: {error}"))?
                 .to_string_lossy()
                 .into_owned();
-            let command_line = std::fs::read(format!("/proc/{process_pid}/cmdline"))
+            let argv = std::fs::read(format!("/proc/{process_pid}/cmdline"))
                 .map_err(|error| format!("cannot read process command line: {error}"))?
                 .split(|byte| *byte == 0)
                 .filter(|argument| !argument.is_empty())
                 .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                .collect::<Vec<_>>()
-                .join(" ");
-            return Ok(Some((executable, command_line)));
+                .collect::<Vec<_>>();
+            return Ok(Some(ProcessIntent { executable, argv }));
         }
         let (dirfd, path_address, argv_address, flags) = if number == syscall::EXECVE {
             (
@@ -939,33 +948,103 @@ impl Supervisor {
         } else {
             resolve_path(tid, dirfd, &raw)?
         };
-        let command_line = read_command_line(tid, argv_address)?;
-        Ok(Some((executable, command_line)))
+        let argv = read_command_arguments(tid, argv_address)?;
+        Ok(Some(ProcessIntent { executable, argv }))
     }
 
     fn file_denied(&mut self, tid: libc::pid_t, intent: &FileIntent) -> Result<bool, String> {
-        let Some(snapshot) = self
-            .sandbox
-            .as_ref()
-            .and_then(|snapshot| snapshot.file.as_ref())
-        else {
-            return Ok(false);
-        };
-        let denied = intent.targets.iter().find_map(|target| {
-            let decision = decide_file(snapshot, target, intent.operation);
-            (decision.action == SandboxAction::Deny).then(|| (target.clone(), decision))
-        });
-        let Some((target, decision)) = denied else {
-            return Ok(false);
-        };
-        self.report_sandbox(
-            tid,
-            SandboxAuditKind::File,
-            intent.operation_name,
-            &target,
-            &decision,
-        );
-        Ok(self.enforce)
+        for target in &intent.targets {
+            let (decision, binding) = {
+                let Some(snapshot) = self
+                    .sandbox
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.file.as_ref())
+                else {
+                    return Ok(false);
+                };
+                (
+                    decide_file(snapshot, target, intent.operation),
+                    file_protection_binding(snapshot, target, intent.operation),
+                )
+            };
+            if decision.action == SandboxAction::Deny {
+                self.report_sandbox(
+                    tid,
+                    SandboxAuditKind::File,
+                    intent.operation_name,
+                    target,
+                    &decision,
+                );
+                return Ok(self.enforce);
+            }
+            let Some(binding) = binding else {
+                continue;
+            };
+            let context = ProtectionContext::default();
+            let sanitized = sanitize_action(target, &[target.clone()], &context);
+            let process_pid = self.ensure_member(tid)? as u32;
+            let executable = std::fs::read_link(format!("/proc/{process_pid}/exe"))
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".into());
+            let response = self.control.block_on(control_request(
+                &self.endpoint,
+                &ControlRequest::StaticSmartProtectionCheck {
+                    session_id: self.session_id.clone(),
+                    token: String::from_utf8_lossy(&self.password).into_owned(),
+                    root_pid: self.root_pid as u32,
+                    process_pid,
+                    protection_id: binding.protection_id,
+                    rule_id: Some(binding.rule_id.clone()),
+                    stage: format!("file_{}", intent.operation_name),
+                    executable,
+                    argv: sanitized.redacted_argv,
+                    features: sanitized.features,
+                    context: serde_json::json!({
+                        "local_deny": sanitized.local_deny,
+                    }),
+                },
+            ));
+            let action = match response {
+                Ok(ControlResponse::SmartProtectionDecision { action, .. }) => action,
+                Ok(ControlResponse::Error { message }) => {
+                    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                        eprintln!("hyperhub: file smart protection failed: {message}");
+                    }
+                    self.sandbox
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.file.as_ref())
+                        .map(file_error_decision)
+                        .map_or(SandboxAction::Pass, |decision| decision.action)
+                }
+                _ => self
+                    .sandbox
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.file.as_ref())
+                    .map(file_error_decision)
+                    .map_or(SandboxAction::Pass, |decision| decision.action),
+            };
+            let denied = action == SandboxAction::Deny;
+            let decision = SandboxDecision {
+                action,
+                rule_id: Some(binding.rule_id),
+                source: if denied {
+                    "smart_protection"
+                } else {
+                    "smart_protection_pass"
+                },
+            };
+            self.report_sandbox(
+                tid,
+                SandboxAuditKind::File,
+                intent.operation_name,
+                target,
+                &decision,
+            );
+            if denied {
+                return Ok(self.enforce);
+            }
+        }
+        Ok(false)
     }
 
     fn file_error_denied(&mut self, tid: libc::pid_t, error: &str) -> bool {
@@ -1012,11 +1091,96 @@ impl Supervisor {
         self.enforce
     }
 
-    fn process_denied(
+    fn process_denied(&mut self, tid: libc::pid_t, intent: &ProcessIntent) -> Result<bool, String> {
+        let Some(snapshot) = self
+            .sandbox
+            .as_ref()
+            .and_then(|snapshot| snapshot.process.as_ref())
+        else {
+            return Ok(false);
+        };
+        let command_line = intent.command_line();
+        let decision = decide_process(snapshot, &intent.executable, &command_line);
+        if decision.action == SandboxAction::Deny {
+            self.report_sandbox(
+                tid,
+                SandboxAuditKind::Process,
+                "create",
+                &intent.executable,
+                &decision,
+            );
+            return Ok(self.enforce);
+        }
+        let Some(binding) = process_protection_binding(snapshot, &intent.executable, &command_line)
+        else {
+            return Ok(false);
+        };
+        let context = ProtectionContext::default();
+        let sanitized = sanitize_action(&intent.executable, &intent.argv, &context);
+        let process_pid = self.ensure_member(tid)? as u32;
+        let response = self.control.block_on(control_request(
+            &self.endpoint,
+            &ControlRequest::StaticSmartProtectionCheck {
+                session_id: self.session_id.clone(),
+                token: String::from_utf8_lossy(&self.password).into_owned(),
+                root_pid: self.root_pid as u32,
+                process_pid,
+                protection_id: binding.protection_id,
+                rule_id: Some(binding.rule_id.clone()),
+                stage: "process_create".into(),
+                executable: intent.executable.clone(),
+                argv: sanitized.redacted_argv,
+                features: sanitized.features,
+                context: serde_json::json!({
+                    "local_deny": sanitized.local_deny,
+                }),
+            },
+        ));
+        match response {
+            Ok(ControlResponse::SmartProtectionDecision { action, .. }) => {
+                let denied = action == SandboxAction::Deny;
+                let decision = SandboxDecision {
+                    action,
+                    rule_id: Some(binding.rule_id),
+                    source: if denied {
+                        "smart_protection"
+                    } else {
+                        "smart_protection_pass"
+                    },
+                };
+                self.report_sandbox(
+                    tid,
+                    SandboxAuditKind::Process,
+                    "create",
+                    &intent.executable,
+                    &decision,
+                );
+                Ok(denied && self.enforce)
+            }
+            Ok(ControlResponse::Error { message }) => {
+                self.process_protection_error(tid, &intent.executable, &binding.rule_id, &message)
+            }
+            Ok(_) => self.process_protection_error(
+                tid,
+                &intent.executable,
+                &binding.rule_id,
+                "unexpected smart protection response",
+            ),
+            Err(error) => self.process_protection_error(
+                tid,
+                &intent.executable,
+                &binding.rule_id,
+                &error.to_string(),
+            ),
+        }
+    }
+
+    fn process_protection_error(
         &mut self,
         tid: libc::pid_t,
         executable: &str,
-        command_line: &str,
+        rule_id: &str,
+        error: &str,
     ) -> Result<bool, String> {
         let Some(snapshot) = self
             .sandbox
@@ -1025,10 +1189,12 @@ impl Supervisor {
         else {
             return Ok(false);
         };
-        let decision = decide_process(snapshot, executable, command_line);
-        if decision.action != SandboxAction::Deny {
-            return Ok(false);
-        }
+        let error_action = process_error_decision(snapshot).action;
+        let decision = SandboxDecision {
+            action: error_action,
+            rule_id: Some(rule_id.to_owned()),
+            source: "smart_protection_error",
+        };
         self.report_sandbox(
             tid,
             SandboxAuditKind::Process,
@@ -1036,7 +1202,10 @@ impl Supervisor {
             executable,
             &decision,
         );
-        Ok(self.enforce)
+        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+            eprintln!("hyperhub: smart protection check failed: {error}");
+        }
+        Ok(error_action == SandboxAction::Deny && self.enforce)
     }
 
     fn report_sandbox(
@@ -1588,9 +1757,9 @@ fn read_c_string(tid: libc::pid_t, address: usize, limit: usize) -> Result<Strin
     Err(format!("target string exceeds {limit} bytes"))
 }
 
-fn read_command_line(tid: libc::pid_t, address: usize) -> Result<String, String> {
+fn read_command_arguments(tid: libc::pid_t, address: usize) -> Result<Vec<String>, String> {
     if address == 0 {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
     let mut arguments = Vec::new();
     for index in 0..128usize {
@@ -1601,7 +1770,7 @@ fn read_command_line(tid: libc::pid_t, address: usize) -> Result<String, String>
         )?;
         let pointer = usize::from_ne_bytes(bytes.try_into().unwrap());
         if pointer == 0 {
-            return Ok(arguments.join(" "));
+            return Ok(arguments);
         }
         arguments.push(read_c_string(tid, pointer, 4096)?);
     }

@@ -1,7 +1,10 @@
 mod network;
+mod sanitizer;
 
 use arc_swap::ArcSwapOption;
 pub(crate) use network::*;
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+use sanitizer::ProtectionContext;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -47,6 +50,8 @@ pub(crate) struct ProcessSandboxSnapshotRule {
     pub(crate) id: String,
     pub(crate) action: SandboxAction,
     pub(crate) patterns: Vec<ProcessSandboxPattern>,
+    #[serde(default)]
+    pub(crate) protection: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
@@ -69,6 +74,8 @@ pub(crate) struct FileSandboxSnapshotRule {
     pub(crate) action: SandboxAction,
     pub(crate) patterns: Vec<String>,
     pub(crate) operations: Vec<FileSandboxOperation>,
+    #[serde(default)]
+    pub(crate) protection: Option<String>,
 }
 
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
@@ -82,6 +89,7 @@ struct CompiledProcessSandboxRule {
     id: String,
     action: SandboxAction,
     patterns: Vec<CompiledProcessSandboxPattern>,
+    protection: Option<String>,
 }
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
 struct CompiledProcessSandboxPattern {
@@ -100,6 +108,7 @@ struct CompiledFileSandboxRule {
     action: SandboxAction,
     patterns: Vec<regex::Regex>,
     operations: Vec<FileSandboxOperation>,
+    protection: Option<String>,
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -125,17 +134,11 @@ pub(crate) struct SandboxAuditEvent {
 
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn file_allows(path: &str, op: FileSandboxOperation) -> bool {
-    let Some(s) = file_sandbox_snapshot() else {
-        return true;
-    };
-    file_sandbox_decision(&s, path, op).0 == SandboxAction::Pass
+    file_decision_with_protection(path, op).0 != SandboxAction::Deny
 }
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn process_allows(exe: &str, cmd: &str) -> bool {
-    let Some(s) = process_sandbox_snapshot() else {
-        return true;
-    };
-    process_sandbox_decision(&s, exe, cmd).0 == SandboxAction::Pass
+    process_decision_with_protection(exe, cmd).0 != SandboxAction::Deny
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -161,7 +164,7 @@ pub(crate) fn process_sandbox_decision(
     cmd: &str,
 ) -> (SandboxAction, Option<String>, String) {
     for rule in &snapshot.rules {
-        if !rule.patterns.iter().any(|pattern| {
+        if rule.patterns.iter().any(|pattern| {
             pattern
                 .executable
                 .as_ref()
@@ -171,11 +174,189 @@ pub(crate) fn process_sandbox_decision(
                     .as_ref()
                     .is_none_or(|regex| regex.is_match(cmd))
         }) {
-            continue;
+            return (rule.action, Some(rule.id.clone()), "rule".into());
         }
-        return (rule.action, Some(rule.id.clone()), "rule".into());
     }
     (snapshot.default_action, None, "default".into())
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn file_decision_with_protection(
+    path: &str,
+    operation: FileSandboxOperation,
+) -> (SandboxAction, Option<String>, String) {
+    let Some(snapshot) = file_sandbox_snapshot() else {
+        return (SandboxAction::Pass, None, "disabled".into());
+    };
+    let (action, rule_id, source) = file_sandbox_decision(&snapshot, path, operation);
+    if action == SandboxAction::Deny {
+        return (action, rule_id, source);
+    }
+    let Some((matched_rule_id, protection_id)) = file_protection_id(&snapshot, path, operation)
+    else {
+        return (action, rule_id, source);
+    };
+    let context = ProtectionContext::default();
+    let sanitized = sanitizer::sanitize(path, &[path.to_owned()], &context);
+    let executable = std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    let mut context_value =
+        serde_json::to_value(&context).unwrap_or_else(|_| serde_json::json!({}));
+    context_value["local_deny"] = serde_json::json!(sanitized.local_deny);
+    match query_protection_gateway(
+        &protection_id,
+        Some(&matched_rule_id),
+        &format!("file_{operation:?}").to_ascii_lowercase(),
+        &executable,
+        &sanitized.redacted_argv,
+        &sanitized.features,
+        &context_value,
+    ) {
+        Ok(true) => (
+            SandboxAction::Deny,
+            Some(matched_rule_id),
+            "smart_protection".into(),
+        ),
+        Ok(false) => (
+            SandboxAction::Pass,
+            Some(matched_rule_id),
+            "smart_protection_pass".into(),
+        ),
+        Err(_) => (
+            snapshot.error_action,
+            Some(matched_rule_id),
+            "smart_protection_error".into(),
+        ),
+    }
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn process_decision_with_protection(
+    executable: &str,
+    command_line: &str,
+) -> (SandboxAction, Option<String>, String) {
+    let Some(snapshot) = process_sandbox_snapshot() else {
+        return (SandboxAction::Pass, None, "disabled".into());
+    };
+    let (action, rule_id, source) = process_sandbox_decision(&snapshot, executable, command_line);
+    if action == SandboxAction::Deny {
+        return (action, rule_id, source);
+    }
+    let Some((matched_rule_id, protection_id)) =
+        process_protection_id(&snapshot, executable, command_line)
+    else {
+        return (action, rule_id, source);
+    };
+    let argv = command_line
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let context = ProtectionContext::default();
+    let sanitized = sanitizer::sanitize(executable, &argv, &context);
+    let mut context_value =
+        serde_json::to_value(&context).unwrap_or_else(|_| serde_json::json!({}));
+    context_value["local_deny"] = serde_json::json!(sanitized.local_deny);
+    match query_protection_gateway(
+        &protection_id,
+        Some(&matched_rule_id),
+        "process_create",
+        executable,
+        &sanitized.redacted_argv,
+        &sanitized.features,
+        &context_value,
+    ) {
+        Ok(true) => (
+            SandboxAction::Deny,
+            Some(matched_rule_id),
+            "smart_protection".into(),
+        ),
+        Ok(false) => (
+            SandboxAction::Pass,
+            Some(matched_rule_id),
+            "smart_protection_pass".into(),
+        ),
+        Err(_) => (
+            snapshot.error_action,
+            Some(matched_rule_id),
+            "smart_protection_error".into(),
+        ),
+    }
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn process_protection_id(
+    snapshot: &CompiledProcessSandboxSnapshot,
+    executable: &str,
+    command_line: &str,
+) -> Option<(String, String)> {
+    snapshot.rules.iter().find_map(|rule| {
+        if rule.protection.is_none()
+            || !rule.patterns.iter().any(|pattern| {
+                pattern
+                    .executable
+                    .as_ref()
+                    .is_none_or(|regex| regex.is_match(executable))
+                    && pattern
+                        .command_line
+                        .as_ref()
+                        .is_none_or(|regex| regex.is_match(command_line))
+            })
+        {
+            return None;
+        }
+        Some((rule.id.clone(), rule.protection.clone()?))
+    })
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn file_protection_id(
+    snapshot: &CompiledFileSandboxSnapshot,
+    path: &str,
+    operation: FileSandboxOperation,
+) -> Option<(String, String)> {
+    snapshot.rules.iter().find_map(|rule| {
+        if rule.protection.is_none()
+            || !rule.operations.contains(&operation)
+            || !rule.patterns.iter().any(|pattern| pattern.is_match(path))
+        {
+            return None;
+        }
+        Some((rule.id.clone(), rule.protection.clone()?))
+    })
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn query_protection_gateway(
+    protection_id: &str,
+    rule_id: Option<&str>,
+    stage: &str,
+    executable: &str,
+    argv: &[String],
+    features: &[String],
+    context: &serde_json::Value,
+) -> Result<bool, i32> {
+    let (endpoint, session_id, token) = {
+        let runtime = crate::state().lock().map_err(|_| crate::HH_ERR_PROTOCOL)?;
+        (
+            runtime.session.control_endpoint.clone(),
+            runtime.session.session_id.clone(),
+            runtime.session.token.clone(),
+        )
+    };
+    crate::smart_protection_check(
+        &endpoint,
+        &session_id,
+        &token,
+        protection_id,
+        rule_id,
+        stage,
+        executable,
+        argv,
+        features,
+        context,
+    )
 }
 
 #[cfg(all(test, any(windows, unix), feature = "gum-agent"))]
@@ -192,6 +373,7 @@ mod tests {
                 action: SandboxAction::Deny,
                 patterns: vec![r"^C:/secret(?:/|$)".into()],
                 operations: vec![FileSandboxOperation::Read],
+                protection: None,
             }],
         })
         .unwrap();
@@ -217,6 +399,7 @@ mod tests {
                     executable: r"(?i)tool\.exe$".into(),
                     command_line: r"--danger(?:\s|$)".into(),
                 }],
+                protection: None,
             }],
         })
         .unwrap();
@@ -312,6 +495,7 @@ pub(crate) fn compile_process_snapshot(
                 id: rule.id,
                 action: rule.action,
                 patterns,
+                protection: rule.protection,
             })
         })
         .collect::<Result<_, regex::Error>>()?;
@@ -339,6 +523,7 @@ pub(crate) fn compile_file_snapshot(
                     .map(|pattern| regex::Regex::new(&pattern))
                     .collect::<Result<_, _>>()?,
                 operations: rule.operations,
+                protection: rule.protection,
             })
         })
         .collect::<Result<_, regex::Error>>()?;

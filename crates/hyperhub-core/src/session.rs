@@ -982,6 +982,17 @@ impl SessionRegistry {
             .cloned()
     }
 
+    pub fn authenticate_pending(&self, session_id: &str, token: &str) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        cleanup(&mut state, Instant::now());
+        state.sessions.get(session_id).is_some_and(|record| {
+            record.lifecycle == SessionLifecycle::Pending
+                && constant_time_eq(record.token.as_bytes(), token.as_bytes())
+        })
+    }
+
     pub fn authenticate_control(&self, session_id: &str, token: &str) -> bool {
         let Ok(mut state) = self.0.lock() else {
             return false;
@@ -1267,6 +1278,12 @@ pub enum ControlRequest {
         executable: String,
         root: bool,
     },
+    CheckRootProcessProtection {
+        session_id: String,
+        token: String,
+        executable: String,
+        argv: Vec<String>,
+    },
     RegisterChild {
         session_id: String,
         token: String,
@@ -1366,6 +1383,30 @@ pub enum ControlRequest {
         token: String,
         event: crate::sandbox::SandboxAuditEvent,
     },
+    SmartProtectionCheck {
+        session_id: String,
+        token: String,
+        protection_id: String,
+        rule_id: Option<String>,
+        stage: String,
+        executable: String,
+        argv: Vec<String>,
+        features: Vec<String>,
+        context: serde_json::Value,
+    },
+    StaticSmartProtectionCheck {
+        session_id: String,
+        token: String,
+        root_pid: u32,
+        process_pid: u32,
+        protection_id: String,
+        rule_id: Option<String>,
+        stage: String,
+        executable: String,
+        argv: Vec<String>,
+        features: Vec<String>,
+        context: serde_json::Value,
+    },
     ReportStaticSandboxAudit {
         session_id: String,
         token: String,
@@ -1464,6 +1505,13 @@ pub enum ControlResponse {
         generated_at_ms: u64,
         sessions: Vec<SessionSnapshot>,
         connections: Vec<ConnectionSnapshot>,
+    },
+    SmartProtectionDecision {
+        action: crate::config::SandboxAction,
+        reason: String,
+        risk_level: Option<String>,
+        confidence: Option<f64>,
+        cache_hit: bool,
     },
     Error {
         message: String,

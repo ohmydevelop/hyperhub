@@ -32,6 +32,8 @@ pub(crate) struct FirewallSnapshotRule {
     pub(crate) id: String,
     pub(crate) action: FirewallAction,
     pub(crate) endpoints: Vec<FirewallEndpoint>,
+    #[serde(default)]
+    pub(crate) protection: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct FirewallEndpoint {
@@ -281,6 +283,7 @@ mod tests {
             rules: vec![FirewallSnapshotRule {
                 id: "deny-baidu".into(),
                 action: FirewallAction::Deny,
+                protection: None,
                 endpoints: vec![FirewallEndpoint {
                     target: FirewallRuleTarget::Domain(FirewallDomainTarget {
                         host: "www.baidu.com".into(),
@@ -318,6 +321,7 @@ mod tests {
             rules: vec![FirewallSnapshotRule {
                 id: "deny-private".into(),
                 action: FirewallAction::Deny,
+                protection: None,
                 endpoints: vec![FirewallEndpoint {
                     target: FirewallRuleTarget::Network("10.0.0.0/8".parse().unwrap()),
                     port: None,

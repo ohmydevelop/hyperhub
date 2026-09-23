@@ -4,7 +4,10 @@ use crate::config_document::ConfigDocument;
 use crate::firewall::compile_snapshot as compile_firewall_snapshot;
 use crate::framing::{read_frame, write_frame};
 use crate::runtime::{RuntimeSnapshot, RuntimeState};
-use crate::sandbox::compile_snapshot as compile_sandbox_snapshot;
+use crate::sandbox::{
+    compile_runtime_snapshot, compile_snapshot as compile_sandbox_snapshot, decide_process,
+    decide_process_hook, process_protection_binding, sanitize_action, ProtectionContext,
+};
 use crate::session::{
     unix_timestamp_after, unix_timestamp_ms, verify_config_update_proof, AgentFlags,
     ConnectionRegistry, ControlRequest, ControlResponse, SessionRegistry,
@@ -362,18 +365,206 @@ impl ControlService {
                     },
                 }
             }
+            ControlRequest::CheckRootProcessProtection {
+                session_id,
+                token,
+                executable,
+                argv,
+            } => {
+                if !self.sessions.authenticate_pending(&session_id, &token) {
+                    ControlResponse::Error {
+                        message: "invalid root process protection reporter".into(),
+                    }
+                } else {
+                    let command_line = argv.join(" ");
+                    let compiled = compile_sandbox_snapshot(&runtime.config, runtime.updated_at_ms)
+                        .and_then(|snapshot| {
+                            compile_runtime_snapshot(snapshot).map_err(|error| error.to_string())
+                        });
+                    match compiled {
+                        Err(error) => ControlResponse::Error {
+                            message: format!("cannot compile root process protection: {error}"),
+                        },
+                        Ok(snapshot) => {
+                            let Some(process) = snapshot.process.as_ref() else {
+                                return write_frame(
+                                    &mut stream,
+                                    &ControlResponse::SmartProtectionDecision {
+                                        action: crate::config::SandboxAction::Pass,
+                                        reason: "sandbox_disabled".into(),
+                                        risk_level: None,
+                                        confidence: None,
+                                        cache_hit: false,
+                                    },
+                                )
+                                .await;
+                            };
+                            let static_decision =
+                                decide_process(process, &executable, &command_line);
+                            let binding =
+                                process_protection_binding(process, &executable, &command_line);
+                            let mut action = static_decision.action;
+                            let mut reason = static_decision.source.to_owned();
+                            let mut rule_id = static_decision.rule_id.clone();
+                            let mut risk_level = None;
+                            let mut confidence = None;
+                            let mut cache_hit = false;
+                            let mut audit_features = Vec::new();
+                            let mut destructive_probability = None;
+                            let mut blast_radius = None;
+                            let mut provider_queried = false;
+                            if action != crate::config::SandboxAction::Deny {
+                                if let Some(binding) = binding {
+                                    rule_id = Some(binding.rule_id.clone());
+                                    let context = ProtectionContext::default();
+                                    let sanitized = sanitize_action(&executable, &argv, &context);
+                                    audit_features = sanitized.features.clone();
+                                    if sanitized.local_deny {
+                                        action = if runtime
+                                            .protection
+                                            .profile_mode(&binding.protection_id)
+                                            == Some(crate::config::ProtectionMode::Enforce)
+                                        {
+                                            crate::config::SandboxAction::Deny
+                                        } else {
+                                            crate::config::SandboxAction::Pass
+                                        };
+                                        reason = "local_data_protection".into();
+                                    } else {
+                                        provider_queried = true;
+                                        let outcome = runtime
+                                            .protection
+                                            .evaluate_agent(
+                                                &binding.protection_id,
+                                                &session_id,
+                                                peer_pid.unwrap_or_default(),
+                                                &executable,
+                                                "root_process_create",
+                                                sanitized.redacted_argv,
+                                                sanitized.features,
+                                                serde_json::to_value(&context)
+                                                    .unwrap_or_else(|_| serde_json::json!({})),
+                                            )
+                                            .await;
+                                        let provider = outcome
+                                            .provider
+                                            .as_ref()
+                                            .filter(|item| item.error.is_none());
+                                        action = if outcome.deny {
+                                            crate::config::SandboxAction::Deny
+                                        } else {
+                                            crate::config::SandboxAction::Pass
+                                        };
+                                        reason = outcome
+                                            .reason
+                                            .unwrap_or_else(|| "provider_pass".into());
+                                        risk_level =
+                                            provider.and_then(|item| item.risk_level.clone());
+                                        confidence = provider.and_then(|item| item.confidence);
+                                        destructive_probability =
+                                            provider.and_then(|item| item.destructive_probability);
+                                        blast_radius = provider.and_then(|item| item.blast_radius);
+                                        cache_hit = provider.is_some_and(|item| item.cache_hit);
+                                    }
+                                }
+                            }
+                            let event_name = if action == crate::config::SandboxAction::Deny {
+                                "sandbox_denied"
+                            } else {
+                                "sandbox_allowed"
+                            };
+                            self.audit.session_event(
+                                event_name,
+                                &session_id,
+                                peer_pid,
+                                Some(&executable),
+                                serde_json::json!({
+                                    "kind": "process",
+                                    "decision": action,
+                                    "rule_id": rule_id,
+                                    "decision_source": reason,
+                                    "operation": "root_create",
+                                    "target": executable,
+                                    "reporter": "root-launcher",
+                                }),
+                            );
+                            if !audit_features.is_empty() {
+                                self.audit.session_event(
+                                    "smart_protection_decision",
+                                    &session_id,
+                                    peer_pid,
+                                    Some(&executable),
+                                    serde_json::json!({
+                                        "rule_id": rule_id,
+                                        "stage": "root_process_create",
+                                        "action": action,
+                                        "reason": reason,
+                                        "features": audit_features,
+                                        "risk_level": risk_level,
+                                        "confidence": confidence,
+                                        "destructive_probability": destructive_probability,
+                                        "blast_radius": blast_radius,
+                                        "cache_hit": cache_hit,
+                                        "provider_queried": provider_queried,
+                                        "reporter": "root-launcher",
+                                    }),
+                                );
+                            }
+                            ControlResponse::SmartProtectionDecision {
+                                action,
+                                reason,
+                                risk_level,
+                                confidence,
+                                cache_hit,
+                            }
+                        }
+                    }
+                }
+            }
             ControlRequest::DecideProcessHook {
                 session_id,
                 token,
-                executable: _,
+                executable,
                 root: _,
             } => {
-                let _ = (&session_id, &token);
-                ControlResponse::ProcessHookDecision {
-                    hook: true,
-                    rule_id: None,
-                    source: "default".into(),
-                    version: runtime.updated_at_ms,
+                if !self.sessions.authenticate_member(
+                    &session_id,
+                    &token,
+                    peer_pid.unwrap_or_default(),
+                ) {
+                    ControlResponse::Error {
+                        message: "invalid process hook reporter".into(),
+                    }
+                } else {
+                    match compile_sandbox_snapshot(&runtime.config, runtime.updated_at_ms).and_then(
+                        |snapshot| {
+                            compile_runtime_snapshot(snapshot).map_err(|error| error.to_string())
+                        },
+                    ) {
+                        Ok(snapshot) => {
+                            let decision = snapshot
+                                .process
+                                .as_ref()
+                                .map(|process| decide_process_hook(process, &executable));
+                            let decision = decision.unwrap_or(crate::sandbox::SandboxDecision {
+                                action: crate::config::SandboxAction::Pass,
+                                rule_id: None,
+                                source: "default",
+                            });
+                            ControlResponse::ProcessHookDecision {
+                                hook: true,
+                                rule_id: decision.rule_id,
+                                source: decision.source.into(),
+                                version: runtime.updated_at_ms,
+                            }
+                        }
+                        Err(_) => ControlResponse::ProcessHookDecision {
+                            hook: true,
+                            rule_id: None,
+                            source: "fallback".into(),
+                            version: runtime.updated_at_ms,
+                        },
+                    }
                 }
             }
             ControlRequest::ActivateSession {
@@ -1006,6 +1197,7 @@ impl ControlService {
                     let event_name = match event.decision {
                         crate::config::FirewallAction::Pass => "firewall_allowed",
                         crate::config::FirewallAction::Deny => "firewall_denied",
+                        crate::config::FirewallAction::Smart => "firewall_allowed",
                     };
                     self.audit.session_event(
                         event_name,
@@ -1052,6 +1244,7 @@ impl ControlService {
                     let event_name = match event.decision {
                         crate::config::SandboxAction::Pass => "sandbox_allowed",
                         crate::config::SandboxAction::Deny => "sandbox_denied",
+                        crate::config::SandboxAction::Smart => "sandbox_allowed",
                     };
                     self.audit.session_event(
                         event_name,
@@ -1092,6 +1285,7 @@ impl ControlService {
                     let event_name = match event.decision {
                         crate::config::SandboxAction::Pass => "sandbox_allowed",
                         crate::config::SandboxAction::Deny => "sandbox_denied",
+                        crate::config::SandboxAction::Smart => "sandbox_allowed",
                     };
                     self.audit.session_event(event_name, &session_id, Some(event.process_pid), self.sessions.member_executable(event.process_pid).as_deref(), serde_json::json!({
                         "kind": event.kind, "decision": event.decision, "rule_id": event.rule_id, "decision_source": event.source,
@@ -1102,6 +1296,180 @@ impl ControlService {
                 } else {
                     ControlResponse::Error {
                         message: "invalid sandbox audit reporter".into(),
+                    }
+                }
+            }
+            ControlRequest::StaticSmartProtectionCheck {
+                session_id,
+                token,
+                root_pid,
+                process_pid,
+                protection_id,
+                rule_id,
+                stage,
+                executable,
+                argv,
+                features,
+                context,
+            } => {
+                let authenticated = peer_pid.is_some_and(|reporter| {
+                    process_ancestors(root_pid).contains(&reporter)
+                        && self
+                            .sessions
+                            .authenticate_member(&session_id, &token, root_pid)
+                        && self
+                            .sessions
+                            .authenticate_member(&session_id, &token, process_pid)
+                });
+                if !authenticated {
+                    ControlResponse::Error {
+                        message: "invalid static smart protection reporter".into(),
+                    }
+                } else {
+                    let audit_features = features.clone();
+                    let outcome = runtime
+                        .protection
+                        .evaluate_agent(
+                            &protection_id,
+                            &session_id,
+                            process_pid,
+                            &executable,
+                            &stage,
+                            argv,
+                            features,
+                            context,
+                        )
+                        .await;
+                    let provider = outcome
+                        .provider
+                        .as_ref()
+                        .filter(|item| item.error.is_none());
+                    let action = if outcome.deny {
+                        crate::config::SandboxAction::Deny
+                    } else {
+                        crate::config::SandboxAction::Pass
+                    };
+                    let reason = outcome
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "provider_pass".into());
+                    let risk_level = provider.and_then(|item| item.risk_level.clone());
+                    let confidence = provider.and_then(|item| item.confidence);
+                    let destructive_probability =
+                        provider.and_then(|item| item.destructive_probability);
+                    let blast_radius = provider.and_then(|item| item.blast_radius);
+                    let cache_hit = provider.is_some_and(|item| item.cache_hit);
+                    self.audit.session_event(
+                        "smart_protection_decision",
+                        &session_id,
+                        Some(process_pid),
+                        Some(&executable),
+                        serde_json::json!({
+                            "protection": protection_id,
+                            "rule_id": rule_id,
+                            "stage": stage,
+                            "action": action,
+                            "reason": reason,
+                            "features": audit_features,
+                            "risk_level": risk_level,
+                            "confidence": confidence,
+                            "destructive_probability": destructive_probability,
+                            "blast_radius": blast_radius,
+                            "cache_hit": cache_hit,
+                            "reporter": "static-supervisor",
+                        }),
+                    );
+                    ControlResponse::SmartProtectionDecision {
+                        action,
+                        reason,
+                        risk_level,
+                        confidence,
+                        cache_hit,
+                    }
+                }
+            }
+            ControlRequest::SmartProtectionCheck {
+                session_id,
+                token,
+                protection_id,
+                rule_id,
+                stage,
+                executable,
+                argv,
+                features,
+                context,
+            } => {
+                if peer_pid.is_none() {
+                    ControlResponse::Error {
+                        message: "invalid smart protection reporter".into(),
+                    }
+                } else if !self
+                    .sessions
+                    .authenticate_member(&session_id, &token, peer_pid.unwrap())
+                {
+                    ControlResponse::Error {
+                        message: "invalid smart protection reporter".into(),
+                    }
+                } else {
+                    let reporter_pid = peer_pid.unwrap();
+                    let audit_features = features.clone();
+                    let outcome = runtime
+                        .protection
+                        .evaluate_agent(
+                            &protection_id,
+                            &session_id,
+                            reporter_pid,
+                            &executable,
+                            &stage,
+                            argv,
+                            features,
+                            context,
+                        )
+                        .await;
+                    let provider = outcome
+                        .provider
+                        .as_ref()
+                        .filter(|item| item.error.is_none());
+                    let action = if outcome.deny {
+                        crate::config::SandboxAction::Deny
+                    } else {
+                        crate::config::SandboxAction::Pass
+                    };
+                    let reason = outcome
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "provider_pass".into());
+                    let risk_level = provider.and_then(|item| item.risk_level.clone());
+                    let confidence = provider.and_then(|item| item.confidence);
+                    let destructive_probability =
+                        provider.and_then(|item| item.destructive_probability);
+                    let blast_radius = provider.and_then(|item| item.blast_radius);
+                    let cache_hit = provider.is_some_and(|item| item.cache_hit);
+                    self.audit.session_event(
+                        "smart_protection_decision",
+                        &session_id,
+                        Some(reporter_pid),
+                        Some(&executable),
+                        serde_json::json!({
+                            "protection": protection_id,
+                            "rule_id": rule_id,
+                            "stage": stage,
+                            "action": action,
+                            "reason": reason,
+                            "features": audit_features,
+                            "risk_level": risk_level,
+                            "confidence": confidence,
+                            "destructive_probability": destructive_probability,
+                            "blast_radius": blast_radius,
+                            "cache_hit": cache_hit,
+                        }),
+                    );
+                    ControlResponse::SmartProtectionDecision {
+                        action,
+                        reason,
+                        risk_level,
+                        confidence,
+                        cache_hit,
                     }
                 }
             }
@@ -2025,6 +2393,7 @@ mod tests {
                 port: None,
             }],
             legacy: Default::default(),
+            protection: None,
         });
         let endpoint = format!(r"\\.\pipe\hyperhub-auto-auth-test-{}", std::process::id());
         let service = ControlService::new(
@@ -2251,6 +2620,7 @@ mod tests {
                 port: Some(443),
             }],
             legacy: Default::default(),
+            protection: None,
         });
         #[cfg(windows)]
         let endpoint = format!(r"\\.\pipe\hyperhub-test-{}", std::process::id());
@@ -2565,6 +2935,7 @@ mod tests {
                     port: Some(443),
                 }],
                 legacy: Default::default(),
+                protection: None,
             });
             let config_json =
                 serde_json::to_string(&ConfigDocument::from_config(&updated)).unwrap();
@@ -2676,7 +3047,7 @@ mod tests {
         );
 
         let mut next = config.clone();
-        next.default_route.deny = true;
+        next.default_route.action = crate::config::RuleAction::Deny;
         next.debug = true;
         let config_json = serde_json::to_string(&ConfigDocument::from_config(&next)).unwrap();
         let proof = crate::session::config_update_proof(&[0; 32], &config_json).unwrap();
@@ -2706,7 +3077,7 @@ mod tests {
         let response = send_update(service.clone(), config_json.clone(), proof).await;
         assert!(matches!(response, ControlResponse::Ok));
         assert!(
-            runtime.snapshot().config.default_route.deny,
+            runtime.snapshot().config.default_route.action == crate::config::RuleAction::Deny,
             "hot update must replace the runtime snapshot"
         );
         assert!(audit.debug_enabled(), "hot update must toggle debug output");
@@ -2745,7 +3116,7 @@ mod tests {
             ControlResponse::Error { ref message } if message.contains("proof")
         ));
         assert!(
-            runtime.snapshot().config.default_route.deny,
+            runtime.snapshot().config.default_route.action == crate::config::RuleAction::Deny,
             "rejected update must keep the previous snapshot"
         );
         let snapshot = runtime.snapshot().config;

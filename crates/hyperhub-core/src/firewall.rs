@@ -18,6 +18,8 @@ pub struct FirewallSnapshotRule {
     pub id: String,
     pub action: FirewallAction,
     pub endpoints: Vec<FirewallSnapshotEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,6 +70,7 @@ pub struct FirewallDecision {
     pub action: FirewallAction,
     pub rule_id: Option<String>,
     pub source: FirewallDecisionSource,
+    pub protection: Option<String>,
 }
 
 pub fn decide(
@@ -93,6 +96,7 @@ pub fn decide(
                 action: rule.action,
                 rule_id: Some(rule.id.clone()),
                 source: FirewallDecisionSource::Rule,
+                protection: rule.protection.clone(),
             };
         }
     }
@@ -100,6 +104,7 @@ pub fn decide(
         action: snapshot.default_action.unwrap_or(FirewallAction::Pass),
         rule_id: None,
         source: FirewallDecisionSource::Default,
+        protection: None,
     }
 }
 
@@ -160,6 +165,7 @@ pub fn compile_snapshot(config: &Config, version: u64) -> Result<Option<Firewall
                 id: rule.id.clone(),
                 action: rule.action,
                 endpoints,
+                protection: rule.protection.clone(),
             },
         ));
     }
@@ -189,6 +195,7 @@ mod tests {
                 target: format!("{id}.example"),
                 port: None,
             }],
+            protection: None,
             legacy: Default::default(),
         }
     }
@@ -239,6 +246,7 @@ mod tests {
                 target: "*.example.com".into(),
                 port: Some(443),
             }],
+            protection: None,
             legacy: Default::default(),
         });
 
@@ -264,6 +272,7 @@ mod tests {
             rules: vec![FirewallSnapshotRule {
                 id: "allow-example".into(),
                 action: FirewallAction::Pass,
+                protection: None,
                 endpoints: vec![FirewallSnapshotEndpoint {
                     target: FirewallTarget::Domain {
                         host: "example.com".into(),

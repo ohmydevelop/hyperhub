@@ -5,6 +5,9 @@ use crate::config::{
 use crate::duplex::{bridge, prepare_transcript, CaptureConfig, PrefixedIo};
 use crate::inspect;
 use crate::policy::{ConnectionContext, PolicySnapshot, Protocol};
+use crate::protection::{
+    FindingKind, ProtectionConnectionState, ProtectionRequest, ProtectionSnapshot, ScanResult,
+};
 use crate::protocol::{run_stack, BoxedStream, HandlerContext};
 use crate::trust::TrustStore;
 use crate::websocket::{self, Compression};
@@ -159,17 +162,17 @@ impl TlsMitm {
     }
 }
 
-type CapturedBody = CaptureBody<Incoming>;
+type OutboundBody = UnsyncBoxBody<Bytes, io::Error>;
 
 enum RequestSender {
-    Http1(hyper::client::conn::http1::SendRequest<CapturedBody>),
-    Http2(hyper::client::conn::http2::SendRequest<CapturedBody>),
+    Http1(hyper::client::conn::http1::SendRequest<OutboundBody>),
+    Http2(hyper::client::conn::http2::SendRequest<OutboundBody>),
 }
 
 impl RequestSender {
     async fn send(
         &mut self,
-        request: Request<CapturedBody>,
+        request: Request<OutboundBody>,
     ) -> Result<Response<Incoming>, hyper::Error> {
         match self {
             Self::Http1(sender) => sender.send_request(request).await,
@@ -513,6 +516,7 @@ pub(crate) async fn serve_decrypted(
                 sender,
                 inner.config,
                 inner.policy,
+                inner.protection,
                 inner.audit,
                 inner.context,
                 outbound_origin_form,
@@ -629,6 +633,7 @@ where
         RequestSender::Http1(sender),
         inner.config,
         inner.policy,
+        inner.protection,
         inner.audit,
         inner.context,
         inner.upstream_tunneled,
@@ -741,7 +746,11 @@ where
     let mitm = inner.decision.plugins.iter().any(|plugin| {
         plugin.protocols.contains(&PluginProtocol::Http)
             || plugin.protocols.contains(&PluginProtocol::Ws)
-    });
+    }) || inner
+        .decision
+        .protection
+        .as_deref()
+        .is_some_and(|id| inner.protection.profile_enabled(id));
     if mitm {
         proxy_https(client, upstream, 0, inner).await
     } else {
@@ -1089,12 +1098,238 @@ fn content_type_header(headers: &hyper::HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+#[derive(Clone)]
+struct ActiveResponseProtection {
+    protection: Arc<ProtectionSnapshot>,
+    state: ProtectionConnectionState,
+    profile_id: String,
+    audit: AuditWriter,
+    context: ConnectionContext,
+    rule_id: Option<String>,
+    limit: usize,
+    content_encoding: Option<String>,
+}
+
+struct ProtectionBody<B> {
+    inner: B,
+    active: Option<ActiveResponseProtection>,
+    state: Mutex<ProtectionBodyState>,
+}
+
+struct ProtectionBodyState {
+    hash: Sha256,
+    bytes: Vec<u8>,
+    size: u64,
+    truncated: bool,
+    finished: bool,
+}
+
+impl<B> ProtectionBody<B> {
+    fn new(inner: B, active: Option<ActiveResponseProtection>) -> Self {
+        Self {
+            inner,
+            active,
+            state: Mutex::new(ProtectionBodyState {
+                hash: Sha256::new(),
+                bytes: Vec::new(),
+                size: 0,
+                truncated: false,
+                finished: false,
+            }),
+        }
+    }
+
+    fn capture(&self, data: &[u8]) {
+        let Some(active) = &self.active else {
+            return;
+        };
+        let mut state = self.state.lock().expect("protection body mutex poisoned");
+        state.hash.update(data);
+        state.size = state.size.saturating_add(data.len() as u64);
+        let remaining = active.limit.saturating_sub(state.bytes.len());
+        let count = remaining.min(data.len());
+        state.bytes.extend_from_slice(&data[..count]);
+        if count < data.len() {
+            state.truncated = true;
+        }
+    }
+
+    fn finish(&self) {
+        let Some(active) = &self.active else {
+            return;
+        };
+        let mut state = self.state.lock().expect("protection body mutex poisoned");
+        if state.finished {
+            return;
+        }
+        state.finished = true;
+        let full_hash = format!("{:x}", state.hash.clone().finalize());
+        let raw = std::mem::take(&mut state.bytes);
+        let size = state.size;
+        let truncated = state.truncated;
+        drop(state);
+        let (decoded, unscannable, decode_truncated) =
+            decode_for_scan(&raw, active.content_encoding.as_deref(), active.limit);
+        if let Some((source_id, mut scan)) = active.protection.observe_response(
+            &active.profile_id,
+            &active.state,
+            &decoded,
+            size,
+            truncated || decode_truncated,
+        ) {
+            scan.sha256 = full_hash;
+            if unscannable {
+                scan.add(FindingKind::UnscannableBody, 1);
+            }
+            active.audit.connection(
+                "external_input_scanned",
+                &active.context,
+                active.rule_id.as_deref(),
+                "observe",
+                "scanned",
+                None,
+                None,
+                Some(json!({
+                    "protection": active.profile_id,
+                    "source_id": source_id,
+                    "findings": scan.findings,
+                    "sha256": scan.sha256,
+                    "size": size,
+                    "scanned_size": scan.scanned_size,
+                    "truncated": scan.truncated,
+                    "unscannable": unscannable,
+                })),
+            );
+        }
+    }
+}
+
+impl<B> http_body::Body for ProtectionBody<B>
+where
+    B: http_body::Body + Unpin + Send + 'static,
+    B::Data: AsRef<[u8]>,
+{
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn is_end_stream(&self) -> bool {
+        let end = self.inner.is_end_stream();
+        if end {
+            self.finish();
+        }
+        end
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let poll = Pin::new(&mut self.inner).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(frame))) = &poll {
+            if let Some(data) = frame.data_ref() {
+                self.capture(data.as_ref());
+            }
+            if self.inner.is_end_stream() {
+                self.finish();
+            }
+        }
+        if matches!(&poll, Poll::Ready(None)) {
+            self.finish();
+        }
+        poll
+    }
+}
+
+fn empty_outbound_body() -> OutboundBody {
+    Full::new(Bytes::new())
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+fn full_outbound_body(bytes: Bytes) -> OutboundBody {
+    Full::new(bytes)
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+fn query_parameter_names(uri: &hyper::Uri) -> Vec<String> {
+    let mut names = uri
+        .query()
+        .into_iter()
+        .flat_map(|query| query.split('&'))
+        .filter_map(|part| part.split_once('=').map(|(name, _)| name).or(Some(part)))
+        .filter(|name| !name.is_empty())
+        .map(|name| name.chars().take(64).collect::<String>())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    names.truncate(32);
+    names
+}
+
+fn request_has_credentials(headers: &hyper::HeaderMap) -> bool {
+    ["authorization", "proxy-authorization", "cookie"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
+}
+
+fn content_length(headers: &hyper::HeaderMap) -> Option<u64> {
+    headers
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+}
+
+fn content_encoding(headers: &hyper::HeaderMap) -> Option<String> {
+    headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty() && value != "identity")
+}
+
+fn decode_for_scan(bytes: &[u8], encoding: Option<&str>, limit: usize) -> (Vec<u8>, bool, bool) {
+    use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+    use std::io::Read as _;
+
+    let Some(encoding) = encoding else {
+        return (bytes.to_vec(), false, false);
+    };
+    let mut output = Vec::new();
+    let result = match encoding {
+        "gzip" => GzDecoder::new(bytes)
+            .take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut output),
+        "deflate" => ZlibDecoder::new(bytes)
+            .take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut output)
+            .or_else(|_| {
+                output.clear();
+                DeflateDecoder::new(bytes)
+                    .take(limit.saturating_add(1) as u64)
+                    .read_to_end(&mut output)
+            }),
+        _ => return (Vec::new(), true, false),
+    };
+    if result.is_err() {
+        return (Vec::new(), true, false);
+    }
+    let truncated = output.len() > limit;
+    output.truncate(limit);
+    (output, false, truncated)
+}
+
 async fn serve_http<I>(
     io: TokioIo<I>,
     h2: bool,
     sender: RequestSender,
     config: Arc<Config>,
     policy: Arc<PolicySnapshot>,
+    protection: Arc<ProtectionSnapshot>,
     audit: AuditWriter,
     context: ConnectionContext,
     outbound_origin_form: bool,
@@ -1106,12 +1341,15 @@ where
     let body_capture: Arc<AsyncMutex<Option<HttpBodyCapture>>> = Arc::new(AsyncMutex::new(None));
     let service_audit = audit.clone();
     let service_context = context.clone();
+    let protection_state = protection.connection_state();
     let service_body_capture = body_capture.clone();
     let origin_form = outbound_origin_form;
-    let service = service_fn(move |mut request: Request<Incoming>| {
+    let service = service_fn(move |request: Request<Incoming>| {
         let sender = sender.clone();
         let config = config.clone();
         let policy = policy.clone();
+        let protection = protection.clone();
+        let protection_state = protection_state.clone();
         let audit = service_audit.clone();
         let context = service_context.clone();
         let body_capture = service_body_capture.clone();
@@ -1138,6 +1376,209 @@ where
             let ws_event_audit = decision.plugins.audit_for(PluginProtocol::Ws).is_some();
             let request_path = crate::audit::redact_path(request.uri().path()).to_string();
             let git = git_smart;
+            let upgrade_protocol = requested_upgrade_protocol(&request);
+            let is_upgrade =
+                upgrade_protocol.is_some() || http2_subprotocol(&request) == Some("websocket");
+            let query_names = query_parameter_names(request.uri());
+            let original_content_type = content_type_header(request.headers());
+            let original_content_length = content_length(request.headers());
+            let original_content_encoding = content_encoding(request.headers());
+            let credential_present = request_has_credentials(request.headers());
+            let mut request = request.map(|body| {
+                body.map_err(|error| io::Error::other(error.to_string()))
+                    .boxed_unsync()
+            });
+
+            if decision.deny {
+                if http_event_audit {
+                    audit.connection(
+                        "http_request",
+                        &request_context,
+                        decision.rule_id.as_deref(),
+                        "deny",
+                        "denied",
+                        None,
+                        None,
+                        Some(json!({
+                            "method": method,
+                            "path": request_path,
+                            "reason": "route_policy",
+                        })),
+                    );
+                }
+                return Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header("content-type", "text/plain; charset=utf-8")
+                    .body(full_body(b"request denied by HyperHub\n"))
+                    .map_err(io::Error::other);
+            }
+
+            let protection_profile = decision
+                .protection
+                .as_deref()
+                .filter(|id| protection.profile_enabled(id))
+                .map(str::to_owned);
+            let mut protection_scan = ScanResult::default();
+            let mut body_complete = request.body().is_end_stream();
+            let mut unscannable = false;
+            if let Some(profile_id) = protection_profile.as_deref() {
+                if !is_upgrade {
+                    if let Some(limit) = protection.max_scan_bytes(profile_id) {
+                        let known_size =
+                            original_content_length.or_else(|| request.body().size_hint().exact());
+                        if request.body().is_end_stream() {
+                            protection_scan = protection.scan_request(
+                                profile_id,
+                                &protection_state,
+                                &[],
+                                known_size,
+                                true,
+                                false,
+                            );
+                        } else if known_size.is_some_and(|size| size <= limit as u64) {
+                            let body = std::mem::replace(request.body_mut(), empty_outbound_body());
+                            let collected = body.collect().await.map_err(io::Error::other)?;
+                            let bytes = collected.to_bytes();
+                            let (decoded, decode_failed, decode_truncated) = decode_for_scan(
+                                &bytes,
+                                original_content_encoding.as_deref(),
+                                limit,
+                            );
+                            unscannable = decode_failed;
+                            body_complete = !decode_truncated;
+                            protection_scan = protection.scan_request(
+                                profile_id,
+                                &protection_state,
+                                &decoded,
+                                Some(bytes.len() as u64),
+                                body_complete,
+                                unscannable,
+                            );
+                            if decode_truncated {
+                                protection_scan.add(FindingKind::OversizedBody, 1);
+                            }
+                            *request.body_mut() = full_outbound_body(bytes);
+                        } else {
+                            body_complete = false;
+                            protection_scan = protection.scan_request(
+                                profile_id,
+                                &protection_state,
+                                &[],
+                                known_size,
+                                false,
+                                original_content_encoding.is_some(),
+                            );
+                            protection_scan.add(FindingKind::OversizedBody, 1);
+                            unscannable = original_content_encoding.is_some();
+                        }
+                    }
+                }
+
+                let protection_request = ProtectionRequest {
+                    context: request_context.clone(),
+                    rule_id: decision.rule_id.clone(),
+                    method: method.clone(),
+                    host: request_context.destination.authority_host(),
+                    path: request_path.clone(),
+                    query_names: query_names.clone(),
+                    content_type: original_content_type.clone(),
+                    content_length: original_content_length,
+                    credential_present,
+                    allow_sensitive_upload: decision.allow_sensitive_upload,
+                    body_complete,
+                    unscannable,
+                    scan: protection_scan.clone(),
+                    stage: "http_request".into(),
+                    command: Vec::new(),
+                    features: Vec::new(),
+                };
+                if protection_scan.high_confidence_secret() {
+                    audit.connection(
+                        "sensitive_upload_detected",
+                        &request_context,
+                        decision.rule_id.as_deref(),
+                        "inspect",
+                        "detected",
+                        None,
+                        None,
+                        Some(json!({
+                            "protection": profile_id,
+                            "findings": protection_scan.findings,
+                            "sha256": protection_scan.sha256,
+                            "scanned_size": protection_scan.scanned_size,
+                            "allow_sensitive_upload": decision.allow_sensitive_upload,
+                        })),
+                    );
+                }
+                if protection_scan.provenance_matches > 0 {
+                    audit.connection(
+                        "provenance_match",
+                        &request_context,
+                        decision.rule_id.as_deref(),
+                        "inspect",
+                        "matched",
+                        None,
+                        None,
+                        Some(json!({
+                            "protection": profile_id,
+                            "matches": protection_scan.provenance_matches,
+                            "source_ids": protection_scan.source_ids,
+                        })),
+                    );
+                }
+                let outcome = protection.evaluate(profile_id, &protection_request).await;
+                audit.connection(
+                    "intelligent_protection_decision",
+                    &request_context,
+                    decision.rule_id.as_deref(),
+                    if outcome.deny { "deny" } else { "pass" },
+                    if outcome.would_deny {
+                        "risk_detected"
+                    } else {
+                        "clear"
+                    },
+                    None,
+                    None,
+                    Some(json!({
+                        "protection": profile_id,
+                        "mode": protection.profile_mode(profile_id),
+                        "findings": protection_scan.findings,
+                        "sha256": protection_scan.sha256,
+                        "scanned_size": protection_scan.scanned_size,
+                        "total_size": protection_scan.total_size,
+                        "truncated": protection_scan.truncated,
+                        "provenance_matches": protection_scan.provenance_matches,
+                        "source_ids": protection_scan.source_ids,
+                        "local_deny": outcome.local_deny,
+                        "would_deny": outcome.would_deny,
+                        "reason": outcome.reason,
+                        "input_sha256": outcome.input_sha256,
+                        "provider": outcome.provider,
+                    })),
+                );
+                if outcome.deny {
+                    audit.connection(
+                        "request_blocked",
+                        &request_context,
+                        decision.rule_id.as_deref(),
+                        "deny",
+                        "denied",
+                        None,
+                        None,
+                        Some(json!({
+                            "protection": profile_id,
+                            "source": if outcome.local_deny { "data_protection" } else { "intelligence" },
+                            "reason": outcome.reason,
+                        })),
+                    );
+                    return Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .header("content-type", "text/plain; charset=utf-8")
+                        .body(full_body(b"request denied by HyperHub\n"))
+                        .map_err(io::Error::other);
+                }
+            }
+
             let credential = decision.plugins.credential_for(PluginProtocol::Http);
             let injected = resolve_credential_injection(credential, git_http)?;
             apply_credential_headers(request.headers_mut(), &injected);
@@ -1157,9 +1598,6 @@ where
             }
             // 升级请求（WebSocket / h2 extended CONNECT）不归 HTTP body 捕获：
             // 升级后数据由 WS 层按 websocket_capture 独立决定，capture_body 不兜底。
-            let upgrade_protocol = requested_upgrade_protocol(&request);
-            let is_upgrade =
-                upgrade_protocol.is_some() || http2_subprotocol(&request) == Some("websocket");
             // 连接级捕获配置：首个请求按审计 profile 惰性初始化一次。
             let mut capture_guard = body_capture.lock().await;
             if capture_guard.is_none() {
@@ -1171,14 +1609,14 @@ where
             }
             let capture = capture_guard.clone();
             drop(capture_guard);
-            let capture_enabled = capture.is_some() && !is_upgrade && !decision.deny;
+            let capture_enabled = capture.is_some() && !is_upgrade;
             let capture_upload =
                 capture_enabled && capture.as_ref().is_some_and(|value| value.client_upload);
             let capture_response =
                 capture_enabled && capture.as_ref().is_some_and(|value| value.server_response);
             let detail = json!({
                 "method": request.method().as_str(),
-                "path": crate::audit::redact_path(request.uri().path()),
+                "path": request_path,
                 "http_version": format!("{:?}", request.version()),
                 "http2_subprotocol": http2_subprotocol(&request),
                 "upgrade_protocol": upgrade_protocol.as_deref(),
@@ -1202,29 +1640,11 @@ where
                     .iter()
                     .map(|plugin| plugin.id.as_str())
                     .collect::<Vec<_>>(),
+                "protection": protection_profile.as_deref(),
                 "body_capture": capture_enabled,
                 "body_capture_client_upload": capture_upload,
                 "body_capture_server_response": capture_response,
             });
-            if decision.deny {
-                if http_event_audit {
-                    audit.connection(
-                        "http_request",
-                        &request_context,
-                        decision.rule_id.as_deref(),
-                        "deny",
-                        "denied",
-                        None,
-                        None,
-                        Some(detail),
-                    );
-                }
-                return Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .header("content-type", "text/plain; charset=utf-8")
-                    .body(full_body(b"request denied by HyperHub\n"))
-                    .map_err(io::Error::other);
-            }
             // 请求体捕获：包裹 body 流式转发并落盘；空 body 直接补一条空记录。
             let capture_sequence = capture
                 .as_ref()
@@ -1252,7 +1672,8 @@ where
                     }
                 }
             }
-            let mut request = request.map(|body| CaptureBody::new(body, active));
+            let body = std::mem::replace(request.body_mut(), empty_outbound_body());
+            *request.body_mut() = CaptureBody::new(body, active).boxed_unsync();
             let upgrade_version = request.version();
             let client_upgrade = upgrade_protocol
                 .as_ref()
@@ -1338,7 +1759,26 @@ where
                     }
                 }
             }
-            let mut response = response.map(|body| CaptureBody::new(body, response_active));
+            let response_protection = protection_profile.as_ref().and_then(|profile_id| {
+                if is_upgrade {
+                    return None;
+                }
+                protection
+                    .max_scan_bytes(profile_id)
+                    .map(|limit| ActiveResponseProtection {
+                        protection: protection.clone(),
+                        state: protection_state.clone(),
+                        profile_id: profile_id.clone(),
+                        audit: audit.clone(),
+                        context: request_context.clone(),
+                        rule_id: decision.rule_id.clone(),
+                        limit,
+                        content_encoding: content_encoding(response.headers()),
+                    })
+            });
+            let mut response = response.map(|body| {
+                ProtectionBody::new(CaptureBody::new(body, response_active), response_protection)
+            });
             if let (Some(protocol), Some(client_upgrade)) = (upgrade_protocol, client_upgrade) {
                 if accepts_upgrade(&response, upgrade_version, &protocol) {
                     let upstream_upgrade = hyper::upgrade::on(&mut response);
@@ -1938,7 +2378,10 @@ fn resolve_credential_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PluginConfig, PluginKind, PluginProtocol, RouteEndpoint, RouteRule};
+    use crate::config::{
+        DataProtectionConfig, PluginConfig, PluginKind, PluginProtocol, ProtectionMode,
+        ProtectionProfile, RouteEndpoint, RouteRule,
+    };
     use crate::policy::{Destination, ProcessInfo, Protocol};
     use crate::session::SessionRegistry;
     use http_body_util::Empty;
@@ -1972,6 +2415,7 @@ mod tests {
             host: host.into(),
             mitm,
             ssh_mitm_key: Arc::new(crate::ssh_mitm::server_key_from_master(b"test")),
+            protection: Arc::new(crate::protection::ProtectionSnapshot::compile(&config).unwrap()),
             config,
             policy,
             audit: AuditWriter::open(None).unwrap(),
@@ -1999,12 +2443,14 @@ mod tests {
             enabled: true,
             priority: 1,
             endpoints: route_endpoints(&["localhost"]),
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
             plugins: vec!["audit".into()],
             legacy: Default::default(),
+            protection: None,
+            allow_sensitive_upload: false,
         });
         config
     }
@@ -3239,12 +3685,14 @@ mod tests {
                 enabled: true,
                 priority: 1,
                 endpoints: route_endpoints(&["localhost"]),
-                deny: false,
+                action: crate::config::RuleAction::Smart,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream: None,
                 plugins: vec!["http-header".into()],
                 legacy: Default::default(),
+                protection: None,
+                allow_sensitive_upload: false,
             });
             let config = Arc::new(config);
             let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());
@@ -3448,12 +3896,14 @@ mod tests {
                 priority: 100,
                 // URL 形式 target 的路径前缀限定只有 /private 命中凭证注入。
                 endpoints: route_endpoints(&["localhost/private"]),
-                deny: false,
+                action: crate::config::RuleAction::Pass,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream: None,
                 plugins: vec!["path-token".into()],
                 legacy: Default::default(),
+                protection: None,
+                allow_sensitive_upload: false,
             });
             let config = Arc::new(config);
             let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());
@@ -3547,12 +3997,14 @@ mod tests {
                 priority: 100,
                 // URL 形式 target 的路径前缀限定只有 /blocked 被拒绝。
                 endpoints: route_endpoints(&["localhost/blocked"]),
-                deny: true,
+                action: crate::config::RuleAction::Deny,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream: None,
                 plugins: vec![],
                 legacy: Default::default(),
+                protection: None,
+                allow_sensitive_upload: false,
             });
             let config = Arc::new(config);
             let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());
@@ -3609,6 +4061,108 @@ mod tests {
         client.read_exact(&mut body).await.unwrap();
         assert_eq!(&body, b"ok");
 
+        origin_task.await.unwrap();
+        proxy_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn data_protection_blocks_token_upload_before_upstream_send() {
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let origin_task = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.unwrap();
+            let mut byte = [0u8; 1];
+            match timeout(Duration::from_millis(500), stream.read(&mut byte)).await {
+                Err(_) | Ok(Ok(0)) => {}
+                Ok(Ok(_)) => panic!("blocked upload reached upstream"),
+                Ok(Err(error)) => panic!("origin read failed: {error}"),
+            }
+        });
+
+        let ingress = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ingress_address = ingress.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (client, _) = ingress.accept().await.unwrap();
+            let upstream = TcpStream::connect(origin_address).await.unwrap();
+            let mut config = Config::default();
+            config.protections.push(ProtectionProfile {
+                uuid: crate::config::new_config_uuid(),
+                id: "egress".into(),
+                enabled: true,
+                mode: ProtectionMode::Enforce,
+                data: DataProtectionConfig {
+                    enabled: true,
+                    ..DataProtectionConfig::default()
+                },
+                intelligence: Default::default(),
+            });
+            config.rules.push(RouteRule {
+                uuid: crate::config::new_config_uuid(),
+                id: "protected".into(),
+                enabled: true,
+                priority: 100,
+                endpoints: route_endpoints(&["localhost"]),
+                action: crate::config::RuleAction::Smart,
+                rewrite_host: None,
+                rewrite_port: None,
+                upstream: None,
+                plugins: vec![],
+                protection: Some("egress".into()),
+                allow_sensitive_upload: false,
+                legacy: Default::default(),
+            });
+            config.validate().unwrap();
+            let config = Arc::new(config);
+            let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());
+            let context = ConnectionContext {
+                session_id: "protected-upload".into(),
+                connection_id: 21,
+                process: ProcessInfo {
+                    pid: 1,
+                    tid: 1,
+                    executable: "agent".into(),
+                },
+                destination: Destination {
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    port: origin_address.port(),
+                    hostnames: vec!["localhost".into()],
+                },
+                protocol: Protocol::Http,
+            };
+            proxy_http(
+                client,
+                upstream,
+                handler_context(
+                    "localhost",
+                    TlsMitm::generate().unwrap(),
+                    config,
+                    policy,
+                    context,
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let body = format!("ghp_{}", "a".repeat(30)).into_bytes();
+        let mut client = TcpStream::connect(ingress_address).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "POST /collect HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        client.write_all(&body).await.unwrap();
+        let denied = String::from_utf8(read_headers(&mut client).await).unwrap();
+        assert!(denied.contains("403 Forbidden"));
+        let mut denied_body = vec![0; b"request denied by HyperHub\n".len()];
+        client.read_exact(&mut denied_body).await.unwrap();
+        assert_eq!(&denied_body, b"request denied by HyperHub\n");
+        client.shutdown().await.unwrap();
         origin_task.await.unwrap();
         proxy_task.await.unwrap();
     }
@@ -3676,12 +4230,14 @@ mod tests {
                 enabled: true,
                 priority: 1,
                 endpoints: route_endpoints(&["localhost"]),
-                deny: false,
+                action: crate::config::RuleAction::Pass,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream: None,
                 plugins: vec!["websocket".into()],
                 legacy: Default::default(),
+                protection: None,
+                allow_sensitive_upload: false,
             });
             let config = Arc::new(config);
             let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());
@@ -3887,12 +4443,14 @@ mod tests {
                 enabled: true,
                 priority: 1,
                 endpoints: route_endpoints(&["localhost"]),
-                deny: false,
+                action: crate::config::RuleAction::Pass,
                 rewrite_host: None,
                 rewrite_port: None,
                 upstream: None,
                 plugins: vec!["body".into()],
                 legacy: Default::default(),
+                protection: None,
+                allow_sensitive_upload: false,
             });
             let config = Arc::new(config);
             let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());
@@ -4084,6 +4642,7 @@ mod tests {
             });
             let config = Arc::new(Config::default());
             let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());
+            let protection = Arc::new(ProtectionSnapshot::compile(&config).unwrap());
             let context = ConnectionContext {
                 session_id: "extended-connect-test".into(),
                 connection_id: 13,
@@ -4105,6 +4664,7 @@ mod tests {
                 RequestSender::Http2(sender),
                 config,
                 policy,
+                protection,
                 AuditWriter::open(None).unwrap(),
                 context,
                 false,
@@ -4417,12 +4977,14 @@ mod tests {
             enabled: true,
             priority: 1,
             endpoints: route_endpoints(&["localhost"]),
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
             plugins: vec!["shared".into()],
             legacy: Default::default(),
+            protection: None,
+            allow_sensitive_upload: false,
         });
         let config = Arc::new(config);
         let policy = Arc::new(PolicySnapshot::compile(&config).unwrap());

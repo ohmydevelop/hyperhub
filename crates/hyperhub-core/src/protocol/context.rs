@@ -7,6 +7,7 @@ use crate::audit::AuditWriter;
 use crate::config::Config;
 use crate::http::TlsMitm;
 use crate::policy::{ConnectionContext, PolicySnapshot, RouteDecision};
+use crate::protection::ProtectionSnapshot;
 use crate::session::SessionRegistry;
 use std::io;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ pub(crate) struct HandlerContext {
     pub ssh_mitm_key: Arc<russh::keys::PrivateKey>,
     pub config: Arc<Config>,
     pub policy: Arc<PolicySnapshot>,
+    pub protection: Arc<ProtectionSnapshot>,
     pub audit: AuditWriter,
     pub context: ConnectionContext,
     pub decision: RouteDecision,

@@ -706,6 +706,13 @@ fn is_config_item_path(tokens: &[String]) -> bool {
                         | ("routing", "routes")
                         | ("trust", "tls_certificates")
                         | ("trust", "ssh_host_keys")))
+        || matches!(tokens, [gateway, collection, _]
+            if gateway == "gateway" && collection == "protections")
+        || matches!(tokens, [gateway, collection, _, intelligence, provider]
+            if gateway == "gateway"
+                && collection == "protections"
+                && intelligence == "intelligence"
+                && provider == "provider")
         || matches!(tokens, [sandbox, area, rules, _]
             if sandbox == "sandbox"
                 && matches!(area.as_str(), "network" | "file" | "process")
@@ -1610,11 +1617,13 @@ mod tests {
             enabled: true,
             priority: 1,
             endpoints: Vec::new(),
-            deny: false,
+            action: hyperhub_core::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
             plugins: Vec::new(),
+            protection: None,
+            allow_sensitive_upload: false,
             legacy: Default::default(),
         });
         let existing = config.rules[0].uuid.clone();

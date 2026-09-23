@@ -34,6 +34,7 @@ toml = "0.8"
 webpki-roots = "1"
 x509-parser = { version = "0.18", features = ["verify"] }
 zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

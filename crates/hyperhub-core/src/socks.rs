@@ -525,6 +525,7 @@ impl SocksService {
         let runtime = self.runtime.snapshot();
         let config = runtime.config;
         let policy = runtime.policy;
+        let protection = runtime.protection;
         let firewall = compile_firewall_snapshot(&config, runtime.updated_at_ms)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         if let Some(snapshot) = firewall.as_ref() {
@@ -560,8 +561,113 @@ impl SocksService {
                 );
                 return Ok(());
             }
+            if firewall_decision.action != crate::config::FirewallAction::Deny {
+                if let Some(profile_id) = firewall_decision.protection.as_deref() {
+                    let destination = requested
+                        .hostnames
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| requested.ip.to_string());
+                    let outcome = protection
+                        .evaluate_agent(
+                            profile_id,
+                            &session.session_id,
+                            session.pid,
+                            &session.executable,
+                            "network_connect",
+                            vec![format!("{destination}:{}", requested.port)],
+                            vec!["network_egress".into()],
+                            serde_json::json!({
+                                "destination_authorized": false,
+                                "hostname": requested.hostnames.first(),
+                                "ip": requested.ip,
+                                "port": requested.port,
+                            }),
+                        )
+                        .await;
+                    let provider = outcome
+                        .provider
+                        .as_ref()
+                        .filter(|item| item.error.is_none());
+                    let action = if outcome.deny { "deny" } else { "pass" };
+                    self.audit.session_event(
+                        "smart_protection_decision",
+                        &session.session_id,
+                        Some(session.pid),
+                        Some(&session.executable),
+                        json!({
+                            "protection": profile_id,
+                            "rule_id": firewall_decision.rule_id,
+                            "stage": "network_connect",
+                            "action": action,
+                            "reason": outcome.reason,
+                            "features": ["network_egress"],
+                            "risk_level": provider.and_then(|item| item.risk_level.clone()),
+                            "confidence": provider.and_then(|item| item.confidence),
+                            "destructive_probability": provider.and_then(|item| item.destructive_probability),
+                            "blast_radius": provider.and_then(|item| item.blast_radius),
+                            "cache_hit": provider.is_some_and(|item| item.cache_hit),
+                            "reporter": "gateway-firewall",
+                        }),
+                    );
+                    if outcome.deny {
+                        active.update(
+                            &requested,
+                            context.protocol,
+                            firewall_decision.rule_id.as_deref(),
+                            "deny",
+                            None,
+                            None,
+                            "smart-firewall-denied",
+                        );
+                        write_reply(&mut client, 2).await?;
+                        return Ok(());
+                    }
+                }
+            }
         }
         let mut decision = policy.decide(&context);
+        if decision.smart {
+            if let Some(profile_id) = decision.protection.as_deref() {
+                let destination = requested
+                    .hostnames
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| requested.ip.to_string());
+                let outcome = protection
+                    .evaluate_agent(
+                        profile_id,
+                        &session.session_id,
+                        session.pid,
+                        &session.executable,
+                        "route_connect",
+                        vec![format!("{destination}:{}", requested.port)],
+                        vec!["smart_route".into()],
+                        json!({
+                            "destination_authorized": false,
+                            "hostname": requested.hostnames.first(),
+                            "ip": requested.ip,
+                            "port": requested.port,
+                        }),
+                    )
+                    .await;
+                self.audit.session_event(
+                    "smart_protection_decision",
+                    &session.session_id,
+                    Some(session.pid),
+                    Some(&session.executable),
+                    json!({
+                        "protection": profile_id,
+                        "rule_id": decision.rule_id,
+                        "stage": "route_connect",
+                        "action": if outcome.deny { "deny" } else { "pass" },
+                        "reason": outcome.reason,
+                        "provider": outcome.provider,
+                    }),
+                );
+                decision.deny = outcome.deny;
+            }
+        }
         active.update(
             &decision.destination,
             context.protocol,
@@ -1083,6 +1189,7 @@ impl SocksService {
             ssh_mitm_key: self.ssh_mitm_key.clone(),
             config: config.clone(),
             policy: policy.clone(),
+            protection: protection.clone(),
             audit: self.audit.clone(),
             context,
             decision,
@@ -1517,12 +1624,14 @@ mod tests {
                 target: "http://localhost/probe".into(),
                 port: Some(origin_address.port()),
             }],
-            deny: false,
+            action: crate::config::RuleAction::Pass,
             rewrite_host: None,
             rewrite_port: None,
             upstream: None,
             plugins: vec!["credential".into()],
             legacy: Default::default(),
+            protection: None,
+            allow_sensitive_upload: false,
         });
         config.validate().unwrap();
         let service =
