@@ -252,8 +252,7 @@ fn patch_config(patch_path: &Path) -> Result<i32, String> {
     if prepared.changes.is_empty() {
         return Err("JSON patch does not change the configuration".into());
     }
-    let requests = build_approval_requests(&patch)?;
-    let request_descriptions = describe_request_sequence(&path, &planning, &requests)?;
+    let (requests, request_descriptions) = prepare_approval_sequence(&path, &planning, &patch)?;
     let queue = ApprovalQueue {
         schema_version: APPROVAL_QUEUE_SCHEMA,
         proposal_token: prepared.approval_token.clone(),
@@ -758,6 +757,49 @@ fn build_approval_requests(patch: &Value) -> Result<Vec<ApprovalRequest>, String
         return Err("trailing test operations must precede a configuration request".into());
     }
     Ok(requests)
+}
+
+fn build_atomic_approval_request(patch: &Value) -> Result<Vec<ApprovalRequest>, String> {
+    let operations = patch
+        .as_array()
+        .ok_or("JSON patch must be an array of operations")?;
+    if !operations.iter().any(|operation| {
+        matches!(
+            operation.get("op").and_then(Value::as_str),
+            Some("add" | "replace" | "remove")
+        )
+    }) {
+        return Err("JSON patch contains no configuration requests".into());
+    }
+    Ok(vec![ApprovalRequest {
+        uuid: new_uuid(),
+        source_index: operations.len().saturating_sub(1),
+        operations: operations.to_vec(),
+        edited: false,
+    }])
+}
+
+fn prepare_approval_sequence(
+    path: &Path,
+    current: &Config,
+    patch: &Value,
+) -> Result<(Vec<ApprovalRequest>, Vec<ConfigChangeDescription>), String> {
+    let requests = build_approval_requests(patch)?;
+    match describe_request_sequence(path, current, &requests) {
+        Ok(descriptions) => Ok((requests, descriptions)),
+        Err(granular_error) if requests.len() > 1 => {
+            let atomic_requests = build_atomic_approval_request(patch)?;
+            let descriptions = describe_request_sequence(path, current, &atomic_requests).map_err(
+                |atomic_error| {
+                    format!(
+                        "configuration requests are not independently valid ({granular_error}); atomic approval also failed: {atomic_error}"
+                    )
+                },
+            )?;
+            Ok((atomic_requests, descriptions))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn describe_request_sequence(
@@ -1654,6 +1696,55 @@ mod tests {
         assert_eq!(requests[0].operations.len(), 2);
         assert_eq!(requests[1].source_index, 2);
         assert_eq!(requests[1].operations.len(), 1);
+    }
+
+    #[test]
+    fn referenced_id_renames_fall_back_to_one_atomic_approval_request() {
+        use hyperhub_core::config::{
+            DataProtectionConfig, IntelligenceProtectionConfig, ProcessSandboxPattern,
+            ProcessSandboxRule, ProtectionMode, ProtectionProfile, SandboxAction,
+        };
+
+        let path = std::env::temp_dir().join("hyperhub-atomic-approval-test.bin");
+        let profile_uuid = hyperhub_core::config::new_config_uuid();
+        let rule_uuid = hyperhub_core::config::new_config_uuid();
+        let mut config = Config::default();
+        config.apply_managed_audit_paths(&path);
+        config.protections.push(ProtectionProfile {
+            uuid: profile_uuid.clone(),
+            id: "old-profile".into(),
+            enabled: true,
+            mode: ProtectionMode::Enforce,
+            data: DataProtectionConfig::default(),
+            intelligence: IntelligenceProtectionConfig::default(),
+        });
+        config.sandbox.process.enabled = true;
+        config.sandbox.process.rules.push(ProcessSandboxRule {
+            uuid: rule_uuid.clone(),
+            id: "process-rule".into(),
+            enabled: true,
+            priority: 100,
+            action: SandboxAction::Smart,
+            patterns: vec![ProcessSandboxPattern {
+                enabled: true,
+                executable: ".*".into(),
+                command_line: ".*".into(),
+            }],
+            protection: Some("old-profile".into()),
+            legacy: Default::default(),
+        });
+
+        let patch = json!([
+            {"op": "test", "path": "/gateway/protections/0/uuid", "value": profile_uuid},
+            {"op": "test", "path": "/sandbox/process/rules/0/uuid", "value": rule_uuid},
+            {"op": "replace", "path": "/gateway/protections/0/id", "value": "new-profile"},
+            {"op": "replace", "path": "/sandbox/process/rules/0/protection", "value": "new-profile"}
+        ]);
+        let (requests, descriptions) = prepare_approval_sequence(&path, &config, &patch).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].operations.len(), 4);
+        assert_eq!(descriptions.len(), 1);
+        assert!(descriptions[0].summary.contains("智能防护"));
     }
 
     #[test]
