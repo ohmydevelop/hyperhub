@@ -39,6 +39,7 @@
 - 整体替换现有对象时必须保留原 UUID；不得复制其他对象的 UUID。
 - 真实敏感值只能使用审批占位符：`{"value":"${APPROVE:meaningful-name}"}`。
 - `config patch` 不需要密码；它只提交禁止包含真实 Secret 的 Proposal。真实 Secret、Provider API Key 和私钥只能在人工 `approve` 时输入。
+- 如果修改被规则引用的 ID（例如 `/gateway/protections/0/id`），必须在同一 Patch 中同步更新所有 `protection`/引用字段，并使用 UUID `test` 保护每个修改对象。CLI 会在拆分请求无法独立校验时自动合并为一个原子审批请求；`request_count: 1` 表示该原子请求，不要把它拆成多个 Patch。
 
 ## 环境变量
 

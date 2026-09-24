@@ -65,6 +65,8 @@ hyperhub logs --lines 100
 
 7. `config patch` 不需要密码，只写入权限受限且禁止包含真实 Secret 的待审批 Proposal，不直接应用配置。已有未完成 Proposal 时不要用不同 Patch 覆盖它。
 
+8. Profile ID 重命名或其它被规则引用的 ID 变更，必须在同一个 Patch 中同步修改所有引用，并为每个被修改对象添加 UUID `test`。CLI 会先尝试按变更拆分审批请求；如果拆分后的中间配置无法独立校验，会自动降级为一个原子审批请求。此时看到 `status: approval_required` 且 `request_count: 1` 是预期结果，不要手工拆分 Patch。
+
 提交后必须明确告知用户：Agent 已提交 Patch，用户需要在真实终端运行 `hyperhub approve`。不要只给审批命令而省略 Patch 提交结果。
 
 ## 智能防护
@@ -90,6 +92,8 @@ hyperhub logs --lines 100
 5. 用户运行 `approve`，审核语义化变更并填写 API Key；
 6. 用户批准后运行 `validate`、`show`、`status --json`，必要时查看 `logs` 和审计事件；
 7. 只有用户确认观测结果后，才提交把 Profile 切换为 `enforce` 的第二次变更。
+
+重命名 Profile 时，审批完成后必须重新运行 `show`，确认 Profile ID 与所有路由、文件、网络和子进程规则的 `protection` 引用一致。
 
 ## 人工审批边界
 
