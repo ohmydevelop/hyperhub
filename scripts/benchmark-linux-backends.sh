@@ -569,6 +569,11 @@ os.close(master)
 if process.returncode != 0:
     raise SystemExit(f"approve failed with {process.returncode}")
 PYCODE
+# The ptrace supervisor refreshes the sandbox snapshot on a bounded polling
+# interval. Give the successful live update one refresh interval before
+# issuing the first post-update syscall; otherwise this assertion can race
+# the supervisor and report a false regression.
+sleep 0.5
 printf 'read\n' >&9
 wait_for_hot_line '^read:denied:' 1
 printf 'held-read\n' >&9
