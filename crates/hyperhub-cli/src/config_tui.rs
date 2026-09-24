@@ -4682,7 +4682,6 @@ fn detail_lines(app: &App) -> Vec<String> {
                 format!("代理              {} 个", app.config.upstreams.len()),
                 format!("凭证              {credentials} 个"),
                 format!("审计              {audits} 个"),
-                format!("智能防护          {} 个", app.config.protections.len()),
                 format!("路由              {routes} 条（含已启用默认路由）"),
                 format!("证书              {certificates} 项"),
             ]
@@ -8688,6 +8687,23 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn gateway_overview_does_not_duplicate_protection_category() {
+        let mut app = test_app();
+        app.category = CATEGORY_PROTECTION;
+        add_selected(&mut app);
+        app.editor = None;
+        let protection_id = app.config.protections[0].id.clone();
+        let protection_lines = detail_lines(&app);
+        assert!(protection_lines
+            .iter()
+            .any(|line| line.contains(&protection_id)));
+        app.category = CATEGORY_GATEWAY;
+
+        let lines = detail_lines(&app);
+        assert!(lines.iter().all(|line| !line.contains("智能防护")));
     }
 
     #[test]

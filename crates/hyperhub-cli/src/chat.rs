@@ -128,7 +128,7 @@ fn run_tui(path: &Path, password: &Zeroizing<String>, config: &mut Config) -> Re
                     }
                     app.messages.push(ChatMessage::user(query.clone()));
                     app.busy = true;
-                    app.status = "Needle 3 正在本地处理…".into();
+                    app.status = "正在本地处理…".into();
                     terminal
                         .draw(|frame| draw(frame, &app))
                         .map_err(|error| error.to_string())?;
@@ -248,7 +248,7 @@ impl ChatApp {
         Self {
             path,
             messages: vec![ChatMessage::assistant(
-                "我是 HyperHub 的本地配置助手。Needle 3 模型和推理引擎均嵌入当前二进制；你可以直接输入令牌、密码和其他敏感配置。识别出的变更会立即校验、加密保存，并在 Serve 运行时热更新，不进入 approve 队列。".into(),
+                "我是 HyperHub 的本地配置助手。你可以直接输入令牌、密码和其他敏感配置。识别出的变更会立即校验、加密保存，并在 Serve 运行时热更新，不进入 approve 队列。".into(),
             )],
             input: String::new(),
             cursor: 0,
@@ -301,7 +301,7 @@ fn draw(frame: &mut Frame, app: &ChatApp) {
         centered(rows[0], 110),
     );
     frame.render_widget(
-        Paragraph::new("Needle 3 · local")
+        Paragraph::new("本地模式")
             .style(Style::default().fg(muted))
             .alignment(Alignment::Right),
         centered(rows[0], 110),
@@ -539,7 +539,7 @@ fn process_turn(
             .unwrap_or("我没有识别出可执行的配置操作。请明确说明要新增、修改或删除的配置项。")
             .to_owned();
         if let Some(confidence) = envelope.confidence {
-            answer.push_str(&format!("\n\n本地模型置信度：{:.1}%", confidence * 100.0));
+            answer.push_str(&format!("\n\n判定置信度：{:.1}%", confidence * 100.0));
         }
         return Ok(answer);
     }
@@ -572,7 +572,7 @@ fn process_turn(
         answer.push_str(&format!("- {summary}\n"));
     }
     if let Some(confidence) = envelope.confidence {
-        answer.push_str(&format!("\n本地模型置信度：{:.1}%", confidence * 100.0));
+        answer.push_str(&format!("\n判定置信度：{:.1}%", confidence * 100.0));
     }
     Ok(answer.trim_end().to_owned())
 }
@@ -619,10 +619,10 @@ impl NeedleSession {
         write_private(&system_path, system.as_bytes(), false)?;
 
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .map_err(|error| format!("cannot reserve Needle 3 port: {error}"))?;
+            .map_err(|error| format!("cannot reserve local assistant port: {error}"))?;
         let address = match listener.local_addr().map_err(|error| error.to_string())? {
             std::net::SocketAddr::V4(address) => address,
-            _ => return Err("Needle 3 requires an IPv4 loopback address".into()),
+            _ => return Err("local assistant requires an IPv4 loopback address".into()),
         };
         drop(listener);
 
@@ -654,7 +654,7 @@ impl NeedleSession {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| format!("cannot start embedded Needle 3 runner: {error}"))?;
+            .map_err(|error| format!("cannot start the local configuration assistant: {error}"))?;
         let mut session = Self {
             child,
             address,
@@ -671,7 +671,7 @@ impl NeedleSession {
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait().map_err(|error| error.to_string())? {
                 return Err(format!(
-                    "embedded Needle 3 runner exited during startup: {status}"
+                    "local configuration assistant exited during startup: {status}"
                 ));
             }
             if TcpStream::connect_timeout(
@@ -684,20 +684,21 @@ impl NeedleSession {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        Err("timed out starting embedded Needle 3".into())
+        Err("timed out starting the local configuration assistant".into())
     }
 
     fn complete(&mut self, input: &str) -> Result<ModelEnvelope, String> {
         let body =
             serde_json::to_vec(&json!({"input": input})).map_err(|error| error.to_string())?;
         let response = http_post(self.address, "/complete", &body)?;
-        let envelope: ModelEnvelope = serde_json::from_slice(&response)
-            .map_err(|error| format!("Needle 3 returned invalid JSON: {error}"))?;
+        let envelope: ModelEnvelope = serde_json::from_slice(&response).map_err(|error| {
+            format!("local configuration assistant returned invalid data: {error}")
+        })?;
         if !envelope.success {
             return Err(envelope
                 .error
                 .clone()
-                .unwrap_or_else(|| "Needle 3 inference failed".into()));
+                .unwrap_or_else(|| "local configuration assistant failed".into()));
         }
         Ok(envelope)
     }
@@ -714,7 +715,9 @@ impl Drop for NeedleSession {
 fn http_post(address: SocketAddrV4, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
     let mut stream =
         TcpStream::connect_timeout(&std::net::SocketAddr::V4(address), Duration::from_secs(2))
-            .map_err(|error| format!("cannot connect to local Needle 3: {error}"))?;
+            .map_err(|error| {
+                format!("cannot connect to the local configuration assistant: {error}")
+            })?;
     stream
         .set_read_timeout(Some(Duration::from_secs(60)))
         .map_err(|error| error.to_string())?;
@@ -728,17 +731,17 @@ fn http_post(address: SocketAddrV4, path: &str, body: &[u8]) -> Result<Vec<u8>, 
     stream.write_all(body).map_err(|error| error.to_string())?;
     stream.flush().map_err(|error| error.to_string())?;
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|error| format!("cannot read local Needle 3 response: {error}"))?;
+    stream.read_to_end(&mut response).map_err(|error| {
+        format!("cannot read the local configuration assistant response: {error}")
+    })?;
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or("local Needle 3 returned an invalid HTTP response")?;
+        .ok_or("local configuration assistant returned an invalid response")?;
     let headers = String::from_utf8_lossy(&response[..split]);
     if !headers.starts_with("HTTP/1.1 200") && !headers.starts_with("HTTP/1.0 200") {
         return Err(format!(
-            "local Needle 3 returned {}",
+            "local configuration assistant returned {}",
             headers.lines().next().unwrap_or("an HTTP error")
         ));
     }
@@ -753,7 +756,7 @@ fn materialize_assets(config_path: &Path) -> Result<PathBuf, String> {
         .join("needle3")
         .join(MODEL_SHA256);
     std::fs::create_dir_all(&base)
-        .map_err(|error| format!("cannot create Needle 3 runtime directory: {error}"))?;
+        .map_err(|error| format!("cannot create local assistant runtime directory: {error}"))?;
     set_directory_private(&base)?;
     let model = base.join("needle3.cact");
     let runner = base.join(runner_name());
@@ -849,7 +852,7 @@ fn set_file_private(_path: &Path, _executable: bool) -> Result<(), String> {
 
 fn tools_json(query: &str) -> String {
     let all: Vec<Value> = serde_json::from_str(include_str!("../assets/needle3-tools.json"))
-        .expect("embedded Needle 3 tool schemas are valid JSON");
+        .expect("embedded assistant tool schemas are valid JSON");
     let selected = selected_tool_names(query);
     let tools = all
         .into_iter()
@@ -1437,7 +1440,9 @@ fn execute_tool(config: &mut Config, call: &ModelCall, query: &str) -> Result<St
             )?;
             Ok(format!("已删除子进程规则 {id}"))
         }
-        other => Err(format!("Needle 3 requested unknown tool {other}")),
+        other => Err(format!(
+            "local configuration assistant requested unknown tool {other}"
+        )),
     }
 }
 
@@ -1809,7 +1814,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("HyperHub"));
-        assert!(rendered.contains("Needle 3 · local"));
+        assert!(!rendered.contains("Needle 3"));
         assert!(rendered.contains("local configuration agent"));
         assert!(rendered.contains("Enter"));
     }

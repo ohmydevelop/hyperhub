@@ -120,12 +120,12 @@ pub fn acquire_with_environment(
         ));
     }
     if confirm {
-        eprintln!("Creating a new HyperHub password (input is masked with *)\n");
+        eprintln!("Creating a new HyperHub password\n");
     }
     let first = if confirm {
         prompt_with_feedback("HyperHub password: ", true)?
     } else {
-        prompt_hidden("HyperHub password: ")?
+        prompt_with_feedback("HyperHub password: ", true)?
     };
     validate(&first)?;
     eprintln!();
@@ -143,10 +143,6 @@ pub fn acquire_with_environment(
 /// Windows Terminal/ConPTY 下遗留残缺输入状态。
 pub(crate) fn prompt_secret(message: &str) -> Result<Zeroizing<String>, String> {
     prompt_with_feedback(message, true)
-}
-
-fn prompt_hidden(message: &str) -> Result<Zeroizing<String>, String> {
-    prompt_with_feedback(message, false)
 }
 
 fn prompt_with_feedback(message: &str, masked: bool) -> Result<Zeroizing<String>, String> {
