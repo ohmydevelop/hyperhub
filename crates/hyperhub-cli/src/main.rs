@@ -28,6 +28,7 @@ mod lifecycle;
 mod password;
 mod platform;
 mod skill_installer;
+mod upgrade;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunConfig {
@@ -108,7 +109,15 @@ enum Command {
     Start(lifecycle::StartConfig),
     Stop,
     Restart(lifecycle::StartConfig),
-    Status { json: bool },
+    Upgrade,
+    UpgradeHelper {
+        payload: PathBuf,
+        target: PathBuf,
+        restart: bool,
+    },
+    Status {
+        json: bool,
+    },
     Logs(lifecycle::LogsConfig),
     AuthClear,
     Chat(chat::ChatConfig),
@@ -166,6 +175,12 @@ fn execute(command: Command) -> Result<i32, String> {
         Command::Start(config) => lifecycle::start(config),
         Command::Stop => lifecycle::stop(),
         Command::Restart(config) => lifecycle::restart(config),
+        Command::Upgrade => upgrade::run_manual(),
+        Command::UpgradeHelper {
+            payload,
+            target,
+            restart,
+        } => upgrade::run_helper(&payload, &target, restart),
         Command::Status { json } => lifecycle::status(json),
         Command::Logs(config) => lifecycle::logs(config),
         Command::AuthClear => clear_password_authorization(),
@@ -721,6 +736,15 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
             Ok(Command::Stop)
         }
         "restart" => parse_start(&args[1..]).map(Command::Restart),
+        "upgrade" => require_no_args("upgrade", &args[1..]).map(|_| Command::Upgrade),
+        "upgrade-helper" => match &args[1..] {
+            [payload, target] | [payload, target, _] => Ok(Command::UpgradeHelper {
+                payload: payload.clone().into(),
+                target: target.clone().into(),
+                restart: args.get(3).is_some_and(|value| value == "--restart"),
+            }),
+            _ => Err("upgrade-helper is an internal command".into()),
+        },
         "status" => parse_status(&args[1..]),
         "logs" => parse_logs(&args[1..]).map(Command::Logs),
         "auth" => parse_auth(&args[1..]),
@@ -1224,6 +1248,7 @@ server management:
   hyperhub start ...                    start the local gateway
   hyperhub stop                         stop the local gateway
   hyperhub restart ...                  restart the local gateway
+  hyperhub upgrade                       check and install the latest CLI release
   hyperhub status [--json]              show gateway and managed-process status
   hyperhub logs ...                     view gateway logs
   hyperhub auth clear                   clear cached local authorization
@@ -1288,6 +1313,7 @@ mod tests {
             "start",
             "stop",
             "restart",
+            "upgrade",
             "status",
             "logs",
             "auth clear",

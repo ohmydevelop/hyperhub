@@ -42,6 +42,10 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
         return Ok(0);
     }
 
+    if crate::upgrade::check_on_start()? {
+        return Ok(0);
+    }
+
     let config_path = default_config_path().map_err(|error| error.to_string())?;
     let first_run = !config_path.is_file();
     let password = password::acquire(config.password_file.as_deref(), first_run)?;
@@ -158,6 +162,10 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
         "timed out waiting for HyperHub serve; inspect {}",
         log_path.display()
     ))
+}
+
+pub(crate) fn serve_running() -> Result<bool, String> {
+    Ok(query_status()?.is_some())
 }
 
 pub fn stop() -> Result<i32, String> {

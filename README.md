@@ -70,6 +70,9 @@ hyperhub config
 # 启动本地网关
 hyperhub start
 
+# 检查并安装最新版 CLI；运行中会先优雅停止 Serve，升级后尝试恢复启动
+hyperhub upgrade
+
 # 在受控边界内启动命令行会话
 hyperhub run bash       # Linux
 hyperhub.exe run cmd    # Windows
