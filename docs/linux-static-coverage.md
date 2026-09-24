@@ -59,7 +59,7 @@ Session bootstrap 向 launcher 提供已编译来源的 sandbox snapshot。super
 - process sandbox 在 clone/fork/vfork 及 execve/execveat 前判定；exec 路径读取 executable 和 argv；
 - deny 通过把原 syscall 替换成无副作用 syscall，再覆盖返回值为 `-EACCES`；
 - observe 模式只审计，不阻断；
-- 静态 supervisor 使用专用认证请求上报 `sandbox_denied`，但不赋予目标额外控制能力。
+- 静态 supervisor 使用专用认证请求上报统一的 `security_alert`，但不赋予目标额外控制能力。
 
 TCP 最终仍进入 Serve，服务端会再次执行 firewall、route、代理和连接审计。
 

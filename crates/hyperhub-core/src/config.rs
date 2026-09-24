@@ -267,7 +267,7 @@ impl Config {
     pub fn apply_managed_audit_paths(&mut self, config_path: &Path) {
         let root = config_path.parent().unwrap_or_else(|| Path::new("."));
         let audit_root = root.join("audit");
-        self.audit.log = Some(audit_root.join("hyperhub.jsonl"));
+        self.audit.log = Some(audit_root.join("security-alerts.jsonl"));
         self.audit.transcript_dir = Some(audit_root.join("transcripts"));
     }
 
@@ -2329,7 +2329,10 @@ targets = ["example.com"]"#,
         )
         .unwrap();
         config.apply_managed_audit_paths(Path::new("state/config.bin"));
-        assert_eq!(config.audit.log, Some("state/audit/hyperhub.jsonl".into()));
+        assert_eq!(
+            config.audit.log,
+            Some("state/audit/security-alerts.jsonl".into())
+        );
         assert_eq!(
             config.audit.transcript_dir,
             Some("state/audit/transcripts".into())

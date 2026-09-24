@@ -542,21 +542,24 @@ impl SocksService {
                     "firewall-denied",
                 );
                 write_reply(&mut client, 2).await?;
-                self.audit.session_event(
-                    "firewall_denied",
+                self.audit.security_alert(
                     &session.session_id,
                     Some(session.pid),
                     Some(&session.executable),
                     json!({
-                        "decision": "deny",
+                        "kind": "network",
+                        "operation": "connect",
+                        "action": "deny",
+                        "enforcement": "blocked",
+                        "target": {
+                            "hostname": requested.hostnames.first(),
+                            "ip": requested.ip,
+                            "port": requested.port,
+                            "protocol": "unknown"
+                        },
                         "rule_id": firewall_decision.rule_id,
-                        "decision_source": firewall_decision.source,
-                        "stage": "connect",
-                        "hostname": requested.hostnames.first(),
-                        "ip": requested.ip,
-                        "port": requested.port,
-                        "process_tid": session.pid,
-                        "snapshot_version": snapshot.version,
+                        "decision_source": "firewall",
+                        "reason": "firewall_rule_denied"
                     }),
                 );
                 return Ok(());
@@ -590,29 +593,45 @@ impl SocksService {
                         .provider
                         .as_ref()
                         .filter(|item| item.error.is_none());
-                    let action = if outcome.deny { "deny" } else { "pass" };
                     if outcome.deny || self.audit.debug_enabled() {
-                        self.audit.session_event(
-                            "smart_protection_decision",
-                            &session.session_id,
-                            Some(session.pid),
-                            Some(&session.executable),
-                            json!({
-                                "protection": profile_id,
-                                "rule_id": firewall_decision.rule_id,
-                                "stage": "network_connect",
-                                "action": action,
-                                "reason": outcome.reason,
-                                "argv_redacted": audit_argv,
-                                "features": ["network_egress"],
-                                "risk_level": provider.and_then(|item| item.risk_level.clone()),
+                        let attributes = json!({
+                            "kind": "network",
+                            "operation": "connect",
+                            "action": if outcome.deny { "deny" } else { "allow" },
+                            "enforcement": if outcome.deny { "blocked" } else { "allowed" },
+                            "target": {
+                                "hostname": requested.hostnames.first(),
+                                "ip": requested.ip,
+                                "port": requested.port,
+                                "protocol": "unknown"
+                            },
+                            "rule_id": firewall_decision.rule_id,
+                            "protection": profile_id,
+                            "decision_source": "smart_protection",
+                            "reason": outcome.reason,
+                            "risk": {
+                                "level": provider.and_then(|item| item.risk_level.clone()),
                                 "confidence": provider.and_then(|item| item.confidence),
                                 "destructive_probability": provider.and_then(|item| item.destructive_probability),
                                 "blast_radius": provider.and_then(|item| item.blast_radius),
-                                "cache_hit": provider.is_some_and(|item| item.cache_hit),
-                                "reporter": "gateway-firewall",
-                            }),
-                        );
+                                "cache_hit": provider.is_some_and(|item| item.cache_hit)
+                            }
+                        });
+                        if outcome.deny {
+                            self.audit.security_alert(
+                                &session.session_id,
+                                Some(session.pid),
+                                Some(&session.executable),
+                                attributes,
+                            );
+                        } else {
+                            self.audit.security_debug(
+                                &session.session_id,
+                                Some(session.pid),
+                                Some(&session.executable),
+                                attributes,
+                            );
+                        }
                     }
                     if outcome.deny {
                         active.update(
@@ -657,21 +676,37 @@ impl SocksService {
                     )
                     .await;
                 if outcome.deny || self.audit.debug_enabled() {
-                    self.audit.session_event(
-                        "smart_protection_decision",
-                        &session.session_id,
-                        Some(session.pid),
-                        Some(&session.executable),
-                        json!({
-                            "protection": profile_id,
-                            "rule_id": decision.rule_id,
-                            "stage": "route_connect",
-                            "action": if outcome.deny { "deny" } else { "pass" },
-                            "reason": outcome.reason,
-                            "argv_redacted": audit_argv,
-                            "provider": outcome.provider,
-                        }),
-                    );
+                    let attributes = json!({
+                        "kind": "route",
+                        "operation": "connect",
+                        "action": if outcome.deny { "deny" } else { "allow" },
+                        "enforcement": if outcome.deny { "blocked" } else { "allowed" },
+                        "target": {
+                            "hostname": requested.hostnames.first(),
+                            "ip": requested.ip,
+                            "port": requested.port,
+                            "protocol": "unknown"
+                        },
+                        "rule_id": decision.rule_id,
+                        "protection": profile_id,
+                        "decision_source": "smart_protection",
+                        "reason": outcome.reason
+                    });
+                    if outcome.deny {
+                        self.audit.security_alert(
+                            &session.session_id,
+                            Some(session.pid),
+                            Some(&session.executable),
+                            attributes,
+                        );
+                    } else {
+                        self.audit.security_debug(
+                            &session.session_id,
+                            Some(session.pid),
+                            Some(&session.executable),
+                            attributes,
+                        );
+                    }
                 }
                 decision.deny = outcome.deny;
             }

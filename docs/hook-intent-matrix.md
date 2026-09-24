@@ -51,6 +51,6 @@ process sandbox 在 clone/fork/vfork 和 exec 副作用发生前判定；exec �
 1. 动态 C fixture 默认使用 ptrace 覆盖后代进程，并显式使用 Gum Agent 执行 25 个 descriptor 对应的全部语义分组，输出 `dynamic-hooks.json`；open/open64 与 openat/openat64 按同址 alias 组统计；
 2. 静态 C/Go/Rust 不提供 Agent runtime，根进程和 exec 后代仍产生至少 6 条连接审计；
 3. 静态 C 对抗 fixture 输出 `hooks.json`，manifest 中所有当前架构必测点位都必须出现；
-4. file read/write/create/delete/rename、process fork、根进程 exec 与 fork 后代 exec 分别配置 deny，必须全部失败并产生 `sandbox_denied`。
+4. file read/write/create/delete/rename、process fork、根进程 exec 与 fork 后代 exec 分别配置 deny，必须全部失败并产生统一的 `security_alert`。
 
 大型兼容性 benchmark 继续覆盖 BusyBox、GitHub CLI、yq 和 ripgrep。Codex 使用同一个静态 syscall supervisor 做真实模型对话测试，产品代码中没有 Codex 名称、路径、特征码或专用分支。

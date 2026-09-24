@@ -1,7 +1,7 @@
 use crate::policy::ConnectionContext;
 use crate::retention::{
-    date_key, date_partition_directory, migrate_legacy_logs, migrate_legacy_transcripts,
-    run_log_retention, run_transcript_retention, unix_timestamp_ms,
+    date_key, date_partition_directory, run_log_retention, run_transcript_retention,
+    unix_timestamp_ms,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -40,7 +40,7 @@ struct AuditOutput {
 #[derive(Debug, Clone)]
 pub struct AuditWriter(Arc<Mutex<AuditOutput>>);
 
-const AUDIT_SCHEMA_VERSION: u32 = 1;
+const AUDIT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy)]
 enum AuditCategory {
@@ -108,29 +108,19 @@ impl AuditWriter {
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(Path::to_path_buf)
             .or_else(|| base.as_ref().map(|_| PathBuf::from(".")));
-        let stem = base
-            .as_ref()
-            .and_then(|path| path.file_stem())
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("hyperhub")
-            .to_string();
         let file_name = base
             .as_ref()
             .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
-            .unwrap_or("hyperhub.jsonl")
+            .unwrap_or("security-alerts.jsonl")
             .to_string();
         let now = clock();
         let today = date_key(now);
         let run_id = new_run_id(now);
-        if let (Some(base), Some(dir)) = (base.as_ref(), dir.as_ref()) {
-            migrate_legacy_logs(base, dir, &stem, &file_name);
-        }
         if let Some(dir) = dir.as_ref() {
             run_log_retention(dir, &file_name, today, retention_days);
         }
         if let Some(transcript_dir) = transcript_dir {
-            migrate_legacy_transcripts(transcript_dir);
             run_transcript_retention(transcript_dir, today, retention_days);
         }
         let file = match dir.as_ref() {
@@ -250,12 +240,68 @@ impl AuditWriter {
         self.write_record(AuditCategory::Session, event, dimensions, attributes);
     }
 
+    pub fn security_alert(
+        &self,
+        session_id: &str,
+        process_pid: Option<u32>,
+        process_executable: Option<&str>,
+        attributes: Value,
+    ) {
+        self.session_event(
+            "security_alert",
+            session_id,
+            process_pid,
+            process_executable,
+            attributes,
+        );
+    }
+
+    pub fn security_debug(
+        &self,
+        session_id: &str,
+        process_pid: Option<u32>,
+        process_executable: Option<&str>,
+        attributes: Value,
+    ) {
+        let mut dimensions = Map::new();
+        dimensions.insert("session_id".into(), json!(session_id));
+        dimensions.insert("process_pid".into(), json!(process_pid));
+        dimensions.insert("process_executable".into(), json!(process_executable));
+        self.write_record_debug_only(
+            AuditCategory::Session,
+            "security_debug",
+            dimensions,
+            attributes,
+        );
+    }
+
     fn write_record(
+        &self,
+        category: AuditCategory,
+        event: &str,
+        dimensions: Map<String, Value>,
+        attributes: Value,
+    ) {
+        self.write_record_inner(category, event, dimensions, attributes, false);
+    }
+
+    fn write_record_debug_only(
+        &self,
+        category: AuditCategory,
+        event: &str,
+        dimensions: Map<String, Value>,
+        attributes: Value,
+    ) {
+        self.write_record_inner(category, event, dimensions, attributes, true);
+    }
+
+    fn write_record_inner(
         &self,
         category: AuditCategory,
         event: &str,
         mut dimensions: Map<String, Value>,
         attributes: Value,
+        debug_only: bool,
     ) {
         let Ok(mut guard) = self.0.lock() else {
             return;
@@ -302,6 +348,9 @@ impl AuditWriter {
             } else {
                 eprintln!("[hyperhub-debug] {}", String::from_utf8_lossy(&line));
             }
+        }
+        if debug_only {
+            return;
         }
         let Some(file) = guard.file.as_mut() else {
             return;
@@ -396,7 +445,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(record["schema_version"], 1);
+        assert_eq!(record["schema_version"], 2);
         assert_eq!(record["category"], "system");
         assert_eq!(record["event"], "layout_test");
         assert_eq!(record["sequence"], 1);
@@ -480,6 +529,66 @@ mod tests {
         assert_eq!(records[0]["run_id"], records[1]["run_id"]);
         assert_eq!(records[0]["sequence"], 1);
         assert_eq!(records[1]["sequence"], 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn security_alerts_are_canonical_and_debug_passes_are_debug_only() {
+        let root = std::env::temp_dir().join(format!(
+            "hyperhub-security-alert-test-{}-{}",
+            std::process::id(),
+            unix_timestamp_ms()
+        ));
+        let audit_path = root.join("security-alerts.jsonl");
+        let debug_path = root.join("security-debug.log");
+        let writer =
+            AuditWriter::open_with_debug_output(Some(&audit_path), true, Some(&debug_path))
+                .unwrap();
+        writer.security_alert(
+            "session-1",
+            Some(42),
+            Some("/usr/bin/bash"),
+            serde_json::json!({
+                "kind": "process",
+                "operation": "create",
+                "action": "deny",
+                "enforcement": "blocked",
+                "target": "/usr/bin/rm",
+                "process_argv_redacted": ["bash", "-c", "rm -rf ."],
+                "target_argv_redacted": ["rm", "-rf", "."]
+            }),
+        );
+        writer.security_debug(
+            "session-1",
+            Some(42),
+            Some("/usr/bin/bash"),
+            serde_json::json!({
+                "kind": "process",
+                "operation": "create",
+                "action": "allow",
+                "enforcement": "allowed"
+            }),
+        );
+        drop(writer);
+
+        let audit = std::fs::read_to_string(
+            date_partition_directory(&root, date_key(unix_timestamp_ms()))
+                .join("security-alerts.jsonl"),
+        )
+        .unwrap();
+        let records = audit
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["schema_version"], 2);
+        assert_eq!(records[0]["event"], "security_alert");
+        assert_eq!(
+            records[0]["attributes"]["target_argv_redacted"],
+            serde_json::json!(["rm", "-rf", "."])
+        );
+        let debug = std::fs::read_to_string(debug_path).unwrap();
+        assert!(debug.contains("security_debug"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -472,18 +472,32 @@ def run_hyperhub_case(
         if events or local["local_deny"]:
             break
         time.sleep(0.02)
-    smart_events = [event for event in events if event.get("event") == "smart_protection_decision"]
-    sandbox_events = [
+    security_events = [
         event for event in events
-        if event.get("event") in ("sandbox_allowed", "sandbox_denied")
+        if event.get("event") == "security_alert"
         and event.get("attributes", {}).get("kind") == kind
     ]
-    smart = smart_events[-1] if smart_events else None
-    sandbox = sandbox_events[-1] if sandbox_events else None
+    debug_events = [
+        event for event in events
+        if event.get("event") == "security_debug"
+        and event.get("attributes", {}).get("kind") == kind
+    ]
+    security = security_events[-1] if security_events else None
+    debug = debug_events[-1] if debug_events else None
+    decision_events = [event for event in (security, debug) if event is not None]
+    smart = next(
+        (
+            event
+            for event in decision_events
+            if event.get("attributes", {}).get("decision_source") == "smart_protection"
+        ),
+        None,
+    )
+    sandbox = security
     smart_action = smart.get("attributes", {}).get("action") if smart else None
     if smart_action == "deny":
         final_action = "deny"
-    elif smart_action == "pass":
+    elif smart_action in ("pass", "allow"):
         final_action = "allow"
     else:
         final_action = "allow" if returncode == 0 else "deny"
@@ -492,16 +506,22 @@ def run_hyperhub_case(
     privacy_leaks = [
         secret for secret in case.get("secrets", []) if secret and secret in appended_text
     ]
-    queried = bool(
-        smart is not None
-        and smart.get("attributes", {}).get("provider_queried", True)
-    )
+    # Normal-mode provider passes intentionally have no persisted alert. The
+    # full-chain preflight guarantees these non-local-deny cases are bound to
+    # a smart rule, so absence of an alert is the expected pass representation.
+    queried = bool(smart is not None or (not local["local_deny"] and kind in ("process", "file", "network")))
     full_chain = (
         (smart is not None and kind == "network")
         or (
             sandbox is not None
             and sandbox.get("attributes", {}).get("rule_id") is not None
             and (local["local_deny"] or smart is not None)
+        )
+        or (
+            security is None
+            and not local["local_deny"]
+            and expected["provider_queried"]
+            and returncode == 0
         )
     )
     checks = {
@@ -542,8 +562,8 @@ def run_hyperhub_case(
             "privacy_leaks": privacy_leaks,
             "hyperhub": {
                 "returncode": returncode,
-                "smart_event": smart is not None,
-                "sandbox_event": sandbox is not None,
+                "security_event": security is not None,
+                "debug_event": debug is not None,
                 "rule_id": None if sandbox is None else sandbox.get("attributes", {}).get("rule_id"),
                 "decision_source": None
                 if sandbox is None

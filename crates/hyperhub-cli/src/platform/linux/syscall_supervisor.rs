@@ -977,6 +977,7 @@ impl Supervisor {
                     target,
                     &decision,
                     Some(sanitized.redacted_argv.clone()),
+                    None,
                 );
                 return Ok(self.enforce);
             }
@@ -1005,24 +1006,31 @@ impl Supervisor {
                     }),
                 },
             ));
-            let action = match response {
-                Ok(ControlResponse::SmartProtectionDecision { action, .. }) => action,
+            let (action, reason) = match response {
+                Ok(ControlResponse::SmartProtectionDecision { action, reason, .. }) => {
+                    (action, Some(reason))
+                }
                 Ok(ControlResponse::Error { message }) => {
                     if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
                         eprintln!("hyperhub: file smart protection failed: {message}");
                     }
-                    self.sandbox
+                    let action = self
+                        .sandbox
                         .as_ref()
                         .and_then(|snapshot| snapshot.file.as_ref())
                         .map(file_error_decision)
-                        .map_or(SandboxAction::Pass, |decision| decision.action)
+                        .map_or(SandboxAction::Pass, |decision| decision.action);
+                    (action, Some(format!("smart_protection_error: {message}")))
                 }
-                _ => self
-                    .sandbox
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.file.as_ref())
-                    .map(file_error_decision)
-                    .map_or(SandboxAction::Pass, |decision| decision.action),
+                _ => {
+                    let action = self
+                        .sandbox
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.file.as_ref())
+                        .map(file_error_decision)
+                        .map_or(SandboxAction::Pass, |decision| decision.action);
+                    (action, Some("smart_protection_error".into()))
+                }
             };
             let denied = action == SandboxAction::Deny;
             let decision = SandboxDecision {
@@ -1041,6 +1049,7 @@ impl Supervisor {
                 target,
                 &decision,
                 Some(sanitized.redacted_argv),
+                reason,
             );
             if denied {
                 return Ok(self.enforce);
@@ -1068,6 +1077,7 @@ impl Supervisor {
             &format!("<unresolved: {error}>"),
             &decision,
             None,
+            Some("sandbox_inspection_error".into()),
         );
         self.enforce
     }
@@ -1091,6 +1101,7 @@ impl Supervisor {
             &format!("<unresolved: {error}>"),
             &decision,
             None,
+            Some("sandbox_inspection_error".into()),
         );
         self.enforce
     }
@@ -1115,6 +1126,7 @@ impl Supervisor {
                 &intent.executable,
                 &decision,
                 Some(sanitized.redacted_argv.clone()),
+                None,
             );
             return Ok(self.enforce);
         }
@@ -1142,7 +1154,7 @@ impl Supervisor {
             },
         ));
         match response {
-            Ok(ControlResponse::SmartProtectionDecision { action, .. }) => {
+            Ok(ControlResponse::SmartProtectionDecision { action, reason, .. }) => {
                 let denied = action == SandboxAction::Deny;
                 let decision = SandboxDecision {
                     action,
@@ -1160,6 +1172,7 @@ impl Supervisor {
                     &intent.executable,
                     &decision,
                     Some(sanitized.redacted_argv),
+                    Some(reason),
                 );
                 Ok(denied && self.enforce)
             }
@@ -1208,6 +1221,7 @@ impl Supervisor {
             executable,
             &decision,
             None,
+            Some(format!("smart_protection_error: {error}")),
         );
         if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
             eprintln!("hyperhub: smart protection check failed: {error}");
@@ -1222,7 +1236,8 @@ impl Supervisor {
         operation: &str,
         target: &str,
         decision: &SandboxDecision,
-        argv_redacted: Option<Vec<String>>,
+        target_argv_redacted: Option<Vec<String>>,
+        reason: Option<String>,
     ) {
         let process_pid = match self.ensure_member(tid) {
             Ok(pid) => pid,
@@ -1233,6 +1248,13 @@ impl Supervisor {
                 return;
             }
         };
+        let process_executable = std::fs::read_link(format!("/proc/{process_pid}/exe"))
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| target.to_owned());
+        let process_argv_redacted = read_process_argv(process_pid as libc::pid_t).map(|argv| {
+            sanitize_action(&process_executable, &argv, &ProtectionContext::default()).redacted_argv
+        });
         let event = SandboxAuditEvent {
             kind,
             decision: decision.action,
@@ -1240,7 +1262,9 @@ impl Supervisor {
             source: decision.source.into(),
             operation: operation.into(),
             target: target.into(),
-            argv_redacted,
+            process_argv_redacted,
+            target_argv_redacted,
+            reason,
             process_pid: process_pid as u32,
             process_tid: tid as u32,
             snapshot_version: self.sandbox.as_ref().map_or(0, |snapshot| snapshot.version),
@@ -1784,6 +1808,16 @@ fn read_command_arguments(tid: libc::pid_t, address: usize) -> Result<Vec<String
         arguments.push(read_c_string(tid, pointer, 4096)?);
     }
     Err("target command line exceeds 128 arguments".into())
+}
+
+fn read_process_argv(pid: libc::pid_t) -> Option<Vec<String>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let argv = bytes
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| String::from_utf8_lossy(argument).into_owned())
+        .collect::<Vec<_>>();
+    (!argv.is_empty()).then_some(argv)
 }
 
 fn read_path(tid: libc::pid_t, dirfd: i32, address: usize) -> Result<String, String> {

@@ -53,7 +53,7 @@ python3 scripts/benchmark-smart-protection.py \
 
 - ptrace/Gum 进程 Hook 是否命中绑定规则；
 - 本地高置信度检测是否正确短路模型；
-- 网关是否产生 `smart_protection_decision` 审计事件；
+- 网关是否产生统一的 `security_alert` 审计事件；
 - Jev deny 是否在进程创建前变成 `EACCES`；
 - Jev pass 是否允许测试替身执行；
 - 审计输出中是否泄漏命令行测试 Secret。
@@ -90,7 +90,7 @@ protection = "agent-egress"
 
 Gum Agent 与 Linux ptrace supervisor 都会保留完整参数结构并脱敏敏感值；
 高置信度本地命中短路模型，其余受保护动作通过控制通道请求智能判断。网关写入
-`smart_protection_decision`，deny 会在 `execve`/`execveat` 返回前阻断。默认规则不设置
+统一的 `security_alert`（Debug pass 使用 `security_debug`），deny 会在 `execve`/`execveat` 返回前阻断。默认规则不设置
 `protection`，不会改变既有 sandbox 行为。
 
 ### 文件与网络沙盒完整链路

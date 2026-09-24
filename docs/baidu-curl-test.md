@@ -19,7 +19,7 @@ $curl = 'C:\Windows\System32\curl.exe'
 cd E:\ct\hyperhub
 .\scripts\build.ps1
 
-Remove-Item .\audit\hyperhub.jsonl -Force -ErrorAction SilentlyContinue
+Remove-Item .\audit\security-alerts.jsonl -Force -ErrorAction SilentlyContinue
 
 .\target\release\hyperhub.exe import .\examples\hyperhub.toml
 .\target\release\hyperhub.exe validate
@@ -55,7 +55,7 @@ cd E:\ct\hyperhub
 & $curl --http1.1 -sS -o NUL `
   -w "C http=%{http_code} remote=%{remote_ip}\n" https://baidu.com/
 
-Get-Content .\audit\hyperhub.jsonl -ErrorAction SilentlyContinue |
+Get-Content .\audit\security-alerts.jsonl -ErrorAction SilentlyContinue |
   Select-String '"event":"connect"'
 ```
 
@@ -77,7 +77,7 @@ attach 后 `remote_ip` 应显示 `198.18.0.0/15` 或 `fdfe:6879:7065:7268:7562::
 ## 6. 查看解密后的审计
 
 ```powershell
-Get-Content .\audit\hyperhub.jsonl |
+Get-Content .\audit\security-alerts.jsonl |
   ForEach-Object { $_ | ConvertFrom-Json } |
   Format-List event,hostname,destination_ip,destination_port,protocol,rule_id,outcome,detail
 ```

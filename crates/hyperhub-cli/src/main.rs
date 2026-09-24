@@ -1497,7 +1497,12 @@ mod tests {
         assert_eq!(config.listener.pending_session_ttl_secs, 60);
         assert_eq!(
             config.audit.log.as_deref(),
-            Some(directory.join("audit").join("hyperhub.jsonl").as_path())
+            Some(
+                directory
+                    .join("audit")
+                    .join("security-alerts.jsonl")
+                    .as_path()
+            )
         );
         assert_eq!(
             config.audit.transcript_dir.as_deref(),

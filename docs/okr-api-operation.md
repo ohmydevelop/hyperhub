@@ -64,7 +64,7 @@ HyperHub attach curl 后从已解密到内存的配置注入 `Authorization: Bea
 
 ## 5. 验证审计
 
-B 组必须成功，并且 `audit/date=YYYY-MM-DD/hyperhub.jsonl` 只记录注入的 Header 名称 `authorization`，不能包含真实 token。
+B 组必须成功，并且 `audit/date=YYYY-MM-DD/security-alerts.jsonl` 只记录注入的 Header 名称 `authorization`，不能包含真实 token。
 
 如果 curl 已配置本地 HTTP 代理，其 loopback 或非 loopback 代理端点都会由 HyperHub 接管。`serve` 从 absolute-form/CONNECT 首包恢复真实目标、重新执行域名规则；没有显式配置其他 upstream 时，审计和凭证注入完成后仍通过 curl 原来选择的 HTTP 代理发送。
 

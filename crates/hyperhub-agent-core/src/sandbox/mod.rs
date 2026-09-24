@@ -128,7 +128,10 @@ pub(crate) struct SandboxAuditEvent {
     pub(crate) operation: String,
     pub(crate) target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) argv_redacted: Option<Vec<String>>,
+    pub(crate) process_argv_redacted: Option<Vec<String>>,
+    pub(crate) target_argv_redacted: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
     pub(crate) process_pid: u32,
     pub(crate) process_tid: u32,
     pub(crate) snapshot_version: u64,

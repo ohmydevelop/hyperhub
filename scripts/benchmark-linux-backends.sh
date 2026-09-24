@@ -281,7 +281,7 @@ chmod 0755 "$standalone_hyperhub"
 )
 record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum uses embedded Agent"
 
-pass_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
+pass_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $pass_audit ]] || { echo 'static coverage audit was not created' >&2; exit 1; }
 connections=$(grep -c '"event":"connect"' "$pass_audit" || true)
 if ((connections < 6)); then
@@ -437,7 +437,7 @@ start_serve "$temporary/credential-serve.stdout.log" "$temporary/credential-serv
   localhost "$credential_port"
 wait "$credential_pid"
 credential_pid=
-credential_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
+credential_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $credential_audit ]] || { echo 'credential regression audit was not created' >&2; exit 1; }
 grep -q '"rule_id":"benchmark-http-route"' "$credential_audit" || {
   cat "$credential_audit" >&2
@@ -581,8 +581,8 @@ printf 'quit\n' >&9
 exec 9>&-
 wait "$hot_update_pid"
 hot_update_pid=
-hot_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
-[[ $(grep -c '"event":"sandbox_denied"' "$hot_audit" || true) -ge 4 ]] || {
+hot_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
+[[ $(grep -c '"event":"security_alert"' "$hot_audit" || true) -ge 4 ]] || {
   cat "$hot_audit" >&2
   echo 'ptrace hot-update denials were not audited' >&2
   exit 1
@@ -743,7 +743,7 @@ set -e
 kill "$trust_ssh_pid"
 wait "$trust_ssh_pid" 2>/dev/null || true
 trust_ssh_pid=
-trust_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
+trust_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 grep -q '"outcome":"ssh_host_key_mismatch"' "$trust_audit" || {
   cat "$trust_audit" >&2
   echo 'rotated SSH host key was not rejected' >&2
@@ -850,9 +850,9 @@ expect_denied process-fork --intent-fork
 expect_denied process-exec --intent-exec /usr/bin/true
 expect_denied process-child-exec --intent-child-exec /usr/bin/true
 
-deny_audit=$(find "$HOME/.hyperhub/audit" -name hyperhub.jsonl -type f -print -quit)
+deny_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $deny_audit ]] || { echo 'sandbox deny audit was not created' >&2; exit 1; }
-denied=$(grep -c '"event":"sandbox_denied"' "$deny_audit" || true)
+denied=$(grep -c '"event":"security_alert"' "$deny_audit" || true)
 if ((denied < 8)); then
   echo "expected 8 sandbox deny events, got $denied" >&2
   exit 1

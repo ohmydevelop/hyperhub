@@ -26,99 +26,6 @@ pub fn date_partition_directory(root: &Path, key: u32) -> PathBuf {
     root.join(format!("date={year:04}-{month:02}-{day:02}"))
 }
 
-/// 从旧 `{stem}-YYYYMMDD.jsonl[.gz]` 文件名解析日期键。
-pub fn parse_legacy_log_date(stem: &str, file_name: &str) -> Option<u32> {
-    let prefix = format!("{stem}-");
-    let name = file_name.strip_prefix(&prefix)?;
-    let name = name
-        .strip_suffix(".jsonl.gz")
-        .or_else(|| name.strip_suffix(".jsonl"))?;
-    parse_compact_date(name)
-}
-
-/// 把旧平铺日志迁移到日期目录。发生目标冲突时保留源文件，不覆盖已有数据。
-pub fn migrate_legacy_logs(base: &Path, root: &Path, stem: &str, file_name: &str) {
-    if base.is_file() {
-        if let Some(key) = modified_date_key(base) {
-            let destination = date_partition_directory(root, key).join(file_name);
-            move_without_overwrite(base, &destination);
-        }
-    }
-
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let source = entry.path();
-        if !source.is_file() || source == base {
-            continue;
-        }
-        let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some(key) = parse_legacy_log_date(stem, name) else {
-            continue;
-        };
-        let destination_name = if name.ends_with(".gz") {
-            format!("{file_name}.gz")
-        } else {
-            file_name.to_string()
-        };
-        let destination = date_partition_directory(root, key).join(destination_name);
-        move_without_overwrite(&source, &destination);
-    }
-
-    for (key, legacy_directory) in legacy_dated_directories(root) {
-        for legacy_name in [file_name.to_string(), format!("{file_name}.gz")] {
-            let source = legacy_directory.join(&legacy_name);
-            if source.is_file() {
-                let destination = date_partition_directory(root, key).join(legacy_name);
-                move_without_overwrite(&source, &destination);
-            }
-        }
-        prune_empty_legacy_date_parents(root, &legacy_directory);
-    }
-}
-
-/// 把旧平铺或 `YYYY/MM/DD` transcript 目录迁移到日期分区。
-pub fn migrate_legacy_transcripts(root: &Path) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let source = entry.path();
-        if !source.is_dir() {
-            continue;
-        }
-        let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if is_year_component(name) || parse_partition_date(name).is_some() {
-            continue;
-        }
-        let Some(key) = modified_date_key(&source) else {
-            continue;
-        };
-        let destination = date_partition_directory(root, key).join(name);
-        move_without_overwrite(&source, &destination);
-    }
-
-    for (key, legacy_directory) in legacy_dated_directories(root) {
-        let Ok(sessions) = fs::read_dir(&legacy_directory) else {
-            continue;
-        };
-        for session in sessions.flatten() {
-            let source = session.path();
-            if !source.is_dir() {
-                continue;
-            }
-            let destination = date_partition_directory(root, key).join(session.file_name());
-            move_without_overwrite(&source, &destination);
-        }
-        prune_empty_legacy_date_parents(root, &legacy_directory);
-    }
-}
-
 /// 归档非当天日志，并按日期分区删除超过保留窗口的日志。
 pub fn run_log_retention(root: &Path, file_name: &str, today_key: u32, retention_days: u32) {
     for (key, directory) in dated_directories(root) {
@@ -171,44 +78,6 @@ fn dated_directories(root: &Path) -> Vec<(u32, PathBuf)> {
     result
 }
 
-fn legacy_dated_directories(root: &Path) -> Vec<(u32, PathBuf)> {
-    let mut result = Vec::new();
-    let Ok(years) = fs::read_dir(root) else {
-        return result;
-    };
-    for year in years.flatten() {
-        let year_path = year.path();
-        let Some(year) = year.file_name().to_str().and_then(parse_year) else {
-            continue;
-        };
-        let Ok(months) = fs::read_dir(&year_path) else {
-            continue;
-        };
-        for month in months.flatten() {
-            let month_path = month.path();
-            let Some(month) = month.file_name().to_str().and_then(parse_two_digits) else {
-                continue;
-            };
-            let Ok(days) = fs::read_dir(&month_path) else {
-                continue;
-            };
-            for day in days.flatten() {
-                let day_path = day.path();
-                let Some(day) = day.file_name().to_str().and_then(parse_two_digits) else {
-                    continue;
-                };
-                let Some(days) = days_from_civil(year, month, day) else {
-                    continue;
-                };
-                if let Ok(key) = u32::try_from(days) {
-                    result.push((key, day_path));
-                }
-            }
-        }
-    }
-    result
-}
-
 fn parse_partition_date(value: &str) -> Option<u32> {
     let value = value.strip_prefix("date=")?;
     if value.len() != 10
@@ -221,72 +90,6 @@ fn parse_partition_date(value: &str) -> Option<u32> {
     let month = value[5..7].parse::<u32>().ok()?;
     let day = value[8..10].parse::<u32>().ok()?;
     u32::try_from(days_from_civil(year, month, day)?).ok()
-}
-
-fn parse_compact_date(value: &str) -> Option<u32> {
-    if value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let year = value[0..4].parse::<i64>().ok()?;
-    let month = value[4..6].parse::<u32>().ok()?;
-    let day = value[6..8].parse::<u32>().ok()?;
-    u32::try_from(days_from_civil(year, month, day)?).ok()
-}
-
-fn parse_year(value: &str) -> Option<i64> {
-    (is_year_component(value))
-        .then(|| value.parse().ok())
-        .flatten()
-}
-
-fn is_year_component(value: &str) -> bool {
-    value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn parse_two_digits(value: &str) -> Option<u32> {
-    if value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        value.parse().ok()
-    } else {
-        None
-    }
-}
-
-fn modified_date_key(path: &Path) -> Option<u32> {
-    fs::metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| date_key(duration.as_millis().min(u64::MAX as u128) as u64))
-}
-
-fn move_without_overwrite(source: &Path, destination: &Path) {
-    if destination.exists() {
-        return;
-    }
-    let Some(parent) = destination.parent() else {
-        return;
-    };
-    if fs::create_dir_all(parent).is_ok() {
-        let _ = fs::rename(source, destination);
-    }
-}
-
-fn prune_empty_legacy_date_parents(root: &Path, day_directory: &Path) {
-    let Some(month) = day_directory.parent() else {
-        return;
-    };
-    let Some(year) = month.parent() else {
-        return;
-    };
-    let _ = fs::remove_dir(day_directory);
-    if month != root {
-        let _ = fs::remove_dir(month);
-    }
-    if year != root {
-        let _ = fs::remove_dir(year);
-    }
 }
 
 fn gzip_file(source: &Path, destination: &Path) -> io::Result<()> {
@@ -352,85 +155,20 @@ mod tests {
 
     #[test]
     fn date_key_maps_to_hive_partition() {
-        let key = parse_compact_date("20260109").unwrap();
+        let key = parse_partition_date("date=2026-01-09").unwrap();
         assert_eq!(
             date_partition_directory(Path::new("audit"), key),
             Path::new("audit").join("date=2026-01-09")
         );
-        assert!(parse_compact_date("20260230").is_none());
-    }
-
-    #[test]
-    fn migrates_flat_logs_into_the_date_partition() {
-        let root = test_root("log-migration");
-        fs::create_dir_all(&root).unwrap();
-        let base = root.join("hyperhub.jsonl");
-        let legacy = root.join("hyperhub-20260108.jsonl");
-        fs::write(&base, b"base").unwrap();
-        fs::write(&legacy, b"legacy").unwrap();
-        migrate_legacy_logs(&base, &root, "hyperhub", "hyperhub.jsonl");
-
-        let legacy_key = parse_compact_date("20260108").unwrap();
-        assert_eq!(
-            fs::read(date_partition_directory(&root, legacy_key).join("hyperhub.jsonl")).unwrap(),
-            b"legacy"
-        );
-        assert!(!legacy.exists());
-        assert!(!base.exists());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migration_keeps_both_files_when_the_destination_exists() {
-        let root = test_root("log-migration-collision");
-        let key = parse_compact_date("20260108").unwrap();
-        let destination = date_partition_directory(&root, key).join("hyperhub.jsonl");
-        let legacy = root.join("hyperhub-20260108.jsonl");
-        fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        fs::write(&destination, b"destination").unwrap();
-        fs::write(&legacy, b"legacy").unwrap();
-
-        migrate_legacy_logs(
-            &root.join("hyperhub.jsonl"),
-            &root,
-            "hyperhub",
-            "hyperhub.jsonl",
-        );
-
-        assert_eq!(fs::read(destination).unwrap(), b"destination");
-        assert_eq!(fs::read(&legacy).unwrap(), b"legacy");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migrates_the_previous_nested_log_layout() {
-        let root = test_root("nested-log-migration");
-        let key = parse_compact_date("20260108").unwrap();
-        let legacy_directory = root.join("2026").join("01").join("08");
-        fs::create_dir_all(&legacy_directory).unwrap();
-        fs::write(legacy_directory.join("hyperhub.jsonl"), b"legacy").unwrap();
-
-        migrate_legacy_logs(
-            &root.join("hyperhub.jsonl"),
-            &root,
-            "hyperhub",
-            "hyperhub.jsonl",
-        );
-
-        assert_eq!(
-            fs::read(date_partition_directory(&root, key).join("hyperhub.jsonl")).unwrap(),
-            b"legacy"
-        );
-        assert!(!root.join("2026").exists());
-        let _ = fs::remove_dir_all(root);
+        assert!(parse_partition_date("date=2026-02-30").is_none());
     }
 
     #[test]
     fn retention_archives_kept_days_and_removes_expired_partitions() {
         let root = test_root("retention");
-        let old_key = parse_compact_date("20260101").unwrap();
-        let yesterday_key = parse_compact_date("20260108").unwrap();
-        let today_key = parse_compact_date("20260109").unwrap();
+        let old_key = parse_partition_date("date=2026-01-01").unwrap();
+        let yesterday_key = parse_partition_date("date=2026-01-08").unwrap();
+        let today_key = parse_partition_date("date=2026-01-09").unwrap();
         for key in [old_key, yesterday_key, today_key] {
             let directory = date_partition_directory(&root, key);
             fs::create_dir_all(&directory).unwrap();
@@ -452,8 +190,8 @@ mod tests {
     #[test]
     fn log_retention_does_not_delete_unrelated_files_in_a_date_partition() {
         let root = test_root("retention-shared-directory");
-        let old_key = parse_compact_date("20260101").unwrap();
-        let today_key = parse_compact_date("20260109").unwrap();
+        let old_key = parse_partition_date("date=2026-01-01").unwrap();
+        let today_key = parse_partition_date("date=2026-01-09").unwrap();
         let directory = date_partition_directory(&root, old_key);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("hyperhub.jsonl"), b"log").unwrap();
@@ -469,8 +207,8 @@ mod tests {
     #[test]
     fn transcript_retention_removes_only_expired_partitions() {
         let root = test_root("transcript-retention");
-        let old_key = parse_compact_date("20260101").unwrap();
-        let today_key = parse_compact_date("20260109").unwrap();
+        let old_key = parse_partition_date("date=2026-01-01").unwrap();
+        let today_key = parse_partition_date("date=2026-01-09").unwrap();
         for key in [old_key, today_key] {
             let directory = date_partition_directory(&root, key).join("session-1");
             fs::create_dir_all(&directory).unwrap();
@@ -484,45 +222,6 @@ mod tests {
             .join("session-1")
             .join("1-up.bin")
             .is_file());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migrates_legacy_transcript_sessions_into_the_current_date_partition() {
-        let root = test_root("transcript-migration");
-        let session = root.join("session-1");
-        fs::create_dir_all(&session).unwrap();
-        fs::write(session.join("1-up.bin"), b"capture").unwrap();
-
-        migrate_legacy_transcripts(&root);
-
-        let destination =
-            date_partition_directory(&root, date_key(unix_timestamp_ms())).join("session-1");
-        assert_eq!(fs::read(destination.join("1-up.bin")).unwrap(), b"capture");
-        assert!(!session.exists());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn migrates_the_previous_nested_transcript_layout() {
-        let root = test_root("nested-transcript-migration");
-        let key = parse_compact_date("20260108").unwrap();
-        let legacy_session = root.join("2026").join("01").join("08").join("session-1");
-        fs::create_dir_all(&legacy_session).unwrap();
-        fs::write(legacy_session.join("1-up.bin"), b"capture").unwrap();
-
-        migrate_legacy_transcripts(&root);
-
-        assert_eq!(
-            fs::read(
-                date_partition_directory(&root, key)
-                    .join("session-1")
-                    .join("1-up.bin")
-            )
-            .unwrap(),
-            b"capture"
-        );
-        assert!(!root.join("2026").exists());
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn hot_update_preserves_managed_audit_paths() {
         let mut config = Config::default();
-        config.audit.log = Some("state/audit/hyperhub.jsonl".into());
+        config.audit.log = Some("state/audit/security-alerts.jsonl".into());
         config.audit.transcript_dir = Some("state/audit/transcripts".into());
         let state = RuntimeState::new(Arc::new(config)).unwrap();
 
@@ -236,7 +236,7 @@ mod tests {
         let snapshot = state.snapshot().config;
         assert_eq!(
             snapshot.audit.log,
-            Some("state/audit/hyperhub.jsonl".into())
+            Some("state/audit/security-alerts.jsonl".into())
         );
         assert_eq!(
             snapshot.audit.transcript_dir,

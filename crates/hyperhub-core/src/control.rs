@@ -7,6 +7,7 @@ use crate::runtime::{RuntimeSnapshot, RuntimeState};
 use crate::sandbox::{
     compile_runtime_snapshot, compile_snapshot as compile_sandbox_snapshot, decide_process,
     decide_process_hook, process_protection_binding, sanitize_action, ProtectionContext,
+    SandboxAuditEvent,
 };
 use crate::session::{
     unix_timestamp_after, unix_timestamp_ms, verify_config_update_proof, AgentFlags,
@@ -79,12 +80,42 @@ fn compile_agent_snapshots(
     Ok((firewall, sandbox))
 }
 
-fn should_record_smart_audit(debug_enabled: bool, action: crate::config::SandboxAction) -> bool {
-    action != crate::config::SandboxAction::Pass || debug_enabled
-}
-
-fn should_record_sandbox_audit(debug_enabled: bool, source: &str) -> bool {
-    source != "smart_protection_pass" || debug_enabled
+fn sandbox_security_attributes(event: &SandboxAuditEvent, diagnostic: bool) -> serde_json::Value {
+    let denied = event.decision == crate::config::SandboxAction::Deny;
+    let error = event.source.contains("error")
+        || event.reason.as_deref() == Some("sandbox_inspection_error");
+    let mut attributes = serde_json::json!({
+        "kind": event.kind,
+        "operation": event.operation,
+        "action": if error { "error" } else if denied { "deny" } else { "allow" },
+        "enforcement": if error {
+            if denied { "failed_closed" } else { "failed_open" }
+        } else if denied {
+            "blocked"
+        } else {
+            "allowed"
+        },
+        "target": event.target,
+        "process_argv_redacted": event.process_argv_redacted,
+        "target_argv_redacted": event.target_argv_redacted,
+        "rule_id": event.rule_id,
+        "decision_source": event.source,
+        "reason": event.reason.clone().unwrap_or_else(|| {
+            if error {
+                "sandbox_error"
+            } else if denied {
+                "sandbox_rule_denied"
+            } else {
+                "sandbox_rule_allowed"
+            }
+            .into()
+        }),
+    });
+    if diagnostic {
+        attributes["process_tid"] = serde_json::json!(event.process_tid);
+        attributes["snapshot_version"] = serde_json::json!(event.snapshot_version);
+    }
+    attributes
 }
 
 #[derive(Clone)]
@@ -414,6 +445,7 @@ impl ControlService {
                             let mut action = static_decision.action;
                             let mut reason = static_decision.source.to_owned();
                             let mut rule_id = static_decision.rule_id.clone();
+                            let mut protection_id = None;
                             let mut risk_level = None;
                             let mut confidence = None;
                             let mut cache_hit = false;
@@ -423,11 +455,11 @@ impl ControlService {
                             let audit_argv = sanitized.redacted_argv.clone();
                             let mut destructive_probability = None;
                             let mut blast_radius = None;
-                            let mut provider_queried = false;
                             let smart_binding = binding.is_some();
                             if action != crate::config::SandboxAction::Deny {
                                 if let Some(binding) = binding {
                                     rule_id = Some(binding.rule_id.clone());
+                                    protection_id = Some(binding.protection_id.clone());
                                     audit_features = sanitized.features.clone();
                                     if sanitized.local_deny {
                                         action = if runtime
@@ -441,7 +473,6 @@ impl ControlService {
                                         };
                                         reason = "local_data_protection".into();
                                     } else {
-                                        provider_queried = true;
                                         let outcome = runtime
                                             .protection
                                             .evaluate_agent(
@@ -478,56 +509,45 @@ impl ControlService {
                                     }
                                 }
                             }
-                            let smart_pass =
-                                action == crate::config::SandboxAction::Pass && smart_binding;
-                            if !smart_pass || self.audit.debug_enabled() {
-                                let event_name = if action == crate::config::SandboxAction::Deny {
-                                    "sandbox_denied"
-                                } else {
-                                    "sandbox_allowed"
-                                };
-                                self.audit.session_event(
-                                    event_name,
-                                    &session_id,
-                                    peer_pid,
-                                    Some(&executable),
-                                    serde_json::json!({
-                                        "kind": "process",
-                                        "decision": action,
-                                        "rule_id": rule_id,
-                                        "decision_source": reason,
-                                        "operation": "root_create",
-                                        "target": executable,
-                                        "argv_redacted": audit_argv.clone(),
-                                        "reporter": "root-launcher",
-                                    }),
-                                );
-                            }
-                            if smart_binding
-                                && (action != crate::config::SandboxAction::Pass
-                                    || self.audit.debug_enabled())
-                            {
-                                self.audit.session_event(
-                                    "smart_protection_decision",
-                                    &session_id,
-                                    peer_pid,
-                                    Some(&executable),
-                                    serde_json::json!({
-                                        "rule_id": rule_id,
-                                        "stage": "root_process_create",
-                                        "action": action,
-                                        "reason": reason,
-                                        "argv_redacted": audit_argv,
-                                        "features": audit_features,
-                                        "risk_level": risk_level,
+                            let diagnostic = action == crate::config::SandboxAction::Pass;
+                            if !diagnostic || self.audit.debug_enabled() {
+                                let mut attributes = serde_json::json!({
+                                    "kind": "process",
+                                    "operation": "create",
+                                    "action": if diagnostic { "allow" } else { "deny" },
+                                    "enforcement": if diagnostic { "allowed" } else { "blocked" },
+                                    "target": executable,
+                                    "target_argv_redacted": audit_argv,
+                                    "rule_id": rule_id,
+                                    "decision_source": if smart_binding { "smart_protection".to_string() } else { reason.clone() },
+                                    "reason": reason.clone(),
+                                });
+                                if smart_binding {
+                                    attributes["protection"] = serde_json::json!(protection_id);
+                                    attributes["features"] = serde_json::json!(audit_features);
+                                    attributes["risk"] = serde_json::json!({
+                                        "level": risk_level,
                                         "confidence": confidence,
                                         "destructive_probability": destructive_probability,
                                         "blast_radius": blast_radius,
                                         "cache_hit": cache_hit,
-                                        "provider_queried": provider_queried,
-                                        "reporter": "root-launcher",
-                                    }),
-                                );
+                                    });
+                                }
+                                if diagnostic {
+                                    self.audit.security_debug(
+                                        &session_id,
+                                        peer_pid,
+                                        Some(&executable),
+                                        attributes,
+                                    );
+                                } else {
+                                    self.audit.security_alert(
+                                        &session_id,
+                                        peer_pid,
+                                        Some(&executable),
+                                        attributes,
+                                    );
+                                }
                             }
                             ControlResponse::SmartProtectionDecision {
                                 action,
@@ -1213,30 +1233,51 @@ impl ControlService {
                         && self.sessions.authenticate_member(&session_id, &token, pid)
                 });
                 if authenticated {
-                    let event_name = match event.decision {
-                        crate::config::FirewallAction::Pass => "firewall_allowed",
-                        crate::config::FirewallAction::Deny => "firewall_denied",
-                        crate::config::FirewallAction::Smart => "firewall_allowed",
-                    };
-                    self.audit.session_event(
-                        event_name,
-                        &session_id,
-                        Some(event.process_pid),
-                        self.sessions
-                            .member_executable(event.process_pid)
-                            .as_deref(),
-                        serde_json::json!({
-                            "decision": event.decision,
+                    let denied = event.decision == crate::config::FirewallAction::Deny;
+                    let error = event.source == crate::firewall::FirewallDecisionSource::Error;
+                    let diagnostic = !denied && !error;
+                    if !diagnostic || self.audit.debug_enabled() {
+                        let attributes = serde_json::json!({
+                            "kind": "network",
+                            "operation": match event.stage {
+                                crate::firewall::FirewallAuditStage::Dns => "resolve",
+                                crate::firewall::FirewallAuditStage::Connect => "connect",
+                            },
+                            "action": if error { "error" } else if denied { "deny" } else { "allow" },
+                            "enforcement": if error {
+                                if denied { "failed_closed" } else { "failed_open" }
+                            } else if denied { "blocked" } else { "allowed" },
+                            "target": {
+                                "hostname": event.hostname,
+                                "ip": event.ip,
+                                "port": event.port
+                            },
                             "rule_id": event.rule_id,
-                            "decision_source": event.source,
-                            "stage": event.stage,
-                            "hostname": event.hostname,
-                            "ip": event.ip,
-                            "port": event.port,
-                            "process_tid": event.process_tid,
-                            "snapshot_version": event.snapshot_version,
-                        }),
-                    );
+                            "decision_source": "firewall",
+                            "reason": if error { "firewall_error" } else if denied { "firewall_rule_denied" } else { "firewall_rule_allowed" },
+                            "process_tid": if diagnostic { Some(event.process_tid) } else { None::<u32> },
+                            "snapshot_version": if diagnostic { Some(event.snapshot_version) } else { None::<u64> }
+                        });
+                        if denied {
+                            self.audit.security_alert(
+                                &session_id,
+                                Some(event.process_pid),
+                                self.sessions
+                                    .member_executable(event.process_pid)
+                                    .as_deref(),
+                                attributes,
+                            );
+                        } else {
+                            self.audit.security_debug(
+                                &session_id,
+                                Some(event.process_pid),
+                                self.sessions
+                                    .member_executable(event.process_pid)
+                                    .as_deref(),
+                                attributes,
+                            );
+                        }
+                    }
                     ControlResponse::Ok
                 } else {
                     ControlResponse::Error {
@@ -1260,32 +1301,30 @@ impl ControlService {
                             .authenticate_member(&session_id, &token, event.process_pid)
                 });
                 if authenticated {
-                    if should_record_sandbox_audit(self.audit.debug_enabled(), &event.source) {
-                        let event_name = match event.decision {
-                            crate::config::SandboxAction::Pass => "sandbox_allowed",
-                            crate::config::SandboxAction::Deny => "sandbox_denied",
-                            crate::config::SandboxAction::Smart => "sandbox_allowed",
-                        };
-                        self.audit.session_event(
-                            event_name,
-                            &session_id,
-                            Some(event.process_pid),
-                            self.sessions
-                                .member_executable(event.process_pid)
-                                .as_deref(),
-                            serde_json::json!({
-                                "kind": event.kind,
-                                "decision": event.decision,
-                                "rule_id": event.rule_id,
-                                "decision_source": event.source,
-                                "operation": event.operation,
-                                "target": event.target,
-                                "argv_redacted": event.argv_redacted,
-                                "process_tid": event.process_tid,
-                                "snapshot_version": event.snapshot_version,
-                                "reporter": "static-supervisor",
-                            }),
-                        );
+                    let diagnostic = event.decision == crate::config::SandboxAction::Pass
+                        && !event.source.contains("error")
+                        && event.reason.as_deref() != Some("sandbox_inspection_error");
+                    if !diagnostic || self.audit.debug_enabled() {
+                        let attributes = sandbox_security_attributes(&event, diagnostic);
+                        if diagnostic {
+                            self.audit.security_debug(
+                                &session_id,
+                                Some(event.process_pid),
+                                self.sessions
+                                    .member_executable(event.process_pid)
+                                    .as_deref(),
+                                attributes,
+                            );
+                        } else {
+                            self.audit.security_alert(
+                                &session_id,
+                                Some(event.process_pid),
+                                self.sessions
+                                    .member_executable(event.process_pid)
+                                    .as_deref(),
+                                attributes,
+                            );
+                        }
                     }
                     ControlResponse::Ok
                 } else {
@@ -1304,17 +1343,30 @@ impl ControlService {
                         && self.sessions.authenticate_member(&session_id, &token, pid)
                 });
                 if authenticated {
-                    if should_record_sandbox_audit(self.audit.debug_enabled(), &event.source) {
-                        let event_name = match event.decision {
-                            crate::config::SandboxAction::Pass => "sandbox_allowed",
-                            crate::config::SandboxAction::Deny => "sandbox_denied",
-                            crate::config::SandboxAction::Smart => "sandbox_allowed",
-                        };
-                        self.audit.session_event(event_name, &session_id, Some(event.process_pid), self.sessions.member_executable(event.process_pid).as_deref(), serde_json::json!({
-                            "kind": event.kind, "decision": event.decision, "rule_id": event.rule_id, "decision_source": event.source,
-                            "operation": event.operation, "target": event.target, "argv_redacted": event.argv_redacted, "process_tid": event.process_tid,
-                            "snapshot_version": event.snapshot_version,
-                        }));
+                    let diagnostic = event.decision == crate::config::SandboxAction::Pass
+                        && !event.source.contains("error")
+                        && event.reason.as_deref() != Some("sandbox_inspection_error");
+                    if !diagnostic || self.audit.debug_enabled() {
+                        let attributes = sandbox_security_attributes(&event, diagnostic);
+                        if diagnostic {
+                            self.audit.security_debug(
+                                &session_id,
+                                Some(event.process_pid),
+                                self.sessions
+                                    .member_executable(event.process_pid)
+                                    .as_deref(),
+                                attributes,
+                            );
+                        } else {
+                            self.audit.security_alert(
+                                &session_id,
+                                Some(event.process_pid),
+                                self.sessions
+                                    .member_executable(event.process_pid)
+                                    .as_deref(),
+                                attributes,
+                            );
+                        }
                     }
                     ControlResponse::Ok
                 } else {
@@ -1329,7 +1381,7 @@ impl ControlService {
                 root_pid,
                 process_pid,
                 protection_id,
-                rule_id,
+                rule_id: _,
                 stage,
                 executable,
                 argv,
@@ -1350,8 +1402,6 @@ impl ControlService {
                         message: "invalid static smart protection reporter".into(),
                     }
                 } else {
-                    let audit_argv = argv.clone();
-                    let audit_features = features.clone();
                     let outcome = runtime
                         .protection
                         .evaluate_agent(
@@ -1380,33 +1430,8 @@ impl ControlService {
                         .unwrap_or_else(|| "provider_pass".into());
                     let risk_level = provider.and_then(|item| item.risk_level.clone());
                     let confidence = provider.and_then(|item| item.confidence);
-                    let destructive_probability =
-                        provider.and_then(|item| item.destructive_probability);
-                    let blast_radius = provider.and_then(|item| item.blast_radius);
                     let cache_hit = provider.is_some_and(|item| item.cache_hit);
-                    if should_record_smart_audit(self.audit.debug_enabled(), action) {
-                        self.audit.session_event(
-                            "smart_protection_decision",
-                            &session_id,
-                            Some(process_pid),
-                            Some(&executable),
-                            serde_json::json!({
-                                "protection": protection_id,
-                                "rule_id": rule_id,
-                                "stage": stage,
-                                "action": action,
-                                "reason": reason,
-                                "argv_redacted": audit_argv,
-                                "features": audit_features,
-                                "risk_level": risk_level,
-                                "confidence": confidence,
-                                "destructive_probability": destructive_probability,
-                                "blast_radius": blast_radius,
-                                "cache_hit": cache_hit,
-                                "reporter": "static-supervisor",
-                            }),
-                        );
-                    }
+
                     ControlResponse::SmartProtectionDecision {
                         action,
                         reason,
@@ -1420,7 +1445,7 @@ impl ControlService {
                 session_id,
                 token,
                 protection_id,
-                rule_id,
+                rule_id: _,
                 stage,
                 executable,
                 argv,
@@ -1440,8 +1465,6 @@ impl ControlService {
                     }
                 } else {
                     let reporter_pid = peer_pid.unwrap();
-                    let audit_argv = argv.clone();
-                    let audit_features = features.clone();
                     let outcome = runtime
                         .protection
                         .evaluate_agent(
@@ -1470,32 +1493,8 @@ impl ControlService {
                         .unwrap_or_else(|| "provider_pass".into());
                     let risk_level = provider.and_then(|item| item.risk_level.clone());
                     let confidence = provider.and_then(|item| item.confidence);
-                    let destructive_probability =
-                        provider.and_then(|item| item.destructive_probability);
-                    let blast_radius = provider.and_then(|item| item.blast_radius);
                     let cache_hit = provider.is_some_and(|item| item.cache_hit);
-                    if should_record_smart_audit(self.audit.debug_enabled(), action) {
-                        self.audit.session_event(
-                            "smart_protection_decision",
-                            &session_id,
-                            Some(reporter_pid),
-                            Some(&executable),
-                            serde_json::json!({
-                                "protection": protection_id,
-                                "rule_id": rule_id,
-                                "stage": stage,
-                                "action": action,
-                                "reason": reason,
-                                "argv_redacted": audit_argv,
-                                "features": audit_features,
-                                "risk_level": risk_level,
-                                "confidence": confidence,
-                                "destructive_probability": destructive_probability,
-                                "blast_radius": blast_radius,
-                                "cache_hit": cache_hit,
-                            }),
-                        );
-                    }
+
                     ControlResponse::SmartProtectionDecision {
                         action,
                         reason,
@@ -2327,30 +2326,6 @@ pub async fn control_request(
 mod tests {
     use super::*;
 
-    #[test]
-    fn smart_pass_audits_are_debug_only() {
-        assert!(!should_record_smart_audit(
-            false,
-            crate::config::SandboxAction::Pass
-        ));
-        assert!(should_record_smart_audit(
-            true,
-            crate::config::SandboxAction::Pass
-        ));
-        assert!(should_record_smart_audit(
-            false,
-            crate::config::SandboxAction::Deny
-        ));
-    }
-
-    #[test]
-    fn only_smart_pass_sandbox_audits_are_filtered() {
-        assert!(!should_record_sandbox_audit(false, "smart_protection_pass"));
-        assert!(should_record_sandbox_audit(true, "smart_protection_pass"));
-        assert!(should_record_sandbox_audit(false, "smart_protection"));
-        assert!(should_record_sandbox_audit(false, "rule"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn unix_control_endpoint_is_scoped_to_hyperhub_home() {
@@ -3087,7 +3062,7 @@ mod tests {
     #[tokio::test]
     async fn config_update_is_applied_only_with_valid_proof() {
         let mut config = Config::default();
-        let managed_log = "state/audit/hyperhub.jsonl";
+        let managed_log = "state/audit/security-alerts.jsonl";
         let managed_transcripts = "state/audit/transcripts";
         config.audit.log = Some(managed_log.into());
         config.audit.transcript_dir = Some(managed_transcripts.into());
