@@ -15,6 +15,7 @@ use crate::session::{
 };
 use crate::socks::SocksListenerController;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -131,6 +132,8 @@ pub struct ControlService {
     socks_listener: Option<SocksListenerController>,
     config_update: Arc<tokio::sync::Mutex<()>>,
     shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    session_state_path: Option<PathBuf>,
+    session_state_key: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl ControlService {
@@ -154,6 +157,8 @@ impl ControlService {
             socks_listener: None,
             config_update: Arc::new(tokio::sync::Mutex::new(())),
             shutdown: None,
+            session_state_path: None,
+            session_state_key: None,
         }
     }
 
@@ -169,6 +174,12 @@ impl ControlService {
 
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Sender<bool>) -> Self {
         self.shutdown = Some(shutdown);
+        self
+    }
+
+    pub fn with_session_persistence(mut self, path: PathBuf, key: Zeroizing<Vec<u8>>) -> Self {
+        self.session_state_path = Some(path);
+        self.session_state_key = Some(key);
         self
     }
 
@@ -1532,10 +1543,36 @@ impl ControlService {
             ControlRequest::SubscribeSandbox { .. } => {
                 unreachable!("subscription handled before request dispatch")
             }
-            ControlRequest::Shutdown => {
+            ControlRequest::Shutdown { preserve_sessions } => {
                 if self.shutdown.is_some() {
-                    shutdown_requested = true;
-                    ControlResponse::Ok
+                    let state_result = if preserve_sessions {
+                        match (&self.session_state_path, &self.session_state_key) {
+                            (Some(path), Some(key)) => serde_json::to_vec(
+                                &self
+                                    .sessions
+                                    .durable_snapshot(unix_timestamp_ms(), 24 * 60 * 60 * 1000),
+                            )
+                            .map_err(|error| error.to_string())
+                            .and_then(|bytes| {
+                                crate::config_store::save_session_state(path, &bytes, key)
+                                    .map_err(|error| error.to_string())
+                            }),
+                            _ => Err("session persistence is unavailable".into()),
+                        }
+                    } else {
+                        match &self.session_state_path {
+                            Some(path) => crate::config_store::remove_session_state(path)
+                                .map_err(|error| error.to_string()),
+                            None => Ok(()),
+                        }
+                    };
+                    match state_result {
+                        Ok(()) => {
+                            shutdown_requested = true;
+                            ControlResponse::Ok
+                        }
+                        Err(message) => ControlResponse::Error { message },
+                    }
                 } else {
                     ControlResponse::Error {
                         message: "serve lifecycle management is unavailable".into(),

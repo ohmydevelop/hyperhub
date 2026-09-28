@@ -5,7 +5,9 @@ use hyperhub_core::config_store::{
 use hyperhub_core::control::{
     control_request, discovery_control_endpoint, run_control_server, ControlService,
 };
-use hyperhub_core::session::{session_proof, ControlRequest, ControlResponse, SessionRegistry};
+use hyperhub_core::session::{
+    session_proof, unix_timestamp_ms, ControlRequest, ControlResponse, SessionRegistry,
+};
 use hyperhub_core::socks::SocksService;
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -267,7 +269,29 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     let mut output = ServeOutput::open(run.output.as_deref())?;
     let session_auth_key = unlocked.session_auth_key.clone();
     let descriptor = unlocked.descriptor.clone();
+    let session_state_path = config_store::hyperhub_home()
+        .map_err(|error| error.to_string())?
+        .join("runtime/session-state.bin");
     let sessions = SessionRegistry::new(unlocked.session_auth_key, unlocked.descriptor);
+    let mut restored_sessions = None;
+    if session_state_path.is_file() {
+        match config_store::load_session_state(&session_state_path, session_auth_key.as_slice())
+            .and_then(|bytes| {
+                serde_json::from_slice::<hyperhub_core::session::DurableSessionState>(&bytes)
+                    .map_err(|error| {
+                        hyperhub_core::config_store::StoreError::Format(error.to_string())
+                    })
+            }) {
+            Ok(snapshot) => {
+                restored_sessions =
+                    Some(sessions.restore_durable_state(snapshot, unix_timestamp_ms()));
+            }
+            Err(error) => {
+                eprintln!("hyperhub: discarding invalid persisted session state: {error}");
+                let _ = config_store::remove_session_state(&session_state_path);
+            }
+        }
+    }
     let root_certificates = config_store::load_root_certificates(
         &path,
         password.as_bytes(),
@@ -307,16 +331,22 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         socks.tls_ca_pem().to_owned(),
         audit.clone(),
         socks.runtime(),
-        session_auth_key,
+        session_auth_key.clone(),
     )
     .with_socks_listener(socks.listener_controller())
     .with_forced_debug(run.debug)
-    .with_shutdown(shutdown);
+    .with_shutdown(shutdown)
+    .with_session_persistence(session_state_path.clone(), session_auth_key.clone());
     output.line(format!("HyperHub SOCKS5 listening on {}", socks_address))?;
     output.line(format!(
         "HyperHub control endpoint {}",
         discovery_control_endpoint()
     ))?;
+    if let Some((restored, discarded)) = restored_sessions {
+        output.line(format!(
+            "HyperHub sessions restored: {restored} (discarded: {discarded})"
+        ))?;
+    }
     if let Some(path) = audit.current_log_path() {
         output.line(format!("HyperHub audit log {}", path.display()))?;
     }

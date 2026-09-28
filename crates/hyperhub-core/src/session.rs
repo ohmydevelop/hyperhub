@@ -108,6 +108,41 @@ pub struct SessionSnapshot {
     pub processes: Vec<InjectedProcessSnapshot>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableSessionState {
+    pub schema_version: u32,
+    pub saved_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub sessions: Vec<DurableSessionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurableSessionRecord {
+    pub session_id: String,
+    pub token: String,
+    pub root_pid: u32,
+    pub root_start_time: u64,
+    pub executable: String,
+    pub members: Vec<DurableSessionMember>,
+    pub fake_by_name: Vec<DurableFakeAddress>,
+    pub next_fake_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurableSessionMember {
+    pub pid: u32,
+    pub executable: String,
+    pub start_time: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurableFakeAddress {
+    pub hostname: String,
+    pub family: u8,
+    pub address: IpAddr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InjectedProcessSnapshot {
     pub pid: u32,
@@ -1055,6 +1090,130 @@ impl SessionRegistry {
         .then(|| record.executable.clone())
     }
 
+    pub fn durable_snapshot(&self, now_ms: u64, ttl_ms: u64) -> DurableSessionState {
+        let Ok(state) = self.0.lock() else {
+            return DurableSessionState {
+                schema_version: 1,
+                saved_at_ms: now_ms,
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+                sessions: Vec::new(),
+            };
+        };
+        let sessions = state
+            .sessions
+            .values()
+            .filter(|record| record.lifecycle == SessionLifecycle::RootProcess)
+            .map(|record| DurableSessionRecord {
+                session_id: record.session_id.clone(),
+                token: record.token.clone(),
+                root_pid: record.root_pid,
+                root_start_time: process_start_time(record.root_pid).unwrap_or(0),
+                executable: record.executable.clone(),
+                members: record
+                    .members
+                    .iter()
+                    .map(|(pid, executable)| DurableSessionMember {
+                        pid: *pid,
+                        executable: executable.clone(),
+                        start_time: process_start_time(*pid).unwrap_or(0),
+                    })
+                    .collect(),
+                fake_by_name: record
+                    .fake_by_name
+                    .iter()
+                    .map(|((hostname, family), address)| DurableFakeAddress {
+                        hostname: hostname.clone(),
+                        family: *family,
+                        address: *address,
+                    })
+                    .collect(),
+                next_fake_id: record.next_fake_id,
+            })
+            .collect();
+        DurableSessionState {
+            schema_version: 1,
+            saved_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(ttl_ms),
+            sessions,
+        }
+    }
+
+    pub fn restore_durable_state(
+        &self,
+        snapshot: DurableSessionState,
+        now_ms: u64,
+    ) -> (usize, usize) {
+        if snapshot.schema_version != 1 || snapshot.expires_at_ms <= now_ms {
+            return (0, snapshot.sessions.len());
+        }
+        let Ok(mut state) = self.0.lock() else {
+            return (0, snapshot.sessions.len());
+        };
+        let mut restored = 0usize;
+        let mut discarded = 0usize;
+        for durable in snapshot.sessions {
+            if durable.root_pid == 0
+                || !process_identity_matches(
+                    durable.root_pid,
+                    &durable.executable,
+                    durable.root_start_time,
+                )
+            {
+                discarded += 1;
+                continue;
+            }
+            let mut members = HashMap::new();
+            let mut member_instances = HashMap::new();
+            for member in durable.members {
+                if process_identity_matches(member.pid, &member.executable, member.start_time) {
+                    members.insert(member.pid, member.executable);
+                    member_instances.insert(member.pid, next_member_instance(&mut state));
+                }
+            }
+            if !members.contains_key(&durable.root_pid) {
+                discarded += 1;
+                continue;
+            }
+            let mut fake_by_name = HashMap::new();
+            let mut name_by_fake = HashMap::new();
+            for fake in durable.fake_by_name {
+                fake_by_name.insert((fake.hostname.clone(), fake.family), fake.address);
+                name_by_fake.insert(fake.address, fake.hostname);
+            }
+            state.sessions.insert(
+                durable.session_id.clone(),
+                SessionRecord {
+                    session_id: durable.session_id,
+                    token: durable.token,
+                    root_pid: durable.root_pid,
+                    executable: durable.executable,
+                    lifecycle: SessionLifecycle::RootProcess,
+                    pending_expires_at: None,
+                    members,
+                    member_instances,
+                    process_policies: HashMap::new(),
+                    agent_heartbeats: HashMap::new(),
+                    fork_leases: HashMap::new(),
+                    fake_by_name,
+                    name_by_fake,
+                    next_fake_id: durable.next_fake_id.max(1),
+                    cancellation: CancellationToken::new(),
+                },
+            );
+            restored += 1;
+        }
+        (restored, discarded)
+    }
+
+    pub fn clear_all(&self) {
+        if let Ok(mut state) = self.0.lock() {
+            for record in state.sessions.values() {
+                record.cancellation.cancel();
+            }
+            state.sessions.clear();
+        }
+    }
+
     pub fn snapshot(&self) -> Vec<SessionSnapshot> {
         let now = Instant::now();
         let mut snapshots = self
@@ -1134,6 +1293,49 @@ impl SessionRegistry {
             .unwrap_or_default();
         snapshots.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         snapshots
+    }
+}
+
+fn process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after = stat.rsplit_once(") ")?.1;
+        return after.split_whitespace().nth(19)?.parse().ok();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn process_identity_matches(pid: u32, executable: &str, start_time: u64) -> bool {
+    if pid == 0 || executable.is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let actual = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+        let expected = std::fs::canonicalize(executable)
+            .unwrap_or_else(|_| std::path::PathBuf::from(executable))
+            .to_string_lossy()
+            .into_owned();
+        let actual = actual.map(|path| {
+            std::fs::canonicalize(path)
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
+        return actual.as_deref() == Some(expected.as_str())
+            && (start_time == 0 || process_start_time(pid) == Some(start_time));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, executable, start_time);
+        false
     }
 }
 
@@ -1418,7 +1620,10 @@ pub enum ControlRequest {
         config_json: String,
     },
     GetStatus,
-    Shutdown,
+    Shutdown {
+        #[serde(default)]
+        preserve_sessions: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

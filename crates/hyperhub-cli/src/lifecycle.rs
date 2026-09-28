@@ -169,6 +169,10 @@ pub(crate) fn serve_running() -> Result<bool, String> {
 }
 
 pub fn stop() -> Result<i32, String> {
+    stop_with_persistence(false)
+}
+
+fn stop_with_persistence(preserve_sessions: bool) -> Result<i32, String> {
     let Some(status) = query_status()? else {
         println!("HyperHub serve is stopped");
         return Ok(0);
@@ -176,7 +180,7 @@ pub fn stop() -> Result<i32, String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     match runtime.block_on(control_request(
         &discovery_control_endpoint(),
-        &ControlRequest::Shutdown,
+        &ControlRequest::Shutdown { preserve_sessions },
     )) {
         Ok(ControlResponse::Ok) => {}
         Ok(ControlResponse::Error { message }) => return Err(message),
@@ -197,7 +201,7 @@ pub fn stop() -> Result<i32, String> {
 }
 
 pub fn restart(config: StartConfig) -> Result<i32, String> {
-    stop()?;
+    stop_with_persistence(true)?;
     start(config)
 }
 

@@ -19,6 +19,8 @@ const FLAG_ENCRYPTED: u8 = 1;
 const HEADER_LEN: usize = 120;
 const CONFIG_LABEL: &[u8] = b"hyperhub/config-aead/v1";
 const APPROVAL_STATE_LABEL: &[u8] = b"hyperhub/approval-state-aead/v1";
+const SESSION_STATE_LABEL: &[u8] = b"hyperhub/session-state-aead/v1";
+const SESSION_STATE_MAGIC: &[u8; 8] = b"HHSESS01";
 const DEFAULT_MEMORY_KIB: u32 = 64 * 1024;
 const DEFAULT_ITERATIONS: u32 = 3;
 const DEFAULT_LANES: u32 = 1;
@@ -158,6 +160,72 @@ pub fn read_redacted_json(config_path: &Path) -> Result<Vec<u8>, StoreError> {
 
 pub fn save_private_bytes(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     atomic_write(path, bytes)
+}
+
+/// Save runtime Session state encrypted with the stable session-auth key.
+/// This state is separate from configuration and approval data.
+pub fn save_session_state(path: &Path, bytes: &[u8], key: &[u8]) -> Result<(), StoreError> {
+    if key.len() != 32 {
+        return Err(StoreError::Format(
+            "session state key must be 32 bytes".into(),
+        ));
+    }
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| StoreError::Format("invalid session state key".into()))?;
+    let nonce_bytes: [u8; 24] = rand::random();
+    let nonce = XNonce::from(nonce_bytes);
+    let encrypted = cipher
+        .encrypt(
+            &nonce,
+            chacha20poly1305::aead::Payload {
+                msg: bytes,
+                aad: SESSION_STATE_LABEL,
+            },
+        )
+        .map_err(|_| StoreError::Authentication)?;
+    let mut output =
+        Vec::with_capacity(SESSION_STATE_MAGIC.len() + nonce_bytes.len() + encrypted.len());
+    output.extend_from_slice(SESSION_STATE_MAGIC);
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&encrypted);
+    atomic_write(path, &output)
+}
+
+pub fn load_session_state(path: &Path, key: &[u8]) -> Result<Vec<u8>, StoreError> {
+    if key.len() != 32 {
+        return Err(StoreError::Format(
+            "session state key must be 32 bytes".into(),
+        ));
+    }
+    let bytes = read(path)?;
+    if bytes.len() < SESSION_STATE_MAGIC.len() + 24 || &bytes[..8] != SESSION_STATE_MAGIC {
+        return Err(StoreError::Format(
+            "session state container is invalid".into(),
+        ));
+    }
+    let nonce = XNonce::from_slice(&bytes[8..32]);
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| StoreError::Format("invalid session state key".into()))?;
+    cipher
+        .decrypt(
+            nonce,
+            chacha20poly1305::aead::Payload {
+                msg: &bytes[32..],
+                aad: SESSION_STATE_LABEL,
+            },
+        )
+        .map_err(|_| StoreError::Authentication)
+}
+
+pub fn remove_session_state(path: &Path) -> Result<(), StoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreError::Io {
+            path: path.to_owned(),
+            source,
+        }),
+    }
 }
 
 pub fn new_descriptor() -> KdfDescriptor {
