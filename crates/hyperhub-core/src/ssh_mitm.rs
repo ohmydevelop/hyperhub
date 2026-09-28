@@ -674,6 +674,36 @@ impl ClientHandler {
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: Channel<client::Msg>,
+        originator_address: &str,
+        originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(server_handle) = self.shared.server_handle.get().cloned() else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        let server_channel = match server_handle
+            .channel_open_x11(originator_address, originator_port)
+            .await
+        {
+            Ok(channel) => channel,
+            Err(_) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+        };
+        reply.accept().await;
+        self.bridge_client_open_channel(channel, server_channel, server_handle)
+            .await;
+        Ok(())
+    }
+
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
         channel: Channel<client::Msg>,
