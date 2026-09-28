@@ -635,10 +635,58 @@ pub struct SshHostKeyExpectation {
 
 struct ClientHandler {
     expected: SshHostKeyExpectation,
+    shared: Arc<Shared>,
+    audit: SshAuditSink,
+    transcript: Option<CaptureConfig>,
 }
 
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(server_handle) = self.shared.server_handle.get().cloned() else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        let server_channel = match server_handle.channel_open_agent().await {
+            Ok(channel) => channel,
+            Err(_) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+        };
+        reply.accept().await;
+
+        let server_id = server_channel.id();
+        let (client_read, client_write) = channel.split();
+        let (server_read, server_write) = server_channel.split();
+        let client_write = Arc::new(client_write);
+        let server_write = Arc::new(server_write);
+        self.shared
+            .upstream_write
+            .lock()
+            .await
+            .insert(server_id, client_write.clone());
+        tokio::spawn(run_channel_bridge(
+            server_id,
+            server_read,
+            server_write,
+            client_read,
+            client_write,
+            server_handle,
+            self.shared.clone(),
+            self.audit.clone(),
+            self.transcript.clone(),
+        ));
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -700,37 +748,45 @@ impl server::Handler for ServerHandler {
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         let client_channel = self.client_handle.channel_open_session().await?;
-        let server_id = channel.id();
-        let (client_read, client_write) = client_channel.split();
-        let (server_read, server_write) = channel.split();
-        let client_write = Arc::new(client_write);
-        let server_write = Arc::new(server_write);
+        self.bridge_channel(channel, reply, client_channel).await;
+        Ok(())
+    }
 
-        reply.accept().await;
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<server::Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        originator_address: &str,
+        originator_port: u32,
+        reply: server::ChannelOpenHandle,
+        _session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        let client_channel = self
+            .client_handle
+            .channel_open_direct_tcpip(
+                host_to_connect,
+                port_to_connect,
+                originator_address,
+                originator_port,
+            )
+            .await?;
+        self.bridge_channel(channel, reply, client_channel).await;
+        Ok(())
+    }
 
-        self.shared
-            .upstream_write
-            .lock()
-            .await
-            .insert(server_id, client_write.clone());
-
-        let server_handle = self
-            .shared
-            .server_handle
-            .get()
-            .cloned()
-            .expect("server handle must be set before channel open");
-        tokio::spawn(run_channel_bridge(
-            server_id,
-            server_read,
-            server_write,
-            client_read,
-            client_write,
-            server_handle,
-            self.shared.clone(),
-            self.audit.clone(),
-            self.transcript.clone(),
-        ));
+    async fn channel_open_direct_streamlocal(
+        &mut self,
+        channel: Channel<server::Msg>,
+        socket_path: &str,
+        reply: server::ChannelOpenHandle,
+        _session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        let client_channel = self
+            .client_handle
+            .channel_open_direct_streamlocal(socket_path)
+            .await?;
+        self.bridge_channel(channel, reply, client_channel).await;
         Ok(())
     }
 
@@ -892,6 +948,27 @@ impl server::Handler for ServerHandler {
         Ok(())
     }
 
+    async fn agent_request(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut server::Session,
+    ) -> Result<bool, Self::Error> {
+        let Some(write) = self
+            .shared
+            .upstream_write
+            .lock()
+            .await
+            .get(&channel)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        // The upstream client session handles the eventual agent channel open;
+        // the request itself must not create a second reply that can race the
+        // downstream server's automatic agent-request response.
+        Ok(write.agent_forward(false).await.is_ok())
+    }
+
     async fn signal(
         &mut self,
         channel: ChannelId,
@@ -922,6 +999,45 @@ impl server::Handler for ServerHandler {
     }
 }
 impl ServerHandler {
+    async fn bridge_channel(
+        &self,
+        channel: Channel<server::Msg>,
+        reply: server::ChannelOpenHandle,
+        client_channel: Channel<client::Msg>,
+    ) {
+        let server_id = channel.id();
+        let (client_read, client_write) = client_channel.split();
+        let (server_read, server_write) = channel.split();
+        let client_write = Arc::new(client_write);
+        let server_write = Arc::new(server_write);
+
+        reply.accept().await;
+
+        self.shared
+            .upstream_write
+            .lock()
+            .await
+            .insert(server_id, client_write.clone());
+
+        let server_handle = self
+            .shared
+            .server_handle
+            .get()
+            .cloned()
+            .expect("server handle must be set before channel open");
+        tokio::spawn(run_channel_bridge(
+            server_id,
+            server_read,
+            server_write,
+            client_read,
+            client_write,
+            server_handle,
+            self.shared.clone(),
+            self.audit.clone(),
+            self.transcript.clone(),
+        ));
+    }
+
     async fn forward_control(&self, channel: ChannelId, message: UpstreamControl) {
         let Some(write) = self
             .shared
@@ -1122,6 +1238,9 @@ pub async fn run_ssh_mitm(
         upstream_stream,
         ClientHandler {
             expected: expected_host_key,
+            shared: shared.clone(),
+            audit: audit.clone(),
+            transcript: transcript.clone(),
         },
     )
     .await
