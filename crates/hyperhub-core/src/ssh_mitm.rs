@@ -640,8 +640,105 @@ struct ClientHandler {
     transcript: Option<CaptureConfig>,
 }
 
+impl ClientHandler {
+    async fn bridge_client_open_channel(
+        &self,
+        channel: Channel<client::Msg>,
+        server_channel: Channel<server::Msg>,
+        server_handle: server::Handle,
+    ) {
+        let server_id = server_channel.id();
+        let (client_read, client_write) = channel.split();
+        let (server_read, server_write) = server_channel.split();
+        let client_write = Arc::new(client_write);
+        let server_write = Arc::new(server_write);
+        self.shared
+            .upstream_write
+            .lock()
+            .await
+            .insert(server_id, client_write.clone());
+        tokio::spawn(run_channel_bridge(
+            server_id,
+            server_read,
+            server_write,
+            client_read,
+            client_write,
+            server_handle,
+            self.shared.clone(),
+            self.audit.clone(),
+            self.transcript.clone(),
+        ));
+    }
+}
+
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(server_handle) = self.shared.server_handle.get().cloned() else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        let server_channel = match server_handle
+            .channel_open_forwarded_tcpip(
+                connected_address,
+                connected_port,
+                originator_address,
+                originator_port,
+            )
+            .await
+        {
+            Ok(channel) => channel,
+            Err(_) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+        };
+        reply.accept().await;
+        self.bridge_client_open_channel(channel, server_channel, server_handle)
+            .await;
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        channel: Channel<client::Msg>,
+        socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(server_handle) = self.shared.server_handle.get().cloned() else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        let server_channel = match server_handle
+            .channel_open_forwarded_streamlocal(socket_path)
+            .await
+        {
+            Ok(channel) => channel,
+            Err(_) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+        };
+        reply.accept().await;
+        self.bridge_client_open_channel(channel, server_channel, server_handle)
+            .await;
+        Ok(())
+    }
 
     async fn server_channel_open_agent_forward(
         &mut self,
@@ -704,6 +801,58 @@ impl client::Handler for ClientHandler {
 
 impl server::Handler for ServerHandler {
     type Error = russh::Error;
+
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        _session: &mut server::Session,
+    ) -> Result<bool, Self::Error> {
+        match self.client_handle.tcpip_forward(address, *port).await {
+            Ok(assigned_port) => {
+                *port = assigned_port;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    async fn cancel_tcpip_forward(
+        &mut self,
+        address: &str,
+        port: u32,
+        _session: &mut server::Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(self
+            .client_handle
+            .cancel_tcpip_forward(address, port)
+            .await
+            .is_ok())
+    }
+
+    async fn streamlocal_forward(
+        &mut self,
+        socket_path: &str,
+        _session: &mut server::Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(self
+            .client_handle
+            .streamlocal_forward(socket_path)
+            .await
+            .is_ok())
+    }
+
+    async fn cancel_streamlocal_forward(
+        &mut self,
+        socket_path: &str,
+        _session: &mut server::Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(self
+            .client_handle
+            .cancel_streamlocal_forward(socket_path)
+            .await
+            .is_ok())
+    }
 
     async fn auth_none(&mut self, user: &str) -> Result<server::Auth, Self::Error> {
         // The configured SSH credential is the authentication boundary for this
