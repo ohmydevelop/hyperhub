@@ -291,12 +291,36 @@ fn extract_binary(bytes: &[u8], archive_name: &str) -> Result<Vec<u8>, String> {
 }
 
 fn replace_binary(payload: &Path, target: &Path) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "cannot determine HyperHub binary directory".to_string())?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "cannot determine HyperHub binary name".to_string())?;
+    let staging = parent.join(format!(".{file_name}.upgrade-{}", std::process::id()));
     let backup = target.with_extension("upgrade-backup");
+
+    // The downloaded payload lives in the system temporary directory, which
+    // may be mounted on a different filesystem from the install directory.
+    // Copy it beside the target first so the final rename stays same-device
+    // and remains atomic on Unix.
+    let _ = fs::remove_file(&staging);
+    fs::copy(payload, &staging)
+        .map_err(|error| format!("cannot stage upgraded HyperHub binary: {error}"))?;
+    if let Err(error) = set_executable(&staging) {
+        let _ = fs::remove_file(&staging);
+        return Err(format!("cannot prepare staged HyperHub binary: {error}"));
+    }
+
     let _ = fs::remove_file(&backup);
-    fs::rename(target, &backup)
-        .map_err(|error| format!("cannot move current HyperHub binary: {error}"))?;
-    if let Err(error) = fs::rename(payload, target) {
+    if let Err(error) = fs::rename(target, &backup) {
+        let _ = fs::remove_file(&staging);
+        return Err(format!("cannot move current HyperHub binary: {error}"));
+    }
+    if let Err(error) = fs::rename(&staging, target) {
         let _ = fs::rename(&backup, target);
+        let _ = fs::remove_file(&staging);
         return Err(format!("cannot install upgraded HyperHub binary: {error}"));
     }
     let _ = fs::remove_file(backup);
@@ -406,6 +430,29 @@ mod tests {
     fn parses_release_versions_with_tag_prefix() {
         assert_eq!(parse_version("v1.2.3"), (1, 2, 3));
         assert_eq!(parse_version("1.2"), (1, 2, 0));
+    }
+
+    #[test]
+    fn replaces_binary_through_install_directory_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "hyperhub-upgrade-test-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let payload = root.join("payload");
+        let target = root.join("hyperhub");
+        fs::write(&payload, b"new-binary").unwrap();
+        fs::write(&target, b"old-binary").unwrap();
+
+        replace_binary(&payload, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new-binary");
+        assert!(!target.with_extension("upgrade-backup").exists());
+        assert!(!root
+            .join(format!(".hyperhub.upgrade-{}", std::process::id()))
+            .exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
