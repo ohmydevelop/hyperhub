@@ -651,8 +651,15 @@ impl server::Handler for ServerHandler {
     type Error = russh::Error;
 
     async fn auth_none(&mut self, user: &str) -> Result<server::Auth, Self::Error> {
-        self.ensure_upstream_auth(user).await;
-        Ok(server::Auth::reject())
+        // The configured SSH credential is the authentication boundary for this
+        // MITM. Authenticate upstream before accepting the client's probe so
+        // OpenSSH clients without a local key do not fall through to a password
+        // prompt that HyperHub cannot use.
+        Ok(if self.ensure_upstream_auth(user).await {
+            server::Auth::Accept
+        } else {
+            server::Auth::reject()
+        })
     }
 
     async fn auth_password(
@@ -1335,8 +1342,11 @@ mod tests {
             )
             .await
             .unwrap();
+            // The proxy authenticates to the upstream with the configured
+            // credential and accepts the client's initial `none` probe, so an
+            // OpenSSH client without a local key need not prompt for a password.
             assert!(session
-                .authenticate_password("test-user", "ignored-client-password")
+                .authenticate_none("test-user")
                 .await
                 .unwrap()
                 .success());
