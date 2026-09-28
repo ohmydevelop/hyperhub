@@ -1,5 +1,14 @@
 # HyperHub 配置数据参考（Schema v2）
 
+## Agent 快速执行与审批边界
+
+- 先执行一次 `hyperhub show`，从当前脱敏配置确定数组索引、UUID、ID 和引用；不要猜测或重复读取。
+- 用户明确“只记录/观察”时使用 `observe`、允许动作或 `pass`；明确“阻断/拒绝/失败关闭”时使用 `enforce`、拒绝动作或 `deny`。
+- 用户未说明安全效果时，先询问“只记录还是阻断”；不要提交带有猜测安全语义的 Patch。
+- Provider 异常或低置信度时的 `pass`/`deny` 也属于需要用户决定的安全效果；`deny` 表示失败关闭。
+- Agent 可以自动提交脱敏 Proposal，但不得运行 `approve`、输入主密码或填写真实敏感值。提交后必须引导用户运行 `hyperhub approve`。
+- Proposal 提交成功不等于配置已生效。用户确认审批完成后，才运行 `validate`、`show`、`status --json` 和必要的日志/行为验证。
+
 生成 JSON Patch 前必须运行 `hyperhub show`。输出中的数组索引、UUID、ID 和当前默认值是生成 Patch 的唯一依据。配置根对象必须包含 `schema_version: 2`；旧的顶层 `plugins`、`routes`、`firewall` 等结构不受支持。
 
 ## 顶层结构
@@ -144,7 +153,7 @@ Profile 位于 `/gateway/protections`。建议先创建 `observe` Profile，确�
 
 - `mode` 只能是 `observe` 或 `enforce`；`enabled` 必须为 `true` 才会生效。
 - `intelligence.enabled=true` 时必须提供完整 Provider；远程 Endpoint 使用 HTTPS，只有回环地址可以使用 HTTP。
-- `error_action` 和 `low_confidence_action` 为 `pass` 或 `deny`，默认建议 `pass`。
+- `error_action` 和 `low_confidence_action` 为 `pass` 或 `deny`；配置默认值为 `pass`，但当用户需要选择安全效果且未明确时，Agent 必须询问，不得静默替用户决定。`deny` 表示失败关闭。
 - Provider API Key 是敏感值，只能使用 `${APPROVE:name}`，不能写真实值。
 - 远程 Provider 只接收脱敏动作和检测结果摘要，不发送真实凭证、Header、Query、私钥或原始正文。
 
