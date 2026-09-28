@@ -53,6 +53,13 @@ enum UpstreamControl {
         variable_name: String,
         variable_value: String,
     },
+    X11 {
+        want_reply: bool,
+        single_connection: bool,
+        auth_protocol: String,
+        auth_cookie: String,
+        screen_number: u32,
+    },
     WindowChange {
         col_width: u32,
         row_height: u32,
@@ -807,11 +814,39 @@ impl server::Handler for ServerHandler {
         variable_value: &str,
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        // russh does not expose the client's want-reply bit to this callback.
+        // OpenSSH sends SendEnv requests without expecting a reply; forwarding
+        // them with want_reply=true lets an upstream rejection be mistaken for
+        // the reply to the next exec request. Environment propagation is
+        // therefore deliberately fire-and-forget.
         self.forward_control(
             channel,
             UpstreamControl::Env {
                 variable_name: variable_name.to_string(),
                 variable_value: variable_value.to_string(),
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn x11_request(
+        &mut self,
+        channel: ChannelId,
+        single_connection: bool,
+        auth_protocol: &str,
+        auth_cookie: &str,
+        screen_number: u32,
+        _session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        self.forward_control(
+            channel,
+            UpstreamControl::X11 {
+                want_reply: true,
+                single_connection,
+                auth_protocol: auth_protocol.to_string(),
+                auth_cookie: auth_cookie.to_string(),
+                screen_number,
             },
         )
         .await;
@@ -925,7 +960,24 @@ impl ServerHandler {
             UpstreamControl::Env {
                 variable_name,
                 variable_value,
-            } => write.set_env(true, variable_name, variable_value).await,
+            } => write.set_env(false, variable_name, variable_value).await,
+            UpstreamControl::X11 {
+                want_reply,
+                single_connection,
+                auth_protocol,
+                auth_cookie,
+                screen_number,
+            } => {
+                write
+                    .request_x11(
+                        want_reply,
+                        single_connection,
+                        auth_protocol,
+                        auth_cookie,
+                        screen_number,
+                    )
+                    .await
+            }
             UpstreamControl::WindowChange {
                 col_width,
                 row_height,
@@ -1134,6 +1186,21 @@ mod tests {
             } else {
                 server::Auth::reject()
             })
+        }
+
+        async fn env_request(
+            &mut self,
+            channel: ChannelId,
+            variable_name: &str,
+            _variable_value: &str,
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            if variable_name == "COLORTERM" || variable_name == "NO_COLOR" {
+                session.channel_failure(channel)?;
+            } else {
+                session.channel_success(channel)?;
+            }
+            Ok(())
         }
 
         async fn channel_open_session(
@@ -1352,6 +1419,10 @@ mod tests {
                 .success());
 
             let mut channel = session.channel_open_session().await.unwrap();
+            // OpenSSH commonly sends unsupported SendEnv values such as
+            // COLORTERM without requesting a reply. The upstream rejection
+            // must not be forwarded as the response to the following exec.
+            channel.set_env(false, "COLORTERM", "true").await.unwrap();
             channel.exec(true, b"large-output".to_vec()).await.unwrap();
 
             // 应用层暂时不读取：上游生产者必须被端到端背压，而不是在代理里无限堆积。
