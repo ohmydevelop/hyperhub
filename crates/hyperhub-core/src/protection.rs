@@ -239,7 +239,7 @@ impl ProtectionSnapshot {
             )
             .map_err(|error| error.to_string())?;
             let provider = if let Some(provider) = &profile.intelligence.provider {
-                let endpoint = provider_endpoint(provider).to_string();
+                let endpoint = provider_endpoint(provider);
                 let model = provider_model(provider).to_string();
                 let api_key = provider
                     .api_key
@@ -798,8 +798,24 @@ fn rolling_hashes(bytes: &[u8], window: usize) -> HashSet<[u8; 32]> {
         .collect()
 }
 
-fn provider_endpoint(config: &IntelligenceProviderConfig) -> &str {
-    config.endpoint.as_deref().unwrap_or("")
+fn provider_endpoint(config: &IntelligenceProviderConfig) -> String {
+    let endpoint = config.endpoint.as_deref().unwrap_or("");
+    if config.protocol != IntelligenceProtocol::SystemOne {
+        return endpoint.to_owned();
+    }
+
+    // Accept the documented System One base endpoint as well as the full
+    // `/v1/systemone` endpoint. Older configurations may contain only `/v1`;
+    // posting there returns 404 and makes an otherwise valid guard fail closed.
+    let Ok(mut url) = reqwest::Url::parse(endpoint) else {
+        return endpoint.to_owned();
+    };
+    let path = url.path().trim_end_matches('/');
+    if path == "/v1" {
+        url.set_path("/v1/systemone");
+        return url.to_string();
+    }
+    endpoint.to_owned()
 }
 
 fn provider_model(config: &IntelligenceProviderConfig) -> &str {
@@ -959,6 +975,38 @@ mod tests {
             },
             intelligence: IntelligenceProtectionConfig::default(),
         }
+    }
+
+    #[test]
+    fn system_one_base_endpoint_is_completed_with_resource_path() {
+        let config = IntelligenceProviderConfig {
+            uuid: String::new(),
+            id: "jev".into(),
+            protocol: IntelligenceProtocol::SystemOne,
+            endpoint: Some("https://system-one.dev/v1".into()),
+            model: Some("jev-latest".into()),
+            api_key: None,
+        };
+        assert_eq!(
+            provider_endpoint(&config),
+            "https://system-one.dev/v1/systemone"
+        );
+    }
+
+    #[test]
+    fn system_one_full_endpoint_is_preserved() {
+        let config = IntelligenceProviderConfig {
+            uuid: String::new(),
+            id: "jev".into(),
+            protocol: IntelligenceProtocol::SystemOne,
+            endpoint: Some("https://system-one.dev/v1/systemone".into()),
+            model: Some("jev-latest".into()),
+            api_key: None,
+        };
+        assert_eq!(
+            provider_endpoint(&config),
+            "https://system-one.dev/v1/systemone"
+        );
     }
 
     #[test]
