@@ -42,7 +42,7 @@ HyperHub 覆盖静态链接、已移除 ELF 符号的 Go、C 和 Rust 程序，�
 完整点位矩阵见 `docs/hook-intent-matrix.md`。静态后端当前覆盖：
 
 - DNS：UDP connect 状态，以及 `write/read`、`sendto/recvfrom`、`sendmsg/recvmsg`；
-- 网络：`socket/connect/getsockopt`、非阻塞 `fcntl/ioctl`、descriptor dup/close；
+- 网络：`socket/connect/getsockopt`、非阻塞 `fcntl/ioctl` 的设置与可见性、descriptor dup/close/close_range，以及 exec 后 `CLOEXEC` 状态回收；
 - 文件：open/openat/openat2/creat、read/write 及 vectored/positioned 变体、unlink、rename、mmap/mprotect/munmap；
 - 进程：clone/clone3/fork/vfork、execve/execveat、wait4；
 - 后代：fork/exec 后继续共享 Session、sandbox 与审计。
@@ -53,7 +53,7 @@ DNS 响应中的 A/AAAA 会建立 IP→域名关联，SOCKS5 CONNECT 优先发�
 
 Session bootstrap 向 launcher 提供已编译来源的 sandbox snapshot。supervisor 使用 HyperHub Core 的统一语义编译规则：
 
-- file sandbox 在 syscall 副作用前判定 read/write/create/delete/rename；
+- file sandbox 在 syscall 副作用前判定 read/write/create/delete/rename，以及文件映射从只读升级为可写；
 - rename 同时检查源和目标；
 - 可写文件 mmap 按 write 判定；
 - process sandbox 在 clone/fork/vfork 及 execve/execveat 前判定；exec 路径读取 executable 和 argv；

@@ -1,5 +1,7 @@
 #include <fcntl.h>
+#include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -342,6 +344,47 @@ static int run_file_probe(void) {
     return text_equals(readback, payload);
 }
 
+static int run_mprotect_upgrade_probe(void) {
+    const char path[] = "hyperhub-static-mprotect.data";
+    long fd = raw_syscall4(SYS_openat, AT_FDCWD, (long)path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+    if (is_negative(fd)) return 0;
+    if (is_negative(raw_syscall2(SYS_ftruncate, fd, 4096))) {
+        raw_syscall1(SYS_close, fd);
+        raw_syscall3(SYS_unlinkat, AT_FDCWD, (long)path, 0);
+        return 0;
+    }
+    long mapped = raw_syscall6(SYS_mmap, 0, 4096, PROT_READ, MAP_SHARED, fd, 0);
+    raw_syscall1(SYS_close, fd);
+    if (is_negative(mapped)) {
+        raw_syscall3(SYS_unlinkat, AT_FDCWD, (long)path, 0);
+        return 0;
+    }
+    int ok = !is_negative(raw_syscall3(SYS_mprotect, mapped, 4096, PROT_READ | PROT_WRITE));
+    if (ok) ((char *)mapped)[0] = 'x';
+    ok = ok && !is_negative(raw_syscall2(SYS_munmap, mapped, 4096));
+    raw_syscall3(SYS_unlinkat, AT_FDCWD, (long)path, 0);
+    return ok;
+}
+
+static int run_close_range_probe(void) {
+#ifdef SYS_close_range
+    long fd = raw_syscall3(SYS_socket, AF_INET, SOCK_STREAM, 0);
+    if (is_negative(fd)) return 0;
+    long result = raw_syscall3(SYS_close_range, fd, fd, 0);
+    if (result == -ENOSYS) {
+        raw_syscall1(SYS_close, fd);
+        return 1;
+    }
+    if (is_negative(result)) {
+        raw_syscall1(SYS_close, fd);
+        return 0;
+    }
+    return raw_syscall3(SYS_fcntl, fd, F_GETFD, 0) == -EBADF;
+#else
+    return 1;
+#endif
+}
+
 static int exchange_payload(long fd, const char *payload, size_t length, int mode) {
     char response[64] = {0};
     long sent;
@@ -373,10 +416,35 @@ static int run_network_probe(const char *host, const char *port_text) {
     if (port < 0 || !parse_ipv4(host, address_bytes)) return 0;
     long fd = raw_syscall3(SYS_socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (is_negative(fd)) return 0;
-    int nonblocking = 0;
-    raw_syscall3(SYS_ioctl, fd, FIONBIO, (long)&nonblocking);
+    long initial_flags = raw_syscall3(SYS_fcntl, fd, F_GETFL, 0);
+    if (is_negative(initial_flags) || !(initial_flags & O_NONBLOCK)) {
+        raw_syscall1(SYS_close, fd);
+        return 0;
+    }
     long duplicated = raw_syscall1(SYS_dup, fd);
-    if (!is_negative(duplicated)) raw_syscall1(SYS_close, duplicated);
+    if (is_negative(duplicated)) {
+        raw_syscall1(SYS_close, fd);
+        return 0;
+    }
+    int nonblocking = 0;
+    if (is_negative(raw_syscall3(SYS_ioctl, fd, FIONBIO, (long)&nonblocking))) {
+        raw_syscall1(SYS_close, duplicated);
+        raw_syscall1(SYS_close, fd);
+        return 0;
+    }
+    long blocking_flags = raw_syscall3(SYS_fcntl, duplicated, F_GETFL, 0);
+    if (is_negative(blocking_flags) || blocking_flags & O_NONBLOCK ||
+        is_negative(raw_syscall3(SYS_fcntl, duplicated, F_SETFL, blocking_flags | O_NONBLOCK))) {
+        raw_syscall1(SYS_close, duplicated);
+        raw_syscall1(SYS_close, fd);
+        return 0;
+    }
+    long alias_flags = raw_syscall3(SYS_fcntl, fd, F_GETFL, 0);
+    if (is_negative(alias_flags) || !(alias_flags & O_NONBLOCK)) {
+        raw_syscall1(SYS_close, duplicated);
+        raw_syscall1(SYS_close, fd);
+        return 0;
+    }
 #ifdef SYS_dup2
     long duplicated2 = raw_syscall2(SYS_dup2, fd, 100);
     if (!is_negative(duplicated2)) raw_syscall1(SYS_close, duplicated2);
@@ -395,7 +463,18 @@ static int run_network_probe(const char *host, const char *port_text) {
     raw_address[0] = address_bytes[0]; raw_address[1] = address_bytes[1];
     raw_address[2] = address_bytes[2]; raw_address[3] = address_bytes[3];
     long connected = raw_syscall3(SYS_connect, fd, (long)&address, sizeof(address));
-    if (is_negative(connected)) { raw_syscall1(SYS_close, fd); return 0; }
+    if (connected == -EINPROGRESS) {
+        struct pollfd descriptor = {(int)duplicated, POLLOUT, 0};
+        if (raw_syscall3(SYS_poll, (long)&descriptor, 1, 5000) <= 0) {
+            raw_syscall1(SYS_close, duplicated);
+            raw_syscall1(SYS_close, fd);
+            return 0;
+        }
+    } else if (is_negative(connected)) {
+        raw_syscall1(SYS_close, duplicated);
+        raw_syscall1(SYS_close, fd);
+        return 0;
+    }
     int socket_error = 0;
     unsigned int socket_error_length = sizeof(socket_error);
     raw_syscall5(SYS_getsockopt, fd, SOL_SOCKET, SO_ERROR, (long)&socket_error,
@@ -403,9 +482,14 @@ static int run_network_probe(const char *host, const char *port_text) {
     const char sendto_payload[] = "hyperhub-sendto";
     const char write_payload[] = "hyperhub-write";
     const char sendmsg_payload[] = "hyperhub-sendmsg";
-    int ok = exchange_payload(fd, sendto_payload, sizeof(sendto_payload) - 1, 0) &&
-             exchange_payload(fd, write_payload, sizeof(write_payload) - 1, 1) &&
-             exchange_payload(fd, sendmsg_payload, sizeof(sendmsg_payload) - 1, 2);
+    long restored_flags = raw_syscall3(SYS_fcntl, duplicated, F_GETFL, 0);
+    int ok = !is_negative(restored_flags) && restored_flags & O_NONBLOCK &&
+             !is_negative(raw_syscall3(SYS_fcntl, duplicated, F_SETFL,
+                                       restored_flags & ~O_NONBLOCK)) &&
+             exchange_payload(duplicated, sendto_payload, sizeof(sendto_payload) - 1, 0) &&
+             exchange_payload(duplicated, write_payload, sizeof(write_payload) - 1, 1) &&
+             exchange_payload(duplicated, sendmsg_payload, sizeof(sendmsg_payload) - 1, 2);
+    raw_syscall1(SYS_close, duplicated);
     raw_syscall1(SYS_close, fd);
     return ok;
 }
@@ -563,6 +647,20 @@ static int run_intent_mode(int argc, char **argv) {
         if (is_negative(raw_syscall4(SYS_wait4, child, (long)&status, 0, 0))) return 13;
         return WIFEXITED(status) ? WEXITSTATUS(status) : 13;
     }
+    if (argc == 3 && text_equals(argv[1], "--intent-mprotect-write")) {
+        long fd = raw_syscall4(SYS_openat, AT_FDCWD, (long)argv[2], O_CREAT | O_RDWR | O_TRUNC, 0600);
+        if (is_negative(fd)) return 13;
+        if (is_negative(raw_syscall2(SYS_ftruncate, fd, 4096))) {
+            raw_syscall1(SYS_close, fd);
+            return 13;
+        }
+        long mapped = raw_syscall6(SYS_mmap, 0, 4096, PROT_READ, MAP_SHARED, fd, 0);
+        raw_syscall1(SYS_close, fd);
+        if (is_negative(mapped)) return 13;
+        long result = raw_syscall3(SYS_mprotect, mapped, 4096, PROT_READ | PROT_WRITE);
+        raw_syscall2(SYS_munmap, mapped, 4096);
+        return is_negative(result) ? 13 : 0;
+    }
     return -1;
 }
 
@@ -580,7 +678,8 @@ int main(int argc, char **argv) {
     const char *host = argc > 2 ? argv[1] : "127.0.0.1";
     const char *port = argc > 2 ? argv[2] : "1";
     const char *dns_port = argc > 3 ? argv[3] : "1";
-    if (!run_file_probe() || !run_dns_probe(dns_port) || !run_network_probe(host, port) ||
+    if (!run_file_probe() || !run_mprotect_upgrade_probe() || !run_close_range_probe() ||
+        !run_dns_probe(dns_port) || !run_network_probe(host, port) ||
         !run_process_probe(host, port)) {
         write_text("static-direct-probe-failed\n");
         return 1;

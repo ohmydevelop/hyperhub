@@ -4,6 +4,9 @@ use crate::windows_gum::shared::*;
 use std::collections::HashMap;
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
+fn nt_succeeded(status: i32) -> bool {
+    status >= 0
+}
 #[repr(C)]
 struct UnicodeString {
     length: u16,
@@ -391,8 +394,11 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_close(h: HANDLE) ->
     let Some(f) = original!(ORIGINAL_NT_CLOSE, NtCloseFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    handles().lock().ok().map(|mut m| m.remove(&(h as usize)));
-    f(h)
+    let r = f(h);
+    if nt_succeeded(r) {
+        handles().lock().ok().map(|mut m| m.remove(&(h as usize)));
+    }
+    r
 }
 
 #[cfg(test)]
@@ -407,6 +413,12 @@ mod tests {
     #[test]
     fn open_if_with_write_access_is_classified_as_write() {
         assert_eq!(op_for_access(0x120, FILE_OPEN_IF), FileOperation::Write);
+    }
+
+    #[test]
+    fn failed_nt_close_keeps_handle_state() {
+        assert!(!nt_succeeded(STATUS_ACCESS_DENIED));
+        assert!(nt_succeeded(0));
     }
 
     #[test]

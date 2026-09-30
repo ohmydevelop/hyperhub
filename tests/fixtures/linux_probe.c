@@ -13,13 +13,14 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 extern char **environ;
 
-static int network_probe(const char *name, const char *service, int nonblocking) {
+static int network_probe(const char *name, const char *service, int nonblocking, int verify_flags) {
     struct addrinfo hints = {0};
     struct addrinfo *result = NULL;
     hints.ai_socktype = SOCK_STREAM;
@@ -35,6 +36,14 @@ static int network_probe(const char *name, const char *service, int nonblocking)
         fcntl(fd, F_SETFL, flags | (nonblocking ? O_NONBLOCK : 0));
     unsigned long nonblocking_value = (unsigned long)nonblocking;
     ioctl(fd, FIONBIO, &nonblocking_value);
+    if (verify_flags) {
+        flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || ((flags & O_NONBLOCK) != 0) != (nonblocking != 0)) {
+            close(fd);
+            freeaddrinfo(result);
+            return 0;
+        }
+    }
     int connected = connect(fd, result->ai_addr, result->ai_addrlen);
     freeaddrinfo(result);
     if (connected != 0 && (!nonblocking || errno != EINPROGRESS)) {
@@ -125,6 +134,44 @@ static int file_probe(void) {
     return ok && memcmp(data, readback, sizeof(data)) == 0;
 }
 
+static int writable_mapping_upgrade_probe(const char *path, int cleanup) {
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+    if (fd < 0 || ftruncate(fd, 4096) != 0) {
+        if (fd >= 0)
+            close(fd);
+        if (cleanup)
+            unlink(path);
+        return 0;
+    }
+    void *mapped = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (mapped == MAP_FAILED) {
+        if (cleanup)
+            unlink(path);
+        return 0;
+    }
+    int protected = mprotect(mapped, 4096, PROT_READ | PROT_WRITE) == 0;
+    if (protected)
+        ((char *)mapped)[0] = 'x';
+    int unmapped = munmap(mapped, 4096) == 0;
+    if (cleanup)
+        unlink(path);
+    return protected && unmapped;
+}
+
+static int rename_probe(const char *old_path, const char *new_path, int cleanup) {
+    int fd = open(old_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0)
+        return 0;
+    close(fd);
+    int ok = rename(old_path, new_path) == 0;
+    if (cleanup) {
+        unlink(old_path);
+        unlink(new_path);
+    }
+    return ok;
+}
+
 static int unix_nonblocking_probe(int mode) {
     int socket_type = SOCK_STREAM | SOCK_CLOEXEC;
     if (mode == 0)
@@ -175,6 +222,26 @@ static int unix_nonblocking_probe(int mode) {
     return ok;
 }
 
+static int close_range_probe(void) {
+#ifdef SYS_close_range
+    int descriptors[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, descriptors) != 0)
+        return 0;
+    if (syscall(SYS_close_range, (unsigned int)descriptors[1],
+                (unsigned int)descriptors[1], 0) != 0) {
+        int error = errno;
+        close(descriptors[0]);
+        close(descriptors[1]);
+        return error == ENOSYS;
+    }
+    int ok = fcntl(descriptors[1], F_GETFD) < 0 && errno == EBADF;
+    close(descriptors[0]);
+    return ok;
+#else
+    return 1;
+#endif
+}
+
 static void exercise_failed_execve(void) {
     char *arguments[] = {(char *)"/hyperhub-missing-executable", NULL};
     execve(arguments[0], arguments, environ);
@@ -182,12 +249,17 @@ static void exercise_failed_execve(void) {
 
 int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--leaf") == 0)
-        return network_probe(argv[2], argv[3], 1) ? 0 : 2;
+        return network_probe(argv[2], argv[3], 1, 0) ? 0 : 2;
+    if (argc == 3 && strcmp(argv[1], "--intent-mprotect-write") == 0)
+        return writable_mapping_upgrade_probe(argv[2], 0) ? 0 : 13;
+    if (argc == 4 && strcmp(argv[1], "--intent-rename") == 0)
+        return rename_probe(argv[2], argv[3], 0) ? 0 : 13;
     if (argc != 3)
         return 64;
-    if (!network_probe(argv[1], argv[2], 0) || !network_probe(argv[1], argv[2], 1) ||
-        !file_probe() || !unix_nonblocking_probe(0) || !unix_nonblocking_probe(1) ||
-        !unix_nonblocking_probe(2))
+    if (!network_probe(argv[1], argv[2], 0, 0) || !network_probe(argv[1], argv[2], 1, 1) ||
+        !file_probe() || !writable_mapping_upgrade_probe("hyperhub-linux-fixture.mprotect", 1) ||
+        !unix_nonblocking_probe(0) || !unix_nonblocking_probe(1) ||
+        !unix_nonblocking_probe(2) || !close_range_probe())
         return 1;
 
     exercise_failed_execve();

@@ -749,7 +749,7 @@ pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_ch
     let Some(_guard) = HookGuard::enter() else {
         return original(old, new);
     };
-    if let Some(p) = cpath(old) {
+    for p in [cpath(old), cpath(new)].into_iter().flatten() {
         if !crate::file_allows(&p, crate::FileSandboxOperation::Rename) {
             audit(crate::SandboxAuditKind::File, "rename", &p);
             *libc::__errno_location() = libc::EACCES;
@@ -760,6 +760,10 @@ pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_ch
 }
 pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const libc::c_char, flags: c_int) -> c_int {
     hook_hit(17);
+    let f: unsafe extern "C" fn(c_int, *const libc::c_char, c_int) -> c_int = symbol(c"unlinkat");
+    let Some(_guard) = HookGuard::enter() else {
+        return f(dirfd, path, flags);
+    };
     if let Some(raw) = cpath(path) {
         let p = relative_path(dirfd, &raw);
         if !crate::file_allows(&p, crate::FileSandboxOperation::Delete) {
@@ -768,7 +772,6 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const libc::c_char, flags
             return -1;
         }
     }
-    let f: unsafe extern "C" fn(c_int, *const libc::c_char, c_int) -> c_int = symbol(c"unlinkat");
     f(dirfd, path, flags)
 }
 pub unsafe extern "C" fn renameat(
@@ -778,16 +781,24 @@ pub unsafe extern "C" fn renameat(
     new: *const libc::c_char,
 ) -> c_int {
     hook_hit(19);
-    if let Some(raw) = cpath(old) {
-        let p = relative_path(od, &raw);
+    let f: unsafe extern "C" fn(c_int, *const libc::c_char, c_int, *const libc::c_char) -> c_int =
+        symbol(c"renameat");
+    let Some(_guard) = HookGuard::enter() else {
+        return f(od, old, nd, new);
+    };
+    for p in [
+        cpath(old).map(|raw| relative_path(od, &raw)),
+        cpath(new).map(|raw| relative_path(nd, &raw)),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if !crate::file_allows(&p, crate::FileSandboxOperation::Rename) {
             audit(crate::SandboxAuditKind::File, "rename", &p);
             *libc::__errno_location() = libc::EACCES;
             return -1;
         }
     }
-    let f: unsafe extern "C" fn(c_int, *const libc::c_char, c_int, *const libc::c_char) -> c_int =
-        symbol(c"renameat");
     f(od, old, nd, new)
 }
 pub unsafe extern "C" fn close(fd: c_int) -> c_int {
@@ -799,6 +810,18 @@ pub unsafe extern "C" fn close(fd: c_int) -> c_int {
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
     hook_hit(24);
     let f: unsafe extern "C" fn(*mut c_void, usize, c_int) -> c_int = symbol(c"mprotect");
+    let Some(_guard) = HookGuard::enter() else {
+        return f(addr, len, prot);
+    };
+    if prot & libc::PROT_WRITE != 0 {
+        for path in mapped_file_paths(addr as usize, len) {
+            if !crate::file_allows(&path, crate::FileSandboxOperation::Write) {
+                audit(crate::SandboxAuditKind::File, "protect", &path);
+                *libc::__errno_location() = libc::EACCES;
+                return -1;
+            }
+        }
+    }
     f(addr, len, prot)
 }
 pub unsafe extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
@@ -1067,4 +1090,37 @@ pub unsafe extern "C" fn mmap(
 pub unsafe extern "C" fn freeaddrinfo(result: *mut addrinfo) {
     hook_hit(2);
     free_fn()(result)
+}
+
+fn mapped_file_paths(address: usize, length: usize) -> Vec<String> {
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
+        return Vec::new();
+    };
+    let requested_end = address.saturating_add(length);
+    let mut paths = std::collections::BTreeSet::new();
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let Some((start, end)) = fields
+            .next()
+            .and_then(|range| range.split_once('-'))
+            .and_then(|(start, end)| {
+                Some((
+                    usize::from_str_radix(start, 16).ok()?,
+                    usize::from_str_radix(end, 16).ok()?,
+                ))
+            })
+        else {
+            continue;
+        };
+        if start >= requested_end || end <= address {
+            continue;
+        }
+        let Some(path) = fields.nth(4) else {
+            continue;
+        };
+        if path.starts_with('/') {
+            paths.insert(path.strip_suffix(" (deleted)").unwrap_or(path).to_owned());
+        }
+    }
+    paths.into_iter().collect()
 }

@@ -65,6 +65,7 @@ pub mod syscall {
     pub const PREADV2: i64 = 327;
     pub const PWRITEV2: i64 = 328;
     pub const CLONE3: i64 = 435;
+    pub const CLOSE_RANGE: i64 = 436;
     pub const OPENAT2: i64 = 437;
     pub const GETPID: i64 = 39;
 }
@@ -106,6 +107,7 @@ pub mod syscall {
     pub const PREADV2: i64 = 286;
     pub const PWRITEV2: i64 = 287;
     pub const CLONE3: i64 = 435;
+    pub const CLOSE_RANGE: i64 = 436;
     pub const OPENAT2: i64 = 437;
     pub const OPEN: i64 = -1;
     pub const CREAT: i64 = -1;
@@ -142,6 +144,12 @@ pub static HOOK_POINTS: &[HookPoint] = &[
     hook("descriptor.fcntl", Intent::DescriptorState, FCNTL, true),
     hook("descriptor.ioctl", Intent::DescriptorState, IOCTL, true),
     hook("descriptor.close", Intent::DescriptorState, CLOSE, true),
+    hook(
+        "descriptor.close_range",
+        Intent::DescriptorState,
+        CLOSE_RANGE,
+        true,
+    ),
     hook("descriptor.dup", Intent::DescriptorState, DUP, true),
     hook(
         "descriptor.dup2",

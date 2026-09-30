@@ -135,18 +135,18 @@ impl PluginRegistrar {
         self.socket_io.before(plugin, category, callback);
     }
 
-    pub(in crate::windows_gum) fn socket_close_before<F>(
+    pub(in crate::windows_gum) fn socket_close_after<F>(
         &mut self,
         plugin: &'static str,
         category: CallbackCategory,
         callback: F,
     ) where
-        F: Fn(&mut SocketCloseContext) -> crate::hook_runtime::HookCallbackResult<i32>
+        F: Fn(&mut SocketCloseContext, &mut i32) -> crate::hook_runtime::HookCallbackResult<i32>
             + Send
             + Sync
             + 'static,
     {
-        self.socket_close.before(plugin, category, callback);
+        self.socket_close.after(plugin, category, callback);
     }
 
     pub(in crate::windows_gum) fn socket_mode_after<F>(

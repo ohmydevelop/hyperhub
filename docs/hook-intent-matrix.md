@@ -10,16 +10,16 @@ HyperHub 先按安全意图定义语义，再为不同运行后端绑定点位�
 | --- | --- | --- | --- |
 | DNS 请求 | `getaddrinfo/freeaddrinfo` | `write/read`、`sendto/recvfrom`、`sendmsg/recvmsg`，以及 UDP `connect` 状态 | C fixture 分别执行三种 DNS I/O；连接审计必须恢复 `localhost` |
 | socket 建立 | `connect` 前的 libc socket 状态 | `socket` | C/Go/Rust TCP；C UDP DNS |
-| 非阻塞状态 | `fcntl`、`ioctl` | `SOCK_NONBLOCK`、`fcntl(F_SETFL)`、`ioctl(FIONBIO)` | C、Go、Rust 各覆盖一种常见路径 |
+| 非阻塞状态 | `fcntl`、`ioctl` | `SOCK_NONBLOCK`、`fcntl(F_GETFL/F_SETFL)`、`ioctl(FIONBIO)` | C 同时验证设置与读取语义；Go、Rust 覆盖常见路径 |
 | TCP 重定向 | `connect` | `connect` entry/exit | 根进程和 exec 后代都必须经 SOCKS5 |
 | 描述符复制 | 运行时 socket 状态 | `dup/dup2/dup3`、`fcntl(F_DUPFD*)` | C fixture hook report |
 | 数据路径 | `send/recv` | `read/write`、`sendto/recvfrom`、`sendmsg/recvmsg` | C echo 的三种 I/O；Go/Rust 标准库 I/O |
 | 连接结果 | libc 返回值 | `getsockopt(SO_ERROR)` | C fixture hook report |
-| 关闭 | `close` | `close` | 每种 fixture 与大型程序 |
+| 关闭 | `close` | `close/close_range`，exec 时清理 `CLOEXEC` 状态 | 每种 fixture、close-range 源码路径与大型程序 |
 
 静态 DNS 响应解析 A/AAAA 记录，并把 IP 关联回域名。后续 SOCKS5 CONNECT 优先发送域名，使 domain firewall、route 与审计不退化成纯 IP。UDP socket 本身不会被错误重定向到 TCP SOCKS listener。
 
-`poll/ppoll/select/epoll` 不是策略边界：supervisor 在握手期间临时同步化 connect，完成后恢复原始非阻塞状态，所以这些等待 API 不需要改写。它们仍由目标原样执行。
+`poll/ppoll/select/epoll` 不是策略边界：supervisor 在握手期间临时同步化 connect，并在握手前向目标虚拟化 `F_GETFL` 的非阻塞可见性，完成后恢复内核非阻塞状态，所以这些等待 API 不需要改写。它们仍由目标原样执行。descriptor 复制和 fork 继承的是同一个 open file description 语义，握手与非阻塞状态必须在所有别名间一致。
 
 ## 文件意图
 
@@ -30,7 +30,7 @@ HyperHub 先按安全意图定义语义，再为不同运行后端绑定点位�
 | 写入 | `write` | `write/pwrite64/writev/pwritev/pwritev2` | hook report；write deny 场景 |
 | 删除 | `unlink/unlinkat` | `unlink/unlinkat` | hook report；delete deny 场景 |
 | 重命名 | `rename/renameat` | `rename/renameat/renameat2`，同时检查源和目标 | hook report；仅目标路径命中 deny 的场景 |
-| 映射 | `mmap/mprotect/munmap` | `mmap/mprotect/munmap` | hook report；可写文件映射按 write 意图判定 |
+| 映射 | `mmap/mprotect/munmap` | `mmap/mprotect/munmap` | hook report；初始可写映射及只读映射升级为可写权限均按 write 意图判定 |
 
 相对路径按目标进程 cwd 或 dirfd 解析。文件规则使用与 Agent 相同的正则、优先级、默认动作和 error action。
 

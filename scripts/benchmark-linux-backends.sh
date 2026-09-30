@@ -764,6 +764,7 @@ mkdir -p "$HOME" "$temporary/intents"
 for name in read write delete rename-old; do
   printf 'intent\n' > "$temporary/intents/$name"
 done
+printf 'intent\n' > "$temporary/intents/mprotect-write"
 sandbox_config="$temporary/sandbox.toml"
 write_base_config "$sandbox_config" "$(free_port)"
 python3 - "$sandbox_config" <<'PYCODE'
@@ -816,6 +817,14 @@ action = "deny"
 operations = ["rename"]
 patterns = [{ pattern = "^$temporary/intents/rename-new$" }]
 
+[[sandbox.file.rules]]
+enabled = true
+id = "deny-mprotect-write"
+priority = 100
+action = "deny"
+operations = ["write"]
+patterns = [{ pattern = "^$temporary/intents/mprotect-write$" }]
+
 [[sandbox.process.rules]]
 enabled = true
 id = "deny-true"
@@ -852,6 +861,32 @@ expect_denied write --intent-write "$temporary/intents/write"
 expect_denied create --intent-create "$temporary/intents/create"
 expect_denied delete --intent-delete "$temporary/intents/delete"
 expect_denied rename --intent-rename "$temporary/intents/rename-old" "$temporary/intents/rename-new"
+expect_denied mprotect-write --intent-mprotect-write "$temporary/intents/mprotect-write"
+printf 'intent\n' > "$temporary/intents/rename-old"
+"$hyperhub" run \
+  --backend gum \
+  --password-file "$password_file" \
+  -- "$dynamic_probe" --intent-rename "$temporary/intents/rename-old" "$temporary/intents/rename-new" \
+  >/dev/null 2>"$temporary/rename-gum.stderr.log"
+[[ -e $temporary/intents/rename-old && ! -e $temporary/intents/rename-new ]] || {
+  echo 'dynamic Gum rename target deny did not preserve the source path' >&2
+  exit 1
+}
+record_check dynamic.gum_rename_target "source=preserved target=denied"
+printf 'intent\n' > "$temporary/intents/mprotect-write"
+"$hyperhub" run \
+  --backend gum \
+  --password-file "$password_file" \
+  -- "$dynamic_probe" --intent-mprotect-write "$temporary/intents/mprotect-write" \
+  >/dev/null 2>"$temporary/mprotect-write-gum.stderr.log"
+python3 - "$temporary/intents/mprotect-write" <<'PYCODE'
+import pathlib
+import sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+if data[:1] == b"x":
+    raise SystemExit("dynamic Gum mprotect write deny allowed the mapping mutation")
+PYCODE
+record_check dynamic.gum_mprotect_upgrade "read-only mapping write upgrade denied"
 expect_denied process-fork --intent-fork
 expect_denied process-exec --intent-exec /usr/bin/true
 expect_denied process-child-exec --intent-child-exec /usr/bin/true
@@ -859,8 +894,8 @@ expect_denied process-child-exec --intent-child-exec /usr/bin/true
 deny_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $deny_audit ]] || { echo 'sandbox deny audit was not created' >&2; exit 1; }
 denied=$(grep -c '"event":"security_alert"' "$deny_audit" || true)
-if ((denied < 8)); then
-  echo "expected 8 sandbox deny events, got $denied" >&2
+if ((denied < 9)); then
+  echo "expected at least 9 sandbox deny events, got $denied" >&2
   exit 1
 fi
 record_check sandbox.denies "events=$denied"

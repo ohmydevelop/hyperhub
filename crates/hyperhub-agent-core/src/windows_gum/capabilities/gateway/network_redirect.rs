@@ -9,6 +9,10 @@ use crate::{hh_agent_close_socket, hh_agent_note_nonblocking};
 
 const SOCKET_ERROR: i32 = -1;
 
+fn close_succeeded(result: i32) -> bool {
+    result != SOCKET_ERROR
+}
+
 struct NetworkRedirectPlugin;
 
 impl AgentHookPlugin for NetworkRedirectPlugin {
@@ -49,8 +53,10 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
         context.ensure_gateway_handshake = true;
         Ok(HookDecision::Continue)
     });
-    registrar.socket_close_before(plugin_id, CallbackCategory::Observe, |context| {
-        hh_agent_close_socket(context.socket as u64);
+    registrar.socket_close_after(plugin_id, CallbackCategory::Observe, |context, result| {
+        if close_succeeded(*result) {
+            hh_agent_close_socket(context.socket as u64);
+        }
         Ok(HookDecision::Continue)
     });
     registrar.socket_mode_after(plugin_id, CallbackCategory::Observe, |context, result| {
@@ -63,4 +69,15 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
     });
 
     registrar.retain_plugin(plugin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_socket_close_keeps_state() {
+        assert!(!close_succeeded(SOCKET_ERROR));
+        assert!(close_succeeded(0));
+    }
 }
