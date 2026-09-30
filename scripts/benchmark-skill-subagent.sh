@@ -126,10 +126,10 @@ require(skill, "low_confidence_action", "provider confidence decision guidance")
 require(skill, "proposal_submitted", "proposal pending state")
 require(skill, "approved_verified", "post-approval verified state")
 require(skill, "配置尚未生效", "proposal is not active guidance")
-require(skill, "绝对操作边界", "Skill-only operation boundary")
-require(skill, "不得", "explicit prohibitions")
-require(skill, "读取 HyperHub 源码", "source-reading prohibition")
-require(skill, "CLI 拒绝", "CLI refusal stopping rule")
+require(skill, "推荐信息来源与升级路径", "preferred evidence and escalation guidance")
+require(skill, "通常无需另外研究实现", "self-sufficient ordinary operation guidance")
+require(skill, "何时升级到实现调试", "implementation-debug escalation guidance")
+require(skill, "CLI 拒绝", "CLI refusal handling")
 require(skill, "JSON patch does not change the configuration", "redacted-only secret limitation")
 require(skill, "不删除并重建凭证", "credential recreation prohibition")
 require(skill, "ssh_transcript: false", "SSH transcript-off semantics")
@@ -145,7 +145,7 @@ require(skill, '"path":"/gateway/credentials/-"', "credential append example")
 require(reference, '"path":"/gateway/routing/routes/-"', "route append example")
 require(reference, '"op":"test"', "UUID test example")
 require(reference, "ssh_host_keys", "SSH trust guidance")
-require(reference, "Agent 快速执行与审批边界", "reference execution workflow")
+require(reference, "Agent 快速执行、信息来源与审批边界", "reference execution workflow")
 require(reference, "Proposal 提交成功不等于配置已生效", "reference proposal state")
 require(reference, "JSON patch does not change the configuration", "reference secret-only limitation")
 require(reference, "ssh_transcript: false", "reference SSH transcript semantics")
@@ -153,7 +153,11 @@ require(reference, "同时绑定 SSH 凭证", "reference SSH credential requirem
 require(reference, "直接运行 `ssh` 不经过 HyperHub", "reference SSH test path")
 require(metadata, "hyperhub approve", "metadata approval guidance")
 require(metadata, "安全效果不明确", "metadata decision gate")
-require(metadata, "不读取源码", "metadata source boundary")
+require(metadata, "公开操作语义仍不足", "metadata escalation guidance")
+for text_name, text in (("Skill", skill), ("metadata", metadata)):
+    for phrase in ("Skill-only", "绝对操作边界", "普通操作禁止事项", "不读取源码", "不得读取源码"):
+        if phrase in text:
+            errors.append(f"{text_name} uses coercive source-boundary wording: {phrase}")
 if "config patch <patch-file>" not in skill:
     errors.append("patch syntax does not explicitly identify the first argument as a file")
 if re.search(r"<[^>]+token[^>]*>", skill, re.I):
@@ -344,11 +348,16 @@ if "secret" not in secret_policy_text or ("approve" not in secret_policy_text an
 if not any(term in secret_policy_text for term in ("patch", "命令", "log", "日志", "reply", "回复")):
     errors.append("secret_policy does not prohibit secret leakage from generated artifacts")
 
-source_policy_text = json.dumps(answer.get("source_policy"), ensure_ascii=False).lower()
-if not any(term in source_policy_text for term in ("skill", "cli")):
-    errors.append("source_policy does not restrict normal operations to Skill/CLI evidence")
-if not any(term in source_policy_text for term in ("source", "源码")) or not any(term in source_policy_text for term in ("debug", "调试")):
-    errors.append("source_policy does not prohibit source reads outside explicit implementation debugging")
+evidence_text = json.dumps(answer.get("evidence_strategy"), ensure_ascii=False).lower()
+if "skill" not in evidence_text or not any(term in evidence_text for term in ("reference", "参考")):
+    errors.append("evidence_strategy does not identify the Skill and bundled reference as preferred guidance")
+if "show" not in evidence_text or not any(term in evidence_text for term in ("cli", "status", "doctor", "logs", "日志")):
+    errors.append("evidence_strategy does not use current CLI state and diagnostics")
+if not any(term in evidence_text for term in ("source", "implementation", "源码", "实现")) or not any(term in evidence_text for term in ("debug", "root cause", "调试", "根因", "不足")):
+    errors.append("evidence_strategy does not explain when implementation investigation becomes relevant")
+for phrase in ("must not read source", "never read source", "不得读取源码", "禁止读取源码", "skill-only"):
+    if phrase in evidence_text:
+        errors.append(f"evidence_strategy presents a universal source prohibition: {phrase}")
 
 ssh_audit_text = json.dumps(answer.get("ssh_audit_semantics"), ensure_ascii=False).lower()
 if "ssh_transcript" not in ssh_audit_text or not any(term in ssh_audit_text for term in ("structured", "结构化", "ssh_command")):

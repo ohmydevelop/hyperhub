@@ -1,47 +1,57 @@
 ---
 name: hyperhub-cli
-description: Use for HyperHub CLI configuration and runtime operations. Follow the Skill-only workflow for show, proposal, approval handoff, Serve lifecycle, SSH tests, status, logs, and diagnostics; do not inspect HyperHub source unless the user explicitly asks to debug its implementation.
+description: Use for HyperHub CLI configuration and runtime operations, including show, Schema v2 RFC 6902 proposals, human approval handoff, Serve lifecycle, target-program and SSH tests, status, logs, and diagnostics. The bundled reference covers configuration fields and examples; implementation debugging is a separate workflow when the task actually requires it.
 ---
 
 # HyperHub CLI 操作手册
 
-目标是只依靠本 Skill、随附配置参考、用户提供的信息和 HyperHub CLI 的实际输出，把用户意图推进到可审批或已验证的结果。不要为了“避免猜测”越界读取实现；语义不明确时，停止在不确定点并询问用户。
+本 Skill 旨在把常见 HyperHub 配置与运行任务所需的操作语义、Schema、审批边界、验证方法和已知失败模式集中说明完整。普通任务优先按本手册和随附参考推进，通常无需另外研究实现；如果用户要求根因分析、修复实现，或公开操作语义确实不足以继续，再切换到实现调试流程。
 
-## 绝对操作边界
+## 推荐信息来源与升级路径
 
-### 普通 HyperHub 操作允许使用的依据
+### 普通配置与运行任务
 
-按优先级只使用：
+以下信息组合通常足以完成任务：
 
-1. 本 `SKILL.md`；
-2. 当前 Skill 目录中的 [配置数据参考](references/configuration.md)；
-3. 用户明确提供的目标、路径、主机、账号和安全选择；
-4. PATH 中 `hyperhub` 的 `--help`、`skill`、`show`、`status --json`、`doctor`、`logs`、`config patch` 等输出。
+1. 本 `SKILL.md`：任务分类、推荐流程、安全边界、验证和错误处理；
+2. [配置数据参考](references/configuration.md)：Schema v2 字段、引用关系、JSON Patch 示例和功能域语义；
+3. 用户明确提供的目标、路径、主机、账号、安全效果和授权范围；
+4. 当前 PATH 中 `hyperhub` 的 `--help`、`skill`、`show`、`status --json`、`doctor`、`logs`、`config patch` 等实际输出。
 
-`hyperhub show` 的脱敏 JSON 是当前配置索引、UUID、ID、引用和默认值的唯一事实来源。CLI 的成功、拒绝和错误文本是操作能力的最终事实来源。
+`hyperhub show` 的脱敏 JSON 用于确认当前实例的数组索引、UUID、ID、引用和默认值；运行态以 `status --json`、`doctor`、`logs` 和目标程序结果为准；命令是否接受某个操作以当前 CLI 返回为准。源码说明实现机制，但不能代替当前实例与当前二进制的实际状态。
 
-### 普通操作禁止事项
+### 何时升级到实现调试
 
-除非用户明确要求“调试、修复或审查 HyperHub 实现”，不得：
-
-- 读取 HyperHub 源码、测试代码、Git 元数据、构建产物或仓库内未随 Skill 提供的文档；
-- 搜索网络来推断 HyperHub 行为；
-- 用源码推理覆盖 CLI 的明确输出；
-- 因 CLI 拒绝某个操作而静默改用删除重建、改名、扩大范围、重启服务或其他替代方案；
-- 把一次操作权限解释为允许额外修改。
-
-用户明确要求调试实现时，应先说明将离开“仅 Skill/CLI”操作边界，再按代码仓库开发流程处理；不要把调试手段混入普通配置操作。
+- 用户明确要求调试、修复或审查 HyperHub 实现时，按代码仓库开发流程检查源码、测试和构建产物。
+- 手册、配置参考、`--help` 与诊断输出仍不足以定义关键行为时，先明确尚不确定的语义及其对操作的影响；根据用户目标选择询问、保留现状，或进入实现调查。
+- CLI 出现未知错误时，先收集原始错误、`status --json`、`doctor` 和相关脱敏日志；若任务要求定位根因，再进入实现调试，而不是把未经证实的配置变通当作答案。
+- CLI 的明确输出与源码推断不一致时，操作报告同时记录版本和实际输出；实现调试可解释差异，但不把推断描述为已经生效的运行事实。
 
 ### 不明确时的处理
 
-- Skill 和 CLI 已明确：直接执行，不重复询问。
+- Skill、参考或 CLI 已明确：直接执行，不重复询问。
 - 用户未明确会改变安全效果、身份、匹配范围或对象生命周期的选择：只问一个聚焦问题。
-- Skill 未定义且 CLI 输出无法证明：说明“当前 Skill/CLI 未定义该语义”，询问用户，不读取源码补答案。
-- CLI 拒绝：原样概括限制并停止；不要自行设计绕过方案。
+- 仍有未定义语义：说明不确定点、可能影响和下一种可靠确认方式，不静默猜测。
+- CLI 拒绝：概括实际限制；任何删除重建、改名、扩大范围、重启或其他替代方案都作为新的选择单独说明，不默认执行。
+
+## 任务导航
+
+| 用户目标 | 主要依据与动作 | 结果落点 |
+| --- | --- | --- |
+| 查看配置 | `hyperhub show`，按 ID、UUID、引用和脱敏值做语义摘要 | `read_only_report` |
+| 查看运行态 | `status --json`；异常时补 `doctor` 和相关 `logs` | `read_only_report` 或诊断结论 |
+| 新增/修改/删除配置 | `show` + 配置参考相关章节，生成最小 RFC 6902 Patch，提交 `config patch` | `proposal_submitted` |
+| 修改 Secret | 使用 `${APPROVE:name}`；先读“Secret、脱敏值与 UUID”和参考中的同名章节 | Proposal，或明确 Secret-only CLI 限制 |
+| 配置智能防护 | 参考“智能防护 Profile”“路由与智能防护绑定”“沙盒与智能防护”，确认 observe/enforce 与失败动作 | Proposal + 审批后 Provider/引用验证 |
+| 配置 SSH 审计 | 同时核对 SSH 凭证、SSH 审计 Profile、路由绑定与 transcript 语义 | Proposal + 审批后结构化事件验证 |
+| 启停 Serve | `start`、`stop`、`restart`、`status --json`，只执行用户要求的生命周期动作 | 实际运行态 |
+| 测试目标程序 | Serve 运行后使用 `hyperhub run -- program args...` | `runtime_tested` |
+| 排查操作失败 | 保留原错，按错误表收集 `status`、`doctor`、`logs` 与版本 | 可操作诊断或实现调试入口 |
+| 调试实现 | 按仓库开发流程检查源码、测试与构建；仍以 CLI 实测验证用户可见结果 | 根因、修复与回归 |
 
 ## 结果状态
 
-每次交付必须使用以下状态之一，不能把计划或 Proposal 描述为已生效：
+建议用以下状态标记交付结果，核心要求是不能把计划或 Proposal 描述为已生效：
 
 - `read_only_report`：只读取并报告，没有提交变更。
 - `needs_user_decision`：缺少必须由用户选择的语义，尚未提交变更。
@@ -50,9 +60,9 @@ description: Use for HyperHub CLI configuration and runtime operations. Follow t
 - `cli_limitation`：CLI 明确拒绝或不支持请求；没有采取替代修改。
 - `runtime_tested`：已通过 `hyperhub run -- ...` 完成用户明确要求的目标程序测试，并报告实际结果。
 
-## 意图到结果的固定流程
+## 意图到结果的推荐流程
 
-按顺序执行；不要跳步，不重复读取相同状态。
+按任务需要沿以下顺序推进；已有可靠信息可以复用，状态发生变化后再重读相关数据。
 
 ### 1. 分类用户意图
 
@@ -62,7 +72,7 @@ description: Use for HyperHub CLI configuration and runtime operations. Follow t
 - 配置变更：路由、凭证、审计、信任、沙盒、智能防护、环境变量；
 - Serve 生命周期：start/stop/restart/status；
 - 目标程序测试：必须通过 `hyperhub run -- target args...`；
-- 实现调试：只有用户明确要求时才离开本手册的普通操作边界。
+- 实现调试：用户要求根因、代码修复或实现审查，或公开操作语义不足以完成任务。
 
 不要把“测试登录”误当成配置授权，也不要把“修改凭证”扩展成删除重建凭证。
 
@@ -112,7 +122,7 @@ hyperhub logs --lines 100
 
 ### 5. 读取相关 Schema 参考
 
-只有配置变更任务才读取 [配置数据参考](references/configuration.md) 中相关章节。不要读取仓库源码来补充 Schema。
+配置变更任务读取 [配置数据参考](references/configuration.md) 中对应章节。该参考包含凭证、代理、智能防护、路由、审计、沙盒、信任、环境变量和审批占位符的可操作 Schema；优先据此生成 Patch。若用户任务是实现调试，再结合源码核对实现。
 
 ### 6. 设计最小原子 Patch
 
@@ -268,7 +278,7 @@ hyperhub run --password-file /path/to/password -- program args...
 - Linux 默认使用 ptrace；只有用户明确要求 Gum 时才加 `--backend gum`。
 - 目标测试使用 `--` 分隔 HyperHub 参数和目标程序参数。
 
-## 错误处理与禁止变通
+## 错误处理与升级判断
 
 | CLI 结果 | Agent 行为 |
 | --- | --- |
@@ -277,13 +287,13 @@ hyperhub run --password-file /path/to/password -- program args...
 | Schema/validation error | 报告具体字段；根据 Skill 参考修正一次确定性错误，语义不明确则询问 |
 | Provider/网络错误 | 查看脱敏日志与 doctor；不猜 Secret、不重复盲试 |
 | SSH 测试失败 | 报告退出码与本次日志；不自动关闭主机校验或改凭证 |
-| 未知错误 | 原样概括并停止；不得读取源码寻找绕过方案 |
+| 未知错误 | 保留原始错误并收集 `status --json`、`doctor`、相关脱敏日志与版本；若用户需要根因或操作无法继续，转入实现调试 |
 
-Agent 创建的无敏感临时 Patch 在操作结束后删除；不得删除用户文件或使用破坏性清理命令。
+Agent 创建的无敏感临时 Patch 在操作结束后删除；用户文件和与任务无关的工作区内容保持不变。
 
-## 最终回复最小清单
+## 最终回复建议清单
 
-每次回复包含：
+为便于用户接手，回复包含：
 
 1. 结果状态；
 2. 使用的 HyperHub Home；

@@ -1,9 +1,9 @@
 # HyperHub Skill black-box acceptance task
 
-You are testing a user-facing HyperHub Agent Skill. Read only the supplied Skill directory and
-fixture JSON. Do not read source code, repository files, git metadata, unrelated documentation,
-installed skills, or the network. Do not execute a real HyperHub approval and do not use or request
-real credentials.
+You are testing whether a user-facing HyperHub Agent Skill is self-contained for ordinary
+operations. For benchmark isolation, the supplied Skill directory and fixture JSON are the available
+product inputs; do not access repository implementation, unrelated documentation, installed skills,
+or the network. Do not execute a real HyperHub approval and do not use or request real credentials.
 
 The fixture is a redacted result of `hyperhub show`. Produce one JSON object and no prose. Its
 `patch` field must be an RFC 6902 JSON Patch array that demonstrates all of these operations:
@@ -26,8 +26,10 @@ The JSON object must also contain:
   `hyperhub config patch <patch-file>` and then run `hyperhub approve`;
 - `secret_policy`: a short statement that real secrets must be entered by the human during
   approval and must not appear in the patch, command arguments, logs, or Agent response.
-- `source_policy`: state which evidence is allowed for normal HyperHub operations and that source
-  code must not be read unless the user explicitly requests implementation debugging.
+- `evidence_strategy`: summarize the preferred evidence for ordinary operations (the Skill and
+  bundled reference, user intent, `show`, and current CLI diagnostics), then explain when an
+  implementation investigation is relevant. Present this as a sufficient workflow and escalation
+  path, not as a universal prohibition on source-code access.
 - `ssh_audit_semantics`: explain whether structured SSH command events remain when
   `ssh_transcript=false`, and that those events require both an SSH audit Profile and an SSH
   credential on the route so HyperHub can decrypt the session.

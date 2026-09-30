@@ -1,9 +1,7 @@
 # HyperHub Skill 黑盒 Benchmark
 
-这个 Benchmark 验证面向用户和 Agent 的 `hyperhub-cli` Skill 是否仍然能够独立指导配置数据生成。
-它把 Skill 和脱敏配置 fixture 提供给一个黑盒 subagent；subagent 不得读取 HyperHub 源码、Git
-信息、仓库其他文档或网络。测试重点不是模型是否知道仓库实现，而是 Skill 是否公开了足够的
-配置 Schema、UUID 语义、JSON Patch 写法、敏感占位符和人工审批边界。
+这个 Benchmark 验证面向用户和 Agent 的 `hyperhub-cli` Skill 是否足够完备，能够独立指导普通配置数据生成和关键运行决策。
+它把 Skill 和脱敏配置 fixture 作为黑盒 subagent 的隔离输入，以检验 Skill 自身是否公开了足够的配置 Schema、UUID 语义、JSON Patch 写法、敏感占位符、人工审批边界、诊断依据和升级条件。输入隔离是 Benchmark 的测试方法，不是要求 Skill 对 Agent 设置普遍的源码访问禁令。
 
 ## 快速运行
 
@@ -52,7 +50,7 @@ HYPERHUB_SKILL_AGENT_CMD='my-agent-adapter'
 - 生成 RFC 6902 patch，而不是猜测内联 CLI 参数；
 - 区分 Agent 提交审批队列与人工 `approve`，禁止 Agent 代填真实 secret；
 - 检查回答中不存在真实凭证或测试用假 secret。
-- 限制普通操作只使用 Skill、脱敏 `show` 和 CLI 输出，不读取源码、Git、仓库其他文件或网络；
+- 验证普通操作可优先由 Skill、配置参考、脱敏 `show` 和 CLI 诊断完整指导，并能说明何时需要升级到实现调查，而不是设置绝对源码禁令；
 - 验证 `ssh_transcript=false` 只关闭内容文件，同一路由绑定 SSH 凭证与审计 Profile 时结构化命令事件仍保留；
 - 验证仅替换 `<redacted>` Secret 被 CLI 判为无变化时，Agent 报告限制且不删除重建凭证或改变 UUID；
 - 验证 SSH 行为测试必须在审批完成、Serve 运行后通过 `hyperhub run -- ssh ...` 执行。

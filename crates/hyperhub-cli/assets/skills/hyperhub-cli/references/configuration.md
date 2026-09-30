@@ -1,17 +1,19 @@
 # HyperHub 配置数据参考（Schema v2）
 
-## Agent 快速执行与审批边界
+## Agent 快速执行、信息来源与审批边界
 
-- 普通配置和运行任务只依据本 Skill、此参考、用户输入和 HyperHub CLI 输出；除非用户明确要求调试实现，不读取源码、测试、Git、仓库其他文档或网络资料。
-- 先执行一次 `hyperhub show`，从当前脱敏配置确定数组索引、UUID、ID 和引用；不要猜测或重复读取。
+- 本 Skill 与此参考集中描述普通配置任务所需的 Schema v2、引用关系、审批语义和已知边界；结合用户输入与当前 HyperHub CLI 输出，通常可以直接完成 Proposal 和验证。
+- `hyperhub show` 用于从当前脱敏配置确定数组索引、UUID、ID、引用和默认值；配置变化后再重读。`--help` 用于确认当前版本命令语法，`status --json`、`doctor` 和 `logs` 用于确认运行态。
+- 源码适合实现调试、根因分析和修复任务；普通配置操作优先使用公开操作语义和当前 CLI 输出，避免把实现推断误当成当前实例状态。
 - 用户明确“只记录/观察”时使用 `observe`、允许动作或 `pass`；明确“阻断/拒绝/失败关闭”时使用 `enforce`、拒绝动作或 `deny`。
 - 用户未说明安全效果时，先询问“只记录还是阻断”；不要提交带有猜测安全语义的 Patch。
 - Provider 异常或低置信度时的 `pass`/`deny` 也属于需要用户决定的安全效果；`deny` 表示失败关闭。
 - Agent 可以自动提交脱敏 Proposal，但不得运行 `approve`、输入主密码或填写真实敏感值。提交后必须引导用户运行 `hyperhub approve`。
 - Proposal 提交成功不等于配置已生效。用户确认审批完成后，才运行 `validate`、`show`、`status --json` 和必要的日志/行为验证。
-- CLI 拒绝操作时报告限制并停止，不删除重建对象、不改变 UUID、不制造无关配置差异。
+- CLI 拒绝操作时先报告实际限制。删除重建对象、改变 UUID、制造无关配置差异或扩大范围都属于新的变更选择，需要单独说明影响并取得明确授权。
+- 如果本参考与 CLI 诊断仍不足以回答关键语义，明确不确定点；用户需要实现结论时再进入源码与测试调查。
 
-生成 JSON Patch 前必须运行 `hyperhub show`。输出中的数组索引、UUID、ID 和当前默认值是生成 Patch 的唯一依据。配置根对象必须包含 `schema_version: 2`；旧的顶层 `plugins`、`routes`、`firewall` 等结构不受支持。
+生成 JSON Patch 前运行 `hyperhub show`。输出中的数组索引、UUID、ID 和当前默认值是生成 Patch 的当前状态依据。配置根对象必须包含 `schema_version: 2`；旧的顶层 `plugins`、`routes`、`firewall` 等结构不受支持。
 
 ## 顶层结构
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "HyperHub CLI 配置"
-  short_description: "仅依据 Skill 与 CLI 规划、审批并验证 HyperHub 配置和运行"
-  default_prompt: "使用 $hyperhub-cli 严格按 Skill-only 流程操作：只依据 Skill、配置参考、用户输入和 HyperHub CLI 输出，不读取源码；安全效果不明确时询问，CLI 拒绝时报告限制，不删除重建对象；提交 Proposal 后由我运行 hyperhub approve，确认审批后再验证。"
+  short_description: "用完整操作手册规划、审批并验证 HyperHub 配置和运行"
+  default_prompt: "使用 $hyperhub-cli 完成 HyperHub 配置或运行任务：优先依据 Skill、配置参考、用户意图和当前 CLI 输出推进；安全效果不明确时询问，Proposal 由 Agent 提交后交给我运行 hyperhub approve，确认审批后再验证。若公开操作语义仍不足，明确不确定点，并仅在任务需要根因或实现修复时升级到实现调试。"
