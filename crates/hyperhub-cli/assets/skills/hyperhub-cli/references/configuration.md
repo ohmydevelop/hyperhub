@@ -2,12 +2,14 @@
 
 ## Agent 快速执行与审批边界
 
+- 普通配置和运行任务只依据本 Skill、此参考、用户输入和 HyperHub CLI 输出；除非用户明确要求调试实现，不读取源码、测试、Git、仓库其他文档或网络资料。
 - 先执行一次 `hyperhub show`，从当前脱敏配置确定数组索引、UUID、ID 和引用；不要猜测或重复读取。
 - 用户明确“只记录/观察”时使用 `observe`、允许动作或 `pass`；明确“阻断/拒绝/失败关闭”时使用 `enforce`、拒绝动作或 `deny`。
 - 用户未说明安全效果时，先询问“只记录还是阻断”；不要提交带有猜测安全语义的 Patch。
 - Provider 异常或低置信度时的 `pass`/`deny` 也属于需要用户决定的安全效果；`deny` 表示失败关闭。
 - Agent 可以自动提交脱敏 Proposal，但不得运行 `approve`、输入主密码或填写真实敏感值。提交后必须引导用户运行 `hyperhub approve`。
 - Proposal 提交成功不等于配置已生效。用户确认审批完成后，才运行 `validate`、`show`、`status --json` 和必要的日志/行为验证。
+- CLI 拒绝操作时报告限制并停止，不删除重建对象、不改变 UUID、不制造无关配置差异。
 
 生成 JSON Patch 前必须运行 `hyperhub show`。输出中的数组索引、UUID、ID 和当前默认值是生成 Patch 的唯一依据。配置根对象必须包含 `schema_version: 2`；旧的顶层 `plugins`、`routes`、`firewall` 等结构不受支持。
 
@@ -48,6 +50,8 @@
 - 整体替换现有对象时必须保留原 UUID；不得复制其他对象的 UUID。
 - 真实敏感值只能使用审批占位符：`{"value":"${APPROVE:meaningful-name}"}`。
 - `config patch` 不需要密码；它只提交禁止包含真实 Secret 的 Proposal。真实 Secret、Provider API Key 和私钥只能在人工 `approve` 时输入。
+- `<redacted>` 只表示已有 Secret 存在，不是原值。仅将现有 `<redacted>` 替换为 `${APPROVE:name}` 可能被 CLI 以 `JSON patch does not change the configuration` 拒绝，因为脱敏配置没有可展示差异。遇到此限制时直接报告，建议用户在真实终端运行 `hyperhub config` 修改现有 Secret；不得未经明确授权删除并重建凭证或改变 UUID。
+- 只有同一 Patch 本来就包含用户要求的可见配置变化时，才可同时携带现有 Secret 的审批占位符；不得添加无关字段来规避“无变化”检查。
 - 如果修改被规则引用的 ID（例如 `/gateway/protections/0/id`），必须在同一 Patch 中同步更新所有 `protection`/引用字段，并使用 UUID `test` 保护每个修改对象。CLI 会在拆分请求无法独立校验时自动合并为一个原子审批请求；`request_count: 1` 表示该原子请求，不要把它拆成多个 Patch。
 
 ## 环境变量
@@ -219,6 +223,25 @@ Profile 位于 `/gateway/protections`。建议先创建 `observe` Profile，确�
 ```
 
 `websocket` 可为 `off`、`frames`、`messages`。只有用户明确要求时才开启内容转录。
+
+SSH 审计语义：
+
+- 同一路由同时绑定 SSH 凭证和声明 `ssh` 协议的审计 Profile 时，会记录结构化 `ssh_command`、`ssh_shell`、`ssh_subsystem` 和通道结束事件。
+- `ssh_transcript: false` 只关闭解密后的通道内容文件，不关闭上述结构化 SSH 事件。
+- `ssh_transcript: true` 在结构化事件之外，按 `body_limit_bytes` 和 `directions` 保存解密内容。
+- 未绑定 SSH 审计 Profile 时不记录结构化命令事件。
+- 未绑定 SSH 凭证时只能透传加密流，既不能记录结构化命令，也不能保存解密内容；若请求内容转录，只记录跳过原因。
+
+## SSH 运行验证
+
+SSH 登录测试必须在审批验证完成、Serve 运行且用户明确提供目标后执行。测试命令必须由 HyperHub 启动：
+
+```sh
+hyperhub run --password-file /path/to/password -- \
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
+```
+
+直接运行 `ssh` 不经过 HyperHub，不能证明路由、凭证注入、主机信任或审计生效。测试沿用相同 `HYPERHUB_HOME`，不自动添加 `StrictHostKeyChecking=no`。失败时报告退出码，再查看 `status --json`、`logs --lines 100` 和 `doctor --target ssh`；不要自动改凭证、关闭校验或重启。
 
 ## 沙盒与智能防护
 

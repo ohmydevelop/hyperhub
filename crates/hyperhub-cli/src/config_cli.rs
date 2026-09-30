@@ -1638,6 +1638,32 @@ mod tests {
     }
 
     #[test]
+    fn redacted_only_secret_replacement_has_no_reviewable_change() {
+        let path = std::env::temp_dir().join("hyperhub-secret-only-patch-test.bin");
+        let mut config = Config::default();
+        config
+            .environment
+            .push(hyperhub_core::config::EnvironmentVariable {
+                uuid: hyperhub_core::config::new_config_uuid(),
+                name: "EXAMPLE_TOKEN".into(),
+                value: hyperhub_core::config::SecretValue::Inline {
+                    value: "existing-secret".into(),
+                },
+            });
+        let prepared = prepare_patch(
+            &path,
+            &config,
+            &json!([{
+                "op": "replace",
+                "path": "/environment_variables/0/value/value",
+                "value": "${APPROVE:replacement-token}"
+            }]),
+        )
+        .unwrap();
+        assert!(prepared.changes.is_empty());
+    }
+
+    #[test]
     fn approval_placeholders_are_collected_and_replaced() {
         let mut patch = json!([
             {"op": "add", "path": "/one", "value": "${APPROVE:api-key}"},
