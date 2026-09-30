@@ -722,13 +722,18 @@ fn terminate_process(pid: u32) {
 }
 
 fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, String> {
+    let mut observed_exit = wait_pidfd_status(pid);
     loop {
         // A blocking waitpid consumes ptrace stops used by Frida child gating.
         // Reap only once the root process is a zombie; otherwise let Frida's
         // event loop observe and resume fork/exec transitions.
-        if process_state(pid).is_some_and(|state| !matches!(state, 'Z' | 'X')) {
+        let state = process_state(pid);
+        if state.is_some_and(|state| !matches!(state, 'Z' | 'X')) {
             std::thread::sleep(std::time::Duration::from_millis(10));
             continue;
+        }
+        if state.is_some_and(|state| matches!(state, 'Z' | 'X')) {
+            observed_exit = process_exit_status(pid).or(observed_exit);
         }
         let mut status = 0;
         let waited = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
@@ -741,7 +746,7 @@ fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, S
                 while process_exists(pid, expected_start_time) {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                return Ok(0);
+                return Ok(observed_exit.unwrap_or_default());
             }
             return Err(error.to_string());
         }
@@ -749,12 +754,34 @@ fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, S
             std::thread::sleep(std::time::Duration::from_millis(10));
             continue;
         }
-        if libc::WIFEXITED(status) {
-            return Ok(libc::WEXITSTATUS(status));
+        if let Some(status) = decode_wait_status(status) {
+            return Ok(status);
         }
-        if libc::WIFSIGNALED(status) {
-            return Ok(128 + libc::WTERMSIG(status));
-        }
+    }
+}
+
+fn wait_pidfd_status(pid: u32) -> Option<i32> {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32 };
+    if pidfd < 0 {
+        return None;
+    }
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PIDFD,
+            pidfd as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT,
+        )
+    };
+    unsafe { libc::close(pidfd) };
+    if result != 0 {
+        return None;
+    }
+    match info.si_code {
+        libc::CLD_EXITED => Some(unsafe { info.si_status() }),
+        libc::CLD_KILLED | libc::CLD_DUMPED => Some(128 + unsafe { info.si_status() }),
+        _ => None,
     }
 }
 
@@ -771,6 +798,26 @@ pub(super) fn process_exists(pid: u32, expected_start_time: Option<u64>) -> bool
 fn process_state(pid: u32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(") ")?.1.chars().next()
+}
+
+fn process_exit_status(pid: u32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    decode_wait_status(fields.get(49)?.parse().ok()?)
+}
+
+fn decode_wait_status(status: i32) -> Option<i32> {
+    if libc::WIFEXITED(status) {
+        Some(libc::WEXITSTATUS(status))
+    } else if libc::WIFSIGNALED(status) {
+        Some(128 + libc::WTERMSIG(status))
+    } else {
+        None
+    }
 }
 
 fn process_start_time(pid: u32) -> Option<u64> {
@@ -825,6 +872,24 @@ mod tests {
     fn process_state_reads_the_current_process_without_reaping_it() {
         let state = process_state(std::process::id()).unwrap();
         assert!(!matches!(state, 'Z' | 'X'));
+    }
+
+    #[test]
+    fn zombie_exit_status_is_available_before_reaping() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::_exit(7) };
+        }
+        for _ in 0..100 {
+            if process_state(pid as u32) == Some('Z') {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(process_exit_status(pid as u32), Some(7));
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
     }
 
     #[test]

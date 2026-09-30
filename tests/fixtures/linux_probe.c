@@ -240,6 +240,14 @@ static int rename_probe(const char *old_path, const char *new_path, int cleanup)
     return ok;
 }
 
+static int create_probe(const char *path) {
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0)
+        return 0;
+    close(fd);
+    return 1;
+}
+
 static int unix_nonblocking_probe(int mode) {
     int socket_type = SOCK_STREAM | SOCK_CLOEXEC;
     if (mode == 0)
@@ -336,6 +344,8 @@ int main(int argc, char **argv) {
         return writable_mapping_upgrade_probe(argv[2], 0) ? 0 : 13;
     if (argc == 4 && strcmp(argv[1], "--intent-rename") == 0)
         return rename_probe(argv[2], argv[3], 0) ? 0 : 13;
+    if (argc == 3 && strcmp(argv[1], "--intent-create") == 0)
+        return create_probe(argv[2]) ? 0 : 13;
     if (argc != 3)
         return 64;
     if (!network_probe(argv[1], argv[2], 0, 0) || !network_probe(argv[1], argv[2], 1, 1) ||
@@ -369,5 +379,15 @@ int main(int argc, char **argv) {
         return 7;
     if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
         return 8;
+
+    child = vfork();
+    if (child < 0)
+        return 9;
+    if (child == 0) {
+        execl(argv[0], argv[0], "--leaf", argv[1], argv[2], NULL);
+        _exit(127);
+    }
+    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return 10;
     return 0;
 }

@@ -69,6 +69,12 @@ pub(in crate::windows_gum) const NT_CLOSE: u32 = 38;
 pub(in crate::windows_gum) const MSYS_FORK: u32 = 39;
 pub(in crate::windows_gum) const MSYS_VFORK: u32 = 40;
 pub(in crate::windows_gum) const LDR_LOAD_DLL: u32 = 41;
+pub(in crate::windows_gum) const GETADDRINFOEXA: u32 = 42;
+pub(in crate::windows_gum) const GETADDRINFOEXW: u32 = 43;
+pub(in crate::windows_gum) const DNSQUERY_A: u32 = 44;
+pub(in crate::windows_gum) const DNSQUERY_UTF8: u32 = 45;
+pub(in crate::windows_gum) const DNSQUERY_W: u32 = 46;
+pub(in crate::windows_gum) const DNSQUERY_EX: u32 = 47;
 
 static AGENT_STARTED: AtomicBool = AtomicBool::new(false);
 static AGENT_OWNER_PID: AtomicU32 = AtomicU32::new(0);

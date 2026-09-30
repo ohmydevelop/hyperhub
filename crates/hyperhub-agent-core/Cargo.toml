@@ -29,6 +29,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Globalization",
+  "Win32_NetworkManagement_Dns",
   "Win32_Networking_WinSock",
   "Win32_Security_Authentication_Identity",
   "Win32_Security_Credentials",

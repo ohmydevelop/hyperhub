@@ -740,15 +740,18 @@ unsafe fn cpath(p: *const libc::c_char) -> Option<String> {
         })
     }
 }
-fn file_operation_for_flags(flags: c_int) -> crate::FileSandboxOperation {
+fn file_operations_for_flags(flags: c_int) -> Vec<crate::FileSandboxOperation> {
+    let mut operations = Vec::new();
     if flags & libc::O_CREAT != 0 {
-        return crate::FileSandboxOperation::Create;
+        operations.push(crate::FileSandboxOperation::Create);
     }
-    if flags & libc::O_ACCMODE == libc::O_RDONLY {
-        crate::FileSandboxOperation::Read
-    } else {
-        crate::FileSandboxOperation::Write
+    if flags & libc::O_ACCMODE != libc::O_RDONLY || flags & libc::O_TRUNC != 0 {
+        operations.push(crate::FileSandboxOperation::Write);
     }
+    if operations.is_empty() {
+        operations.push(crate::FileSandboxOperation::Read);
+    }
+    operations
 }
 fn relative_path(dirfd: c_int, path: &str) -> String {
     if path.starts_with('/') || dirfd == libc::AT_FDCWD {
@@ -879,14 +882,17 @@ unsafe fn inspect_open(
     } else {
         cpath_string(raw)
     };
-    if !crate::file_allows(&path, file_operation_for_flags(flags)) {
-        audit(crate::SandboxAuditKind::File, "open", &path);
-        (*state).denied = 1;
-        gum::replace_argument(
-            context,
-            path_index,
-            c"/proc/self/fd/-1/hyperhub-denied".as_ptr() as *mut c_void,
-        );
+    for operation in file_operations_for_flags(flags) {
+        if !crate::file_allows(&path, operation) {
+            audit(crate::SandboxAuditKind::File, "open", &path);
+            (*state).denied = 1;
+            gum::replace_argument(
+                context,
+                path_index,
+                c"/proc/self/fd/-1/hyperhub-denied".as_ptr() as *mut c_void,
+            );
+            break;
+        }
     }
 }
 
@@ -921,10 +927,15 @@ pub unsafe extern "C" fn creat(path: *const libc::c_char, mode: libc::mode_t) ->
         return original(path, mode);
     };
     if let Some(path) = cpath(path) {
-        if !crate::file_allows(&path, crate::FileSandboxOperation::Create) {
-            audit(crate::SandboxAuditKind::File, "open", &path);
-            *libc::__errno_location() = libc::EACCES;
-            return -1;
+        for operation in [
+            crate::FileSandboxOperation::Create,
+            crate::FileSandboxOperation::Write,
+        ] {
+            if !crate::file_allows(&path, operation) {
+                audit(crate::SandboxAuditKind::File, "open", &path);
+                *libc::__errno_location() = libc::EACCES;
+                return -1;
+            }
         }
     }
     original(path, mode)

@@ -8,6 +8,51 @@ pub(in crate::windows_gum) type GetAddrInfoFn = unsafe extern "system" fn(
 ) -> i32;
 pub(in crate::windows_gum) type GetAddrInfoWFn =
     unsafe extern "system" fn(*const u16, *const u16, *const ADDRINFOW, *mut *mut ADDRINFOW) -> i32;
+pub(in crate::windows_gum) type GetAddrInfoExAFn = unsafe extern "system" fn(
+    *const u8,
+    *const u8,
+    u32,
+    *const GUID,
+    *const ADDRINFOEXA,
+    *mut *mut ADDRINFOEXA,
+    *const TIMEVAL,
+    *const OVERLAPPED,
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    *mut HANDLE,
+) -> i32;
+pub(in crate::windows_gum) type GetAddrInfoExWFn = unsafe extern "system" fn(
+    *const u16,
+    *const u16,
+    u32,
+    *const GUID,
+    *const ADDRINFOEXW,
+    *mut *mut ADDRINFOEXW,
+    *const TIMEVAL,
+    *const OVERLAPPED,
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    *mut HANDLE,
+) -> i32;
+pub(in crate::windows_gum) type DnsQueryAFn = unsafe extern "system" fn(
+    *const u8,
+    DNS_TYPE,
+    DNS_QUERY_OPTIONS,
+    *mut c_void,
+    *mut *mut DNS_RECORDA,
+    *mut *mut c_void,
+) -> u32;
+pub(in crate::windows_gum) type DnsQueryWFn = unsafe extern "system" fn(
+    *const u16,
+    DNS_TYPE,
+    DNS_QUERY_OPTIONS,
+    *mut c_void,
+    *mut *mut DNS_RECORDA,
+    *mut *mut c_void,
+) -> u32;
+pub(in crate::windows_gum) type DnsQueryExFn = unsafe extern "system" fn(
+    *const DNS_QUERY_REQUEST,
+    *mut DNS_QUERY_RESULT,
+    *mut DNS_QUERY_CANCEL,
+) -> i32;
 pub(in crate::windows_gum) type ConnectFn =
     unsafe extern "system" fn(SOCKET, *const SOCKADDR, i32) -> i32;
 pub(in crate::windows_gum) type WsaConnectFn = unsafe extern "system" fn(
@@ -82,6 +127,18 @@ pub(in crate::windows_gum) type ConnectExFn = unsafe extern "system" fn(
 pub(in crate::windows_gum) static ORIGINAL_GETADDRINFO: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_GETADDRINFOW: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_GETADDRINFOEXA: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_GETADDRINFOEXW: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_DNSQUERY_A: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_DNSQUERY_UTF8: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_DNSQUERY_W: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_DNSQUERY_EX: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_CONNECT: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_WSACONNECT: AtomicPtr<c_void> =
@@ -226,12 +283,388 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_w(
     )
 }
 
+pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
+    node: *const u8,
+    service: *const u8,
+    namespace: u32,
+    namespace_id: *const GUID,
+    hints: *const ADDRINFOEXA,
+    result: *mut *mut ADDRINFOEXA,
+    timeout: *const TIMEVAL,
+    _overlapped: *const OVERLAPPED,
+    _completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    _name_handle: *mut HANDLE,
+) -> i32 {
+    let Some(original) = original!(ORIGINAL_GETADDRINFOEXA, GetAddrInfoExAFn) else {
+        return WSATRY_AGAIN;
+    };
+    if node.is_null() || result.is_null() || INSIDE_HOOK.with(Cell::get) {
+        return original(
+            node,
+            service,
+            namespace,
+            namespace_id,
+            hints,
+            result,
+            timeout,
+            null(),
+            None,
+            null_mut(),
+        );
+    }
+    hook_result(
+        None,
+        || {
+            original(
+                node,
+                service,
+                namespace,
+                namespace_id,
+                hints,
+                result,
+                timeout,
+                null(),
+                None,
+                null_mut(),
+            )
+        },
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return original(
+                    node,
+                    service,
+                    namespace,
+                    namespace_id,
+                    hints,
+                    result,
+                    timeout,
+                    null(),
+                    None,
+                    null_mut(),
+                );
+            };
+            let Ok(hostname) = CStr::from_ptr(node.cast()).to_str() else {
+                return WSATRY_AGAIN;
+            };
+            if hostname.parse::<IpAddr>().is_ok() {
+                return original(
+                    node,
+                    service,
+                    namespace,
+                    namespace_id,
+                    hints,
+                    result,
+                    timeout,
+                    null(),
+                    None,
+                    null_mut(),
+                );
+            }
+            let family = hints
+                .as_ref()
+                .map_or(AF_UNSPEC as i32, |value| value.ai_family);
+            let mut context = DnsContext {
+                hostname: hostname.to_owned(),
+                family,
+                replacement: None,
+                denied_error: None,
+            };
+            runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ());
+            if let Some(error) = context.denied_error {
+                return error;
+            }
+            let Some((fake, resolved_family)) = context.replacement else {
+                return WSATRY_AGAIN;
+            };
+            let Ok(fake) = CString::new(fake) else {
+                return WSATRY_AGAIN;
+            };
+            let mut numeric = hints.as_ref().copied().unwrap_or_default();
+            numeric.ai_family = resolved_family;
+            numeric.ai_flags |= AI_NUMERICHOST as i32;
+            numeric.ai_flags &= !(AI_CANONNAME as i32);
+            original(
+                fake.as_ptr().cast(),
+                service,
+                namespace,
+                namespace_id,
+                &numeric,
+                result,
+                timeout,
+                null(),
+                None,
+                null_mut(),
+            )
+        },
+    )
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
+    node: *const u16,
+    service: *const u16,
+    namespace: u32,
+    namespace_id: *const GUID,
+    hints: *const ADDRINFOEXW,
+    result: *mut *mut ADDRINFOEXW,
+    timeout: *const TIMEVAL,
+    _overlapped: *const OVERLAPPED,
+    _completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    _name_handle: *mut HANDLE,
+) -> i32 {
+    let Some(original) = original!(ORIGINAL_GETADDRINFOEXW, GetAddrInfoExWFn) else {
+        return WSATRY_AGAIN;
+    };
+    if node.is_null() || result.is_null() || INSIDE_HOOK.with(Cell::get) {
+        return original(
+            node,
+            service,
+            namespace,
+            namespace_id,
+            hints,
+            result,
+            timeout,
+            null(),
+            None,
+            null_mut(),
+        );
+    }
+    hook_result(
+        None,
+        || {
+            original(
+                node,
+                service,
+                namespace,
+                namespace_id,
+                hints,
+                result,
+                timeout,
+                null(),
+                None,
+                null_mut(),
+            )
+        },
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return WSATRY_AGAIN;
+            };
+            let hostname = wide_string(node);
+            if hostname.is_empty() || hostname.parse::<IpAddr>().is_ok() {
+                return original(
+                    node,
+                    service,
+                    namespace,
+                    namespace_id,
+                    hints,
+                    result,
+                    timeout,
+                    null(),
+                    None,
+                    null_mut(),
+                );
+            }
+            let family = hints
+                .as_ref()
+                .map_or(AF_UNSPEC as i32, |value| value.ai_family);
+            let mut context = DnsContext {
+                hostname,
+                family,
+                replacement: None,
+                denied_error: None,
+            };
+            runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ());
+            if let Some(error) = context.denied_error {
+                return error;
+            }
+            let Some((fake, resolved_family)) = context.replacement else {
+                return WSATRY_AGAIN;
+            };
+            let mut fake_wide = fake.encode_utf16().collect::<Vec<_>>();
+            fake_wide.push(0);
+            let mut numeric = hints.as_ref().copied().unwrap_or_default();
+            numeric.ai_family = resolved_family;
+            numeric.ai_flags |= AI_NUMERICHOST as i32;
+            numeric.ai_flags &= !(AI_CANONNAME as i32);
+            original(
+                fake_wide.as_ptr(),
+                service,
+                namespace,
+                namespace_id,
+                &numeric,
+                result,
+                timeout,
+                null(),
+                None,
+                null_mut(),
+            )
+        },
+    )
+}
+
 pub(in crate::windows_gum) unsafe fn wide_string(value: *const u16) -> String {
     let mut length = 0;
     while *value.add(length) != 0 && length < 32_768 {
         length += 1;
     }
     String::from_utf16_lossy(std::slice::from_raw_parts(value, length))
+}
+
+unsafe fn record_dns_query_results(hostname: &str, mut record: *mut DNS_RECORDA) {
+    let Ok(hostname) = CString::new(hostname) else {
+        return;
+    };
+    while let Some(current) = record.as_ref() {
+        match current.wType {
+            DNS_TYPE_A => {
+                let address = current.Data.A.IpAddress.to_ne_bytes();
+                let _ = hh_agent_record_dns(hostname.as_ptr(), 4, address.as_ptr(), address.len());
+            }
+            DNS_TYPE_AAAA => {
+                let address = current.Data.AAAA.Ip6Address.IP6Byte;
+                let _ = hh_agent_record_dns(hostname.as_ptr(), 6, address.as_ptr(), address.len());
+            }
+            _ => {}
+        }
+        record = current.pNext;
+    }
+}
+
+unsafe fn dns_query_a_impl(
+    original: DnsQueryAFn,
+    name: *const u8,
+    query_type: DNS_TYPE,
+    options: DNS_QUERY_OPTIONS,
+    extra: *mut c_void,
+    results: *mut *mut DNS_RECORDA,
+    reserved: *mut *mut c_void,
+) -> u32 {
+    let status = original(name, query_type, options, extra, results, reserved);
+    if status == 0 && !name.is_null() && !results.is_null() {
+        if let Ok(hostname) = CStr::from_ptr(name.cast()).to_str() {
+            record_dns_query_results(hostname, *results);
+        }
+    }
+    status
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_a(
+    name: *const u8,
+    query_type: DNS_TYPE,
+    options: DNS_QUERY_OPTIONS,
+    extra: *mut c_void,
+    results: *mut *mut DNS_RECORDA,
+    reserved: *mut *mut c_void,
+) -> u32 {
+    let Some(original) = original!(ORIGINAL_DNSQUERY_A, DnsQueryAFn) else {
+        return WSATRY_AGAIN as u32;
+    };
+    dns_query_a_impl(
+        original, name, query_type, options, extra, results, reserved,
+    )
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_utf8(
+    name: *const u8,
+    query_type: DNS_TYPE,
+    options: DNS_QUERY_OPTIONS,
+    extra: *mut c_void,
+    results: *mut *mut DNS_RECORDA,
+    reserved: *mut *mut c_void,
+) -> u32 {
+    let Some(original) = original!(ORIGINAL_DNSQUERY_UTF8, DnsQueryAFn) else {
+        return WSATRY_AGAIN as u32;
+    };
+    dns_query_a_impl(
+        original, name, query_type, options, extra, results, reserved,
+    )
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_w(
+    name: *const u16,
+    query_type: DNS_TYPE,
+    options: DNS_QUERY_OPTIONS,
+    extra: *mut c_void,
+    results: *mut *mut DNS_RECORDA,
+    reserved: *mut *mut c_void,
+) -> u32 {
+    let Some(original) = original!(ORIGINAL_DNSQUERY_W, DnsQueryWFn) else {
+        return WSATRY_AGAIN as u32;
+    };
+    let status = original(name, query_type, options, extra, results, reserved);
+    if status == 0 && !name.is_null() && !results.is_null() {
+        record_dns_query_results(&wide_string(name), *results);
+    }
+    status
+}
+
+struct DnsQueryExContext {
+    hostname: String,
+    callback: PDNS_QUERY_COMPLETION_ROUTINE,
+    callback_context: usize,
+    callback_called: AtomicBool,
+}
+
+unsafe extern "system" fn dns_query_ex_completion(
+    context: *const c_void,
+    results: *mut DNS_QUERY_RESULT,
+) {
+    let context = Arc::from_raw(context.cast::<DnsQueryExContext>());
+    context.callback_called.store(true, Ordering::Release);
+    if let Some(results) = results.as_ref() {
+        record_dns_query_results(&context.hostname, results.pQueryRecords);
+    }
+    if let Some(callback) = context.callback {
+        callback(context.callback_context as *const c_void, results);
+    }
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_ex(
+    request: *const DNS_QUERY_REQUEST,
+    results: *mut DNS_QUERY_RESULT,
+    cancel: *mut DNS_QUERY_CANCEL,
+) -> i32 {
+    const ERROR_IO_PENDING: i32 = 997;
+    let Some(original) = original!(ORIGINAL_DNSQUERY_EX, DnsQueryExFn) else {
+        return WSATRY_AGAIN;
+    };
+    let Some(request) = request.as_ref() else {
+        return original(request, results, cancel);
+    };
+    if request.QueryName.is_null() || INSIDE_HOOK.with(Cell::get) {
+        return original(request, results, cancel);
+    }
+    let hostname = wide_string(request.QueryName);
+    let context = Arc::new(DnsQueryExContext {
+        hostname: hostname.clone(),
+        callback: request.pQueryCompletionCallback,
+        callback_context: request.pQueryContext as usize,
+        callback_called: AtomicBool::new(false),
+    });
+    let callback_context = Arc::into_raw(context.clone());
+    let mut request_v1 = *request;
+    request_v1.pQueryCompletionCallback = Some(dns_query_ex_completion);
+    request_v1.pQueryContext = callback_context.cast_mut().cast();
+    let status = if request.Version >= 3 {
+        let mut request_v3 = *((request as *const DNS_QUERY_REQUEST).cast::<DNS_QUERY_REQUEST3>());
+        request_v3.pQueryCompletionCallback = Some(dns_query_ex_completion);
+        request_v3.pQueryContext = callback_context.cast_mut().cast();
+        original(
+            (&request_v3 as *const DNS_QUERY_REQUEST3).cast(),
+            results,
+            cancel,
+        )
+    } else {
+        original(&request_v1, results, cancel)
+    };
+    if status != ERROR_IO_PENDING {
+        if !context.callback_called.load(Ordering::Acquire) {
+            drop(Arc::from_raw(callback_context));
+        }
+        if let Some(results) = results.as_ref() {
+            record_dns_query_results(&hostname, results.pQueryRecords);
+        }
+    }
+    status
 }
 
 pub(in crate::windows_gum) unsafe extern "system" fn hook_connect(

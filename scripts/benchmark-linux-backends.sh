@@ -346,7 +346,7 @@ PYCODE
   --password-file "$password_file" \
   -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
   >/dev/null 2>"$temporary/dynamic-ptrace.stderr.log"
-record_check dynamic.ptrace_descendants "fork+exec,posix_spawn,posix_spawnp"
+record_check dynamic.ptrace_descendants "fork+exec,posix_spawn,posix_spawnp,vfork+exec"
 record_check dynamic.unix_nonblocking "socket,fcntl,ioctl"
 
 dynamic_hook_report="$result_dir/dynamic-hooks.json"
@@ -372,6 +372,19 @@ if report["missing_required"]:
     raise SystemExit(f"missing dynamic hook groups: {report['missing_required']}")
 PY
 record_check dynamic.gum_manifest "report=$dynamic_hook_report"
+set +e
+"$hyperhub" run \
+  --backend gum \
+  --password-file "$password_file" \
+  -- /bin/sh -c 'exit 7' >/dev/null 2>"$temporary/dynamic-gum-exit.stderr.log"
+gum_exit_status=$?
+set -e
+[[ $gum_exit_status -eq 7 ]] || {
+  echo "dynamic Gum exit status was not preserved: $gum_exit_status" >&2
+  exit 1
+}
+record_check dynamic.gum_exit_status "exit=7"
+record_check dynamic.gum_descendants "fork+exec,posix_spawn,posix_spawnp,vfork+exec"
 
 hook_report="$result_dir/hooks.json"
 HYPERHUB_DNS_PORTS=$dns_port \
@@ -795,6 +808,14 @@ patterns = [{ pattern = "^$temporary/intents/write$" }]
 
 [[sandbox.file.rules]]
 enabled = true
+id = "deny-create-write"
+priority = 100
+action = "deny"
+operations = ["write"]
+patterns = [{ pattern = "^$temporary/intents/create-write$" }]
+
+[[sandbox.file.rules]]
+enabled = true
 id = "deny-create"
 priority = 100
 action = "deny"
@@ -859,26 +880,35 @@ expect_denied() {
 expect_denied read --intent-read "$temporary/intents/read"
 expect_denied write --intent-write "$temporary/intents/write"
 expect_denied create --intent-create "$temporary/intents/create"
+expect_denied create-write --intent-create "$temporary/intents/create-write"
 expect_denied delete --intent-delete "$temporary/intents/delete"
 expect_denied rename --intent-rename "$temporary/intents/rename-old" "$temporary/intents/rename-new"
 expect_denied mprotect-write --intent-mprotect-write "$temporary/intents/mprotect-write"
 printf 'intent\n' > "$temporary/intents/rename-old"
+set +e
 "$hyperhub" run \
   --backend gum \
   --password-file "$password_file" \
   -- "$dynamic_probe" --intent-rename "$temporary/intents/rename-old" "$temporary/intents/rename-new" \
   >/dev/null 2>"$temporary/rename-gum.stderr.log"
+rename_gum_status=$?
+set -e
+[[ $rename_gum_status -ne 0 ]] || { echo 'dynamic Gum rename deny returned success' >&2; exit 1; }
 [[ -e $temporary/intents/rename-old && ! -e $temporary/intents/rename-new ]] || {
   echo 'dynamic Gum rename target deny did not preserve the source path' >&2
   exit 1
 }
 record_check dynamic.gum_rename_target "source=preserved target=denied"
 printf 'intent\n' > "$temporary/intents/mprotect-write"
+set +e
 "$hyperhub" run \
   --backend gum \
   --password-file "$password_file" \
   -- "$dynamic_probe" --intent-mprotect-write "$temporary/intents/mprotect-write" \
   >/dev/null 2>"$temporary/mprotect-write-gum.stderr.log"
+mprotect_gum_status=$?
+set -e
+[[ $mprotect_gum_status -ne 0 ]] || { echo 'dynamic Gum mprotect deny returned success' >&2; exit 1; }
 python3 - "$temporary/intents/mprotect-write" <<'PYCODE'
 import pathlib
 import sys
@@ -887,6 +917,20 @@ if data[:1] == b"x":
     raise SystemExit("dynamic Gum mprotect write deny allowed the mapping mutation")
 PYCODE
 record_check dynamic.gum_mprotect_upgrade "read-only mapping write upgrade denied"
+set +e
+"$hyperhub" run \
+  --backend gum \
+  --password-file "$password_file" \
+  -- "$dynamic_probe" --intent-create "$temporary/intents/create-write" \
+  >/dev/null 2>"$temporary/create-write-gum.stderr.log"
+create_gum_status=$?
+set -e
+[[ $create_gum_status -ne 0 ]] || { echo 'dynamic Gum create/write deny returned success' >&2; exit 1; }
+[[ ! -e $temporary/intents/create-write ]] || {
+  echo 'dynamic Gum create with write semantics bypassed write deny' >&2
+  exit 1
+}
+record_check dynamic.gum_create_write "O_CREAT|O_WRONLY checks create and write"
 expect_denied process-fork --intent-fork
 expect_denied process-exec --intent-exec /usr/bin/true
 expect_denied process-child-exec --intent-child-exec /usr/bin/true
@@ -894,8 +938,8 @@ expect_denied process-child-exec --intent-child-exec /usr/bin/true
 deny_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $deny_audit ]] || { echo 'sandbox deny audit was not created' >&2; exit 1; }
 denied=$(grep -c '"event":"security_alert"' "$deny_audit" || true)
-if ((denied < 9)); then
-  echo "expected at least 9 sandbox deny events, got $denied" >&2
+if ((denied < 11)); then
+  echo "expected at least 11 sandbox deny events, got $denied" >&2
   exit 1
 fi
 record_check sandbox.denies "events=$denied"

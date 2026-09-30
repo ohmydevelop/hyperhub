@@ -210,14 +210,36 @@ const FILE_OPEN_IF: u32 = 3;
 const FILE_OVERWRITE: u32 = 4;
 const FILE_OVERWRITE_IF: u32 = 5;
 
-fn op_for_access(a: u32, disp: u32) -> FileOperation {
-    match disp {
-        FILE_CREATE => FileOperation::Create,
-        FILE_OVERWRITE | FILE_OVERWRITE_IF => FileOperation::Write,
-        FILE_OPEN_IF if a & 0x116 != 0 => FileOperation::Write,
-        _ if a & 0x116 != 0 => FileOperation::Write,
-        _ => FileOperation::Read,
+fn operations_for_access(a: u32, disp: u32) -> Vec<FileOperation> {
+    let mut operations = Vec::new();
+    if matches!(disp, FILE_CREATE | FILE_OPEN_IF) {
+        operations.push(FileOperation::Create);
     }
+    if matches!(disp, FILE_OVERWRITE | FILE_OVERWRITE_IF) || a & 0x116 != 0 {
+        operations.push(FileOperation::Write);
+    }
+    if operations.is_empty() {
+        operations.push(FileOperation::Read);
+    }
+    operations
+}
+
+unsafe fn dispatch_operations(
+    operations: &[FileOperation],
+    path: Option<String>,
+    handle: usize,
+    original_call: impl FnOnce() -> i32,
+) -> i32 {
+    let Some((last, leading)) = operations.split_last() else {
+        return original_call();
+    };
+    for operation in leading {
+        let result = dispatch(*operation, path.clone(), handle, || 0);
+        if result == STATUS_ACCESS_DENIED {
+            return result;
+        }
+    }
+    dispatch(*last, path, handle, original_call)
 }
 #[no_mangle]
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_file(
@@ -237,7 +259,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_file(
         return STATUS_ACCESS_DENIED;
     };
     let p = object_path(o);
-    let r = dispatch(op_for_access(a, disp), p.clone(), 0, || {
+    let r = dispatch_operations(&operations_for_access(a, disp), p.clone(), 0, || {
         f(out, a, o, ios, size, attrs, share, disp, opts, ea, ealen)
     });
     if r >= 0 && !out.is_null() && !(*out).is_null() {
@@ -263,7 +285,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_open_file(
         return STATUS_ACCESS_DENIED;
     };
     let p = object_path(o);
-    let r = dispatch(op_for_access(a, 0), p.clone(), 0, || {
+    let r = dispatch_operations(&operations_for_access(a, 0), p.clone(), 0, || {
         f(out, a, o, ios, share, opts)
     });
     if r >= 0 && !out.is_null() && !(*out).is_null() {
@@ -447,12 +469,18 @@ mod tests {
 
     #[test]
     fn open_if_with_read_access_is_classified_as_read() {
-        assert_eq!(op_for_access(0x80, FILE_OPEN_IF), FileOperation::Read);
+        assert_eq!(
+            operations_for_access(0x80, FILE_OPEN_IF),
+            vec![FileOperation::Create]
+        );
     }
 
     #[test]
     fn open_if_with_write_access_is_classified_as_write() {
-        assert_eq!(op_for_access(0x120, FILE_OPEN_IF), FileOperation::Write);
+        assert_eq!(
+            operations_for_access(0x120, FILE_OPEN_IF),
+            vec![FileOperation::Create, FileOperation::Write]
+        );
     }
 
     #[test]
@@ -481,8 +509,17 @@ mod tests {
 
     #[test]
     fn create_and_overwrite_dispositions_are_classified_correctly() {
-        assert_eq!(op_for_access(0x80, FILE_CREATE), FileOperation::Create);
-        assert_eq!(op_for_access(0x80, FILE_OVERWRITE), FileOperation::Write);
-        assert_eq!(op_for_access(0x80, FILE_OVERWRITE_IF), FileOperation::Write);
+        assert_eq!(
+            operations_for_access(0x80, FILE_CREATE),
+            vec![FileOperation::Create]
+        );
+        assert_eq!(
+            operations_for_access(0x80, FILE_OVERWRITE),
+            vec![FileOperation::Write]
+        );
+        assert_eq!(
+            operations_for_access(0x80, FILE_OVERWRITE_IF),
+            vec![FileOperation::Write]
+        );
     }
 }

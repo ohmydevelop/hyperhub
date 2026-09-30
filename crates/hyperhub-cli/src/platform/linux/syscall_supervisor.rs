@@ -50,8 +50,7 @@ struct TargetAddress {
 
 struct FileIntent {
     targets: Vec<String>,
-    operation: FileSandboxOperation,
-    operation_name: &'static str,
+    operations: Vec<(FileSandboxOperation, &'static str)>,
 }
 
 struct ProcessIntent {
@@ -991,15 +990,11 @@ impl Supervisor {
         if number == syscall::OPEN && syscall::OPEN >= 0 {
             let path = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
             let flags = registers.argument(1) as i32;
-            return Ok(Some(file_intent(path, file_operation(flags), "open")));
+            return Ok(Some(file_open_intent(path, flags)));
         }
         if number == syscall::CREAT && syscall::CREAT >= 0 {
             let path = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
-            return Ok(Some(file_intent(
-                path,
-                FileSandboxOperation::Create,
-                "open",
-            )));
+            return Ok(Some(file_open_intent(path, libc::O_CREAT | libc::O_WRONLY)));
         }
         if number == syscall::OPENAT || number == syscall::OPENAT2 {
             let dirfd = registers.argument(0) as i32;
@@ -1011,7 +1006,7 @@ impl Supervisor {
                 let bytes = read_memory(tid, address, 8)?;
                 u64::from_ne_bytes(bytes.try_into().unwrap()) as i32
             };
-            return Ok(Some(file_intent(path, file_operation(flags), "open")));
+            return Ok(Some(file_open_intent(path, flags)));
         }
         if is_one_of(
             number,
@@ -1072,8 +1067,7 @@ impl Supervisor {
             let new = read_path(tid, libc::AT_FDCWD, registers.argument(1) as usize)?;
             return Ok(Some(FileIntent {
                 targets: vec![old, new],
-                operation: FileSandboxOperation::Rename,
-                operation_name: "rename",
+                operations: vec![(FileSandboxOperation::Rename, "rename")],
             }));
         }
         if number == syscall::RENAMEAT || number == syscall::RENAMEAT2 {
@@ -1089,8 +1083,7 @@ impl Supervisor {
             )?;
             return Ok(Some(FileIntent {
                 targets: vec![old, new],
-                operation: FileSandboxOperation::Rename,
-                operation_name: "rename",
+                operations: vec![(FileSandboxOperation::Rename, "rename")],
             }));
         }
         if number == syscall::MMAP {
@@ -1111,8 +1104,7 @@ impl Supervisor {
             if !targets.is_empty() {
                 return Ok(Some(FileIntent {
                     targets,
-                    operation: FileSandboxOperation::Write,
-                    operation_name: "protect",
+                    operations: vec![(FileSandboxOperation::Write, "protect")],
                 }));
             }
         }
@@ -1184,105 +1176,107 @@ impl Supervisor {
 
     fn file_denied(&mut self, tid: libc::pid_t, intent: &FileIntent) -> Result<bool, String> {
         for target in &intent.targets {
-            let context = ProtectionContext::default();
-            let sanitized = sanitize_action(target, &[target.clone()], &context);
-            let (decision, binding) = {
-                let Some(snapshot) = self
-                    .sandbox
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.file.as_ref())
-                else {
-                    return Ok(false);
+            for (operation, operation_name) in &intent.operations {
+                let context = ProtectionContext::default();
+                let sanitized = sanitize_action(target, &[target.clone()], &context);
+                let (decision, binding) = {
+                    let Some(snapshot) = self
+                        .sandbox
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.file.as_ref())
+                    else {
+                        return Ok(false);
+                    };
+                    (
+                        decide_file(snapshot, target, *operation),
+                        file_protection_binding(snapshot, target, *operation),
+                    )
                 };
-                (
-                    decide_file(snapshot, target, intent.operation),
-                    file_protection_binding(snapshot, target, intent.operation),
-                )
-            };
-            if decision.action == SandboxAction::Deny {
+                if decision.action == SandboxAction::Deny {
+                    self.report_sandbox(
+                        tid,
+                        SandboxAuditKind::File,
+                        operation_name,
+                        target,
+                        &decision,
+                        Some(sanitized.redacted_argv.clone()),
+                        None,
+                    );
+                    return Ok(self.enforce);
+                }
+                let Some(binding) = binding else {
+                    continue;
+                };
+                let process_pid = self.ensure_member(tid)? as u32;
+                let executable = std::fs::read_link(format!("/proc/{process_pid}/exe"))
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "unknown".into());
+                let response = self.control.block_on(control_request(
+                    &self.endpoint,
+                    &ControlRequest::StaticSmartProtectionCheck {
+                        session_id: self.session_id.clone(),
+                        token: String::from_utf8_lossy(&self.password).into_owned(),
+                        root_pid: self.root_pid as u32,
+                        process_pid,
+                        protection_id: binding.protection_id,
+                        rule_id: Some(binding.rule_id.clone()),
+                        stage: format!("file_{}", operation_name),
+                        executable,
+                        argv: sanitized.redacted_argv.clone(),
+                        features: sanitized.features,
+                        context: serde_json::json!({
+                            "local_deny": sanitized.local_deny,
+                        }),
+                    },
+                ));
+                let (action, reason) = match response {
+                    Ok(ControlResponse::SmartProtectionDecision { action, reason, .. }) => {
+                        (action, Some(reason))
+                    }
+                    Ok(ControlResponse::Error { message }) => {
+                        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                            eprintln!("hyperhub: file smart protection failed: {message}");
+                        }
+                        let action = self
+                            .sandbox
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.file.as_ref())
+                            .map(file_error_decision)
+                            .map_or(SandboxAction::Pass, |decision| decision.action);
+                        (action, Some(format!("smart_protection_error: {message}")))
+                    }
+                    _ => {
+                        let action = self
+                            .sandbox
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.file.as_ref())
+                            .map(file_error_decision)
+                            .map_or(SandboxAction::Pass, |decision| decision.action);
+                        (action, Some("smart_protection_error".into()))
+                    }
+                };
+                let denied = action == SandboxAction::Deny;
+                let decision = SandboxDecision {
+                    action,
+                    rule_id: Some(binding.rule_id),
+                    source: if denied {
+                        "smart_protection"
+                    } else {
+                        "smart_protection_pass"
+                    },
+                };
                 self.report_sandbox(
                     tid,
                     SandboxAuditKind::File,
-                    intent.operation_name,
+                    operation_name,
                     target,
                     &decision,
-                    Some(sanitized.redacted_argv.clone()),
-                    None,
+                    Some(sanitized.redacted_argv),
+                    reason,
                 );
-                return Ok(self.enforce);
-            }
-            let Some(binding) = binding else {
-                continue;
-            };
-            let process_pid = self.ensure_member(tid)? as u32;
-            let executable = std::fs::read_link(format!("/proc/{process_pid}/exe"))
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "unknown".into());
-            let response = self.control.block_on(control_request(
-                &self.endpoint,
-                &ControlRequest::StaticSmartProtectionCheck {
-                    session_id: self.session_id.clone(),
-                    token: String::from_utf8_lossy(&self.password).into_owned(),
-                    root_pid: self.root_pid as u32,
-                    process_pid,
-                    protection_id: binding.protection_id,
-                    rule_id: Some(binding.rule_id.clone()),
-                    stage: format!("file_{}", intent.operation_name),
-                    executable,
-                    argv: sanitized.redacted_argv.clone(),
-                    features: sanitized.features,
-                    context: serde_json::json!({
-                        "local_deny": sanitized.local_deny,
-                    }),
-                },
-            ));
-            let (action, reason) = match response {
-                Ok(ControlResponse::SmartProtectionDecision { action, reason, .. }) => {
-                    (action, Some(reason))
+                if denied {
+                    return Ok(self.enforce);
                 }
-                Ok(ControlResponse::Error { message }) => {
-                    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
-                        eprintln!("hyperhub: file smart protection failed: {message}");
-                    }
-                    let action = self
-                        .sandbox
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.file.as_ref())
-                        .map(file_error_decision)
-                        .map_or(SandboxAction::Pass, |decision| decision.action);
-                    (action, Some(format!("smart_protection_error: {message}")))
-                }
-                _ => {
-                    let action = self
-                        .sandbox
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.file.as_ref())
-                        .map(file_error_decision)
-                        .map_or(SandboxAction::Pass, |decision| decision.action);
-                    (action, Some("smart_protection_error".into()))
-                }
-            };
-            let denied = action == SandboxAction::Deny;
-            let decision = SandboxDecision {
-                action,
-                rule_id: Some(binding.rule_id),
-                source: if denied {
-                    "smart_protection"
-                } else {
-                    "smart_protection_pass"
-                },
-            };
-            self.report_sandbox(
-                tid,
-                SandboxAuditKind::File,
-                intent.operation_name,
-                target,
-                &decision,
-                Some(sanitized.redacted_argv),
-                reason,
-            );
-            if denied {
-                return Ok(self.enforce);
             }
         }
         Ok(false)
@@ -1990,18 +1984,24 @@ fn file_intent(
 ) -> FileIntent {
     FileIntent {
         targets: vec![target],
-        operation,
-        operation_name,
+        operations: vec![(operation, operation_name)],
     }
 }
 
-fn file_operation(flags: i32) -> FileSandboxOperation {
+fn file_open_intent(target: String, flags: i32) -> FileIntent {
+    let mut operations = Vec::new();
     if flags & libc::O_CREAT != 0 {
-        FileSandboxOperation::Create
-    } else if flags & libc::O_ACCMODE == libc::O_RDONLY {
-        FileSandboxOperation::Read
-    } else {
-        FileSandboxOperation::Write
+        operations.push((FileSandboxOperation::Create, "create"));
+    }
+    if flags & libc::O_ACCMODE != libc::O_RDONLY || flags & libc::O_TRUNC != 0 {
+        operations.push((FileSandboxOperation::Write, "write"));
+    }
+    if operations.is_empty() {
+        operations.push((FileSandboxOperation::Read, "read"));
+    }
+    FileIntent {
+        targets: vec![target],
+        operations,
     }
 }
 

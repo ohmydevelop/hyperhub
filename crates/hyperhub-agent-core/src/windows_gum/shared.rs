@@ -8,18 +8,26 @@ pub(in crate::windows_gum) use std::ffi::{c_char, c_void, CStr, CString, OsStr};
 pub(in crate::windows_gum) use std::net::IpAddr;
 pub(in crate::windows_gum) use std::os::windows::ffi::OsStrExt;
 pub(in crate::windows_gum) use std::ptr::{null, null_mut};
-pub(in crate::windows_gum) use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-pub(in crate::windows_gum) use std::sync::{Mutex, OnceLock};
+pub(in crate::windows_gum) use std::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering,
+};
+pub(in crate::windows_gum) use std::sync::{Arc, Mutex, OnceLock};
+pub(in crate::windows_gum) use windows_sys::core::GUID;
 
 pub(in crate::windows_gum) use windows_sys::Win32::Foundation::{
     CloseHandle, SetLastError, CERT_E_UNTRUSTEDROOT, ERROR_DLL_INIT_FAILED, FILETIME, HANDLE,
     HMODULE, SEC_E_CERT_UNKNOWN, SEC_E_OK, WAIT_OBJECT_0,
 };
 pub(in crate::windows_gum) use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_ACP};
+pub(in crate::windows_gum) use windows_sys::Win32::NetworkManagement::Dns::{
+    DNS_QUERY_CANCEL, DNS_QUERY_OPTIONS, DNS_QUERY_REQUEST, DNS_QUERY_REQUEST3, DNS_QUERY_RESULT,
+    DNS_RECORDA, DNS_RECORDW, DNS_TYPE, DNS_TYPE_A, DNS_TYPE_AAAA, PDNS_QUERY_COMPLETION_ROUTINE,
+};
 pub(in crate::windows_gum) use windows_sys::Win32::Networking::WinSock::{
-    WSAGetLastError, WSASetLastError, ADDRINFOA, ADDRINFOW, AF_INET, AF_INET6, AF_UNSPEC,
-    AI_CANONNAME, AI_NUMERICHOST, FD_SET, FIONBIO, LPWSAOVERLAPPED_COMPLETION_ROUTINE, QOS,
-    SOCKADDR, SOCKADDR_STORAGE, SOCKET, TIMEVAL, WSABUF, WSAECONNRESET, WSAEWOULDBLOCK,
+    WSAGetLastError, WSASetLastError, ADDRINFOA, ADDRINFOEXA, ADDRINFOEXW, ADDRINFOW, AF_INET,
+    AF_INET6, AF_UNSPEC, AI_CANONNAME, AI_NUMERICHOST, FD_SET, FIONBIO,
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPWSAOVERLAPPED_COMPLETION_ROUTINE, QOS, SOCKADDR,
+    SOCKADDR_STORAGE, SOCKET, TIMEVAL, WSABUF, WSAECONNRESET, WSAEWOULDBLOCK,
 };
 pub(in crate::windows_gum) use windows_sys::Win32::Security::Authentication::Identity::{
     SecBufferDesc, SCHANNEL_CRED, SCHANNEL_CRED_VERSION, SCH_CREDENTIALS, SCH_CREDENTIALS_VERSION,
@@ -48,6 +56,7 @@ pub(in crate::windows_gum) use super::{
 };
 pub(in crate::windows_gum) use crate::{
     hh_agent_build_handshake, hh_agent_close_socket, hh_agent_handshake_complete,
-    hh_agent_note_nonblocking, hh_agent_set_handshake_complete, hh_agent_socket_nonblocking,
-    hh_agent_tls_ca_der, hh_agent_validate_handshake_reply, HH_ERR_BUFFER_TOO_SMALL, HH_OK,
+    hh_agent_note_nonblocking, hh_agent_record_dns, hh_agent_set_handshake_complete,
+    hh_agent_socket_nonblocking, hh_agent_tls_ca_der, hh_agent_validate_handshake_reply,
+    HH_ERR_BUFFER_TOO_SMALL, HH_OK,
 };

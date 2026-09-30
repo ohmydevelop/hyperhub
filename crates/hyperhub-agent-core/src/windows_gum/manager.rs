@@ -18,7 +18,8 @@ use super::{
     ACQUIRE_CREDENTIALS_A, ACQUIRE_CREDENTIALS_W, CERT_GET_CHAIN, CERT_OPEN_SYSTEM_STORE_A,
     CERT_OPEN_SYSTEM_STORE_W, CERT_VERIFY_POLICY, CLOSESOCKET, CONNECT, CONNECTEX,
     CREATE_PROCESS_A, CREATE_PROCESS_INTERNAL_A, CREATE_PROCESS_INTERNAL_W, CREATE_PROCESS_W,
-    GETADDRINFO, GETADDRINFOW, INITIALIZE_SECURITY_CONTEXT_A, INITIALIZE_SECURITY_CONTEXT_W,
+    DNSQUERY_A, DNSQUERY_EX, DNSQUERY_UTF8, DNSQUERY_W, GETADDRINFO, GETADDRINFOEXA,
+    GETADDRINFOEXW, GETADDRINFOW, INITIALIZE_SECURITY_CONTEXT_A, INITIALIZE_SECURITY_CONTEXT_W,
     IOCTLSOCKET, LDR_LOAD_DLL, MSYS_FORK, MSYS_VFORK, NT_CLOSE, NT_CREATE_FILE, NT_CREATE_SECTION,
     NT_CREATE_USER_PROCESS, NT_DELETE_FILE, NT_DUPLICATE_OBJECT, NT_MAP_VIEW_OF_SECTION,
     NT_OPEN_FILE, NT_READ_FILE, NT_SET_INFORMATION_FILE, NT_WRITE_FILE, RECV, RECVFROM, SEND,
@@ -524,6 +525,60 @@ pub(super) static BUILTIN_HOOKS: &[HookDescriptor] = &[
         hook_ldr_load_dll,
         ORIGINAL_LDR_LOAD_DLL
     ),
+    export_hook!(
+        GETADDRINFOEXA,
+        "GetAddrInfoExA",
+        "dns.resolve",
+        "ws2_32.dll",
+        "GetAddrInfoExA",
+        hook_getaddrinfo_ex_a,
+        ORIGINAL_GETADDRINFOEXA
+    ),
+    export_hook!(
+        GETADDRINFOEXW,
+        "GetAddrInfoExW",
+        "dns.resolve",
+        "ws2_32.dll",
+        "GetAddrInfoExW",
+        hook_getaddrinfo_ex_w,
+        ORIGINAL_GETADDRINFOEXW
+    ),
+    export_hook!(
+        DNSQUERY_A,
+        "DnsQuery_A",
+        "dns.resolve",
+        "dnsapi.dll",
+        "DnsQuery_A",
+        hook_dns_query_a,
+        ORIGINAL_DNSQUERY_A
+    ),
+    export_hook!(
+        DNSQUERY_UTF8,
+        "DnsQuery_UTF8",
+        "dns.resolve",
+        "dnsapi.dll",
+        "DnsQuery_UTF8",
+        hook_dns_query_utf8,
+        ORIGINAL_DNSQUERY_UTF8
+    ),
+    export_hook!(
+        DNSQUERY_W,
+        "DnsQuery_W",
+        "dns.resolve",
+        "dnsapi.dll",
+        "DnsQuery_W",
+        hook_dns_query_w,
+        ORIGINAL_DNSQUERY_W
+    ),
+    export_hook!(
+        DNSQUERY_EX,
+        "DnsQueryEx",
+        "dns.resolve",
+        "dnsapi.dll",
+        "DnsQueryEx",
+        hook_dns_query_ex,
+        ORIGINAL_DNSQUERY_EX
+    ),
 ];
 
 const MSYS_HOOK_WAITING: u32 = 0;
@@ -978,14 +1033,14 @@ mod tests {
                 Some(descriptor.name)
             );
         }
-        assert_eq!(BUILTIN_HOOKS.len(), LDR_LOAD_DLL as usize);
+        assert_eq!(BUILTIN_HOOKS.len(), DNSQUERY_EX as usize);
         assert!(
             !descriptor(CONNECTEX)
                 .expect("ConnectEx descriptor")
                 .required
         );
         assert!(descriptor(0).is_none());
-        assert!(descriptor(LDR_LOAD_DLL + 1).is_none());
+        assert!(descriptor(DNSQUERY_EX + 1).is_none());
     }
 
     #[test]
