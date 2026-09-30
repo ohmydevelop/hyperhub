@@ -347,6 +347,7 @@ PYCODE
   -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
   >/dev/null 2>"$temporary/dynamic-ptrace.stderr.log"
 record_check dynamic.ptrace_descendants "fork+exec,posix_spawn,posix_spawnp"
+record_check dynamic.unix_nonblocking "socket,fcntl,ioctl"
 
 dynamic_hook_report="$result_dir/dynamic-hooks.json"
 HYPERHUB_AGENT_DEBUG=1 \

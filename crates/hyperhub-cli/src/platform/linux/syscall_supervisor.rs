@@ -58,6 +58,19 @@ struct ProcessIntent {
     argv: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketDescriptor {
+    domain: i32,
+    socket_type: i32,
+}
+
+impl SocketDescriptor {
+    fn requires_blocking_handshake(self) -> bool {
+        matches!(self.domain, libc::AF_INET | libc::AF_INET6)
+            && self.socket_type == libc::SOCK_STREAM
+    }
+}
+
 impl ProcessIntent {
     fn command_line(&self) -> String {
         self.argv.join(" ")
@@ -76,7 +89,7 @@ enum PendingSyscall {
         old_fd: i32,
     },
     Socket {
-        socket_type: i32,
+        descriptor: SocketDescriptor,
         logical_nonblocking: bool,
     },
     UdpConnect {
@@ -139,7 +152,7 @@ struct Supervisor {
     parents: HashMap<libc::pid_t, libc::pid_t>,
     members: HashSet<libc::pid_t>,
     nonblocking: HashMap<(libc::pid_t, i32), bool>,
-    socket_types: HashMap<(libc::pid_t, i32), i32>,
+    sockets: HashMap<(libc::pid_t, i32), SocketDescriptor>,
     udp_peers: HashMap<(libc::pid_t, i32), TargetAddress>,
     dns_queries: HashMap<(libc::pid_t, i32), String>,
     dns_addresses: HashMap<IpAddr, String>,
@@ -230,7 +243,7 @@ where
         parents: HashMap::new(),
         members: HashSet::from([child]),
         nonblocking: HashMap::new(),
-        socket_types: HashMap::new(),
+        sockets: HashMap::new(),
         udp_peers: HashMap::new(),
         dns_queries: HashMap::new(),
         dns_addresses: HashMap::new(),
@@ -248,6 +261,64 @@ where
 }
 
 impl Supervisor {
+    fn copy_descriptor(&mut self, process_pid: libc::pid_t, old_fd: i32, new_fd: i32) {
+        if old_fd == new_fd {
+            return;
+        }
+        let old_key = (process_pid, old_fd);
+        let new_key = (process_pid, new_fd);
+        self.nonblocking.remove(&new_key);
+        self.sockets.remove(&new_key);
+        self.udp_peers.remove(&new_key);
+        self.dns_queries.remove(&new_key);
+        if self.nonblocking.contains_key(&old_key) {
+            self.nonblocking.insert(new_key, true);
+        }
+        if let Some(descriptor) = self.sockets.get(&old_key).copied() {
+            self.sockets.insert(new_key, descriptor);
+        }
+        if let Some(peer) = self.udp_peers.get(&old_key).cloned() {
+            self.udp_peers.insert(new_key, peer);
+        }
+        if let Some(query) = self.dns_queries.get(&old_key).cloned() {
+            self.dns_queries.insert(new_key, query);
+        }
+    }
+
+    fn inherit_descriptors(&mut self, parent_pid: libc::pid_t, child_pid: libc::pid_t) {
+        let sockets = self
+            .sockets
+            .iter()
+            .filter_map(|(&(pid, fd), &descriptor)| {
+                (pid == parent_pid).then_some(((child_pid, fd), descriptor))
+            })
+            .collect::<Vec<_>>();
+        let nonblocking = self
+            .nonblocking
+            .keys()
+            .filter_map(|&(pid, fd)| (pid == parent_pid).then_some((child_pid, fd)))
+            .collect::<Vec<_>>();
+        let udp_peers = self
+            .udp_peers
+            .iter()
+            .filter_map(|(&(pid, fd), target)| {
+                (pid == parent_pid).then_some(((child_pid, fd), target.clone()))
+            })
+            .collect::<Vec<_>>();
+        let dns_queries = self
+            .dns_queries
+            .iter()
+            .filter_map(|(&(pid, fd), hostname)| {
+                (pid == parent_pid).then_some(((child_pid, fd), hostname.clone()))
+            })
+            .collect::<Vec<_>>();
+        self.sockets.extend(sockets);
+        self.nonblocking
+            .extend(nonblocking.into_iter().map(|key| (key, true)));
+        self.udp_peers.extend(udp_peers);
+        self.dns_queries.extend(dns_queries);
+    }
+
     fn event_loop(&mut self) -> Result<i32, String> {
         while !self.threads.is_empty() {
             let mut status = 0;
@@ -320,6 +391,7 @@ impl Supervisor {
                     let child_group = thread_group(child);
                     if child_group != parent_group {
                         self.parents.entry(child_group).or_insert(parent_group);
+                        self.inherit_descriptors(parent_group, child_group);
                     }
                 }
             }
@@ -434,13 +506,19 @@ impl Supervisor {
             return Ok(Some(pending));
         }
         if number == syscall::SOCKET {
+            let domain = registers.argument(0) as i32;
             let socket_type = registers.argument(1) as i32;
-            let logical_nonblocking = socket_type & libc::SOCK_NONBLOCK != 0;
+            let descriptor = SocketDescriptor {
+                domain,
+                socket_type: socket_type & 0xf,
+            };
+            let logical_nonblocking =
+                descriptor.requires_blocking_handshake() && socket_type & libc::SOCK_NONBLOCK != 0;
             if logical_nonblocking {
                 registers.set_argument(1, (socket_type & !libc::SOCK_NONBLOCK) as u64);
             }
             return Ok(Some(PendingSyscall::Socket {
-                socket_type: socket_type & 0xf,
+                descriptor,
                 logical_nonblocking,
             }));
         }
@@ -452,6 +530,14 @@ impl Supervisor {
                 return Ok(Some(PendingSyscall::Dup { old_fd: fd }));
             }
             if command == libc::F_SETFL {
+                let key = (thread_group(tid), fd);
+                if !self
+                    .sockets
+                    .get(&key)
+                    .is_some_and(|descriptor| descriptor.requires_blocking_handshake())
+                {
+                    return Ok(None);
+                }
                 let logical_nonblocking = flags & libc::O_NONBLOCK != 0;
                 if logical_nonblocking {
                     registers.set_argument(2, (flags & !libc::O_NONBLOCK) as u64);
@@ -468,6 +554,14 @@ impl Supervisor {
             let request = registers.argument(1) as libc::c_ulong;
             let value_address = registers.argument(2) as usize;
             if request == libc::FIONBIO as libc::c_ulong && value_address != 0 {
+                let key = (thread_group(tid), fd);
+                if !self
+                    .sockets
+                    .get(&key)
+                    .is_some_and(|descriptor| descriptor.requires_blocking_handshake())
+                {
+                    return Ok(None);
+                }
                 let value = read_memory(tid, value_address, 4)?;
                 let original: [u8; 4] = value.try_into().unwrap();
                 let logical_nonblocking = i32::from_ne_bytes(original) != 0;
@@ -495,7 +589,10 @@ impl Supervisor {
             return Ok(None);
         };
         let process_pid = thread_group(tid);
-        let socket_type = self.socket_types.get(&(process_pid, fd)).copied();
+        let socket_type = self
+            .sockets
+            .get(&(process_pid, fd))
+            .map(|descriptor| descriptor.socket_type);
         if socket_type == Some(libc::SOCK_DGRAM) {
             return Ok(Some(PendingSyscall::UdpConnect { fd, target }));
         }
@@ -531,26 +628,25 @@ impl Supervisor {
                 if registers.result() >= 0 {
                     let key = (thread_group(tid), fd);
                     self.nonblocking.remove(&key);
-                    self.socket_types.remove(&key);
+                    self.sockets.remove(&key);
                     self.udp_peers.remove(&key);
                     self.dns_queries.remove(&key);
                 }
             }
             Some(PendingSyscall::Dup { old_fd }) => {
                 let new_fd = registers.result();
-                if new_fd >= 0 && self.nonblocking.contains_key(&(thread_group(tid), old_fd)) {
-                    self.nonblocking
-                        .insert((thread_group(tid), new_fd as i32), true);
+                if new_fd >= 0 {
+                    self.copy_descriptor(thread_group(tid), old_fd, new_fd as i32);
                 }
             }
             Some(PendingSyscall::Socket {
-                socket_type,
+                descriptor,
                 logical_nonblocking,
             }) => {
                 let fd = registers.result();
                 if fd >= 0 {
                     let key = (thread_group(tid), fd as i32);
-                    self.socket_types.insert(key, socket_type);
+                    self.sockets.insert(key, descriptor);
                     if logical_nonblocking {
                         self.nonblocking.insert(key, true);
                     }
@@ -635,7 +731,12 @@ impl Supervisor {
         let process_pid = thread_group(tid);
         let fd = registers.argument(0) as i32;
         let key = (process_pid, fd);
-        if self.socket_types.get(&key).copied() != Some(libc::SOCK_DGRAM) {
+        if self
+            .sockets
+            .get(&key)
+            .map(|descriptor| descriptor.socket_type)
+            != Some(libc::SOCK_DGRAM)
+        {
             return Ok(None);
         }
 
@@ -2358,6 +2459,27 @@ mod tests {
         let bytes = encode_proxy_sockaddr(proxy, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 16).unwrap();
         assert_eq!(&bytes[2..4], &18444u16.to_be_bytes());
         assert_eq!(&bytes[4..8], &[127, 0, 0, 1]);
+    }
+
+    #[test]
+    fn only_inet_stream_sockets_require_blocking_handshakes() {
+        for domain in [libc::AF_INET, libc::AF_INET6] {
+            assert!(SocketDescriptor {
+                domain,
+                socket_type: libc::SOCK_STREAM,
+            }
+            .requires_blocking_handshake());
+        }
+        assert!(!SocketDescriptor {
+            domain: libc::AF_UNIX,
+            socket_type: libc::SOCK_STREAM,
+        }
+        .requires_blocking_handshake());
+        assert!(!SocketDescriptor {
+            domain: libc::AF_INET,
+            socket_type: libc::SOCK_DGRAM,
+        }
+        .requires_blocking_handshake());
     }
 
     #[test]

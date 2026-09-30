@@ -7,11 +7,13 @@
 #include <netdb.h>
 #include <poll.h>
 #include <spawn.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -123,6 +125,56 @@ static int file_probe(void) {
     return ok && memcmp(data, readback, sizeof(data)) == 0;
 }
 
+static int unix_nonblocking_probe(int mode) {
+    int socket_type = SOCK_STREAM | SOCK_CLOEXEC;
+    if (mode == 0)
+        socket_type |= SOCK_NONBLOCK;
+    int fd = socket(AF_UNIX, socket_type, 0);
+    if (fd < 0)
+        return 0;
+
+    if (mode == 1) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            close(fd);
+            return 0;
+        }
+    } else if (mode == 2) {
+        unsigned long enabled = 1;
+        if (ioctl(fd, FIONBIO, &enabled) != 0) {
+            close(fd);
+            return 0;
+        }
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || (flags & O_NONBLOCK) == 0) {
+        close(fd);
+        return 0;
+    }
+
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    int written = snprintf(address.sun_path + 1, sizeof(address.sun_path) - 1,
+                           "hyperhub-nonblocking-%ld-%d", (long)getpid(), mode);
+    if (written < 0 || (size_t)written >= sizeof(address.sun_path) - 1) {
+        close(fd);
+        return 0;
+    }
+    socklen_t address_length = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + written);
+    if (bind(fd, (const struct sockaddr *)&address, address_length) != 0 || listen(fd, 1) != 0) {
+        close(fd);
+        return 0;
+    }
+
+    int accepted = accept4(fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    int ok = accepted < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+    if (accepted >= 0)
+        close(accepted);
+    close(fd);
+    return ok;
+}
+
 static void exercise_failed_execve(void) {
     char *arguments[] = {(char *)"/hyperhub-missing-executable", NULL};
     execve(arguments[0], arguments, environ);
@@ -134,7 +186,8 @@ int main(int argc, char **argv) {
     if (argc != 3)
         return 64;
     if (!network_probe(argv[1], argv[2], 0) || !network_probe(argv[1], argv[2], 1) ||
-        !file_probe())
+        !file_probe() || !unix_nonblocking_probe(0) || !unix_nonblocking_probe(1) ||
+        !unix_nonblocking_probe(2))
         return 1;
 
     exercise_failed_execve();
