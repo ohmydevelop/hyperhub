@@ -147,6 +147,37 @@ unsafe fn handle_path(h: HANDLE) -> Option<String> {
     handles().lock().ok()?.insert(h as usize, p.clone());
     Some(p)
 }
+
+unsafe fn rename_target_path(info: *const c_void, length: u32) -> Option<String> {
+    if info.is_null() || length < 20 {
+        return None;
+    }
+    let bytes = info.cast::<u8>();
+    let root = bytes.add(8).cast::<HANDLE>().read_unaligned();
+    let name_length = bytes.add(16).cast::<u32>().read_unaligned() as usize;
+    if name_length == 0
+        || name_length % 2 != 0
+        || 20usize.saturating_add(name_length) > length as usize
+    {
+        return None;
+    }
+    let name = String::from_utf16_lossy(std::slice::from_raw_parts(
+        bytes.add(20).cast::<u16>(),
+        name_length / 2,
+    ));
+    let name = normalize(&name);
+    if !root.is_null() && !name.contains(':') && !name.starts_with("//") {
+        handle_path(root).map(|base| {
+            format!(
+                "{}/{}",
+                base.trim_end_matches('/'),
+                name.trim_start_matches('/')
+            )
+        })
+    } else {
+        Some(name)
+    }
+}
 unsafe fn dispatch(
     op: FileOperation,
     path: Option<String>,
@@ -288,7 +319,16 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
         return STATUS_ACCESS_DENIED;
     };
     let op = if matches!(class, 10 | 65) {
-        FileOperation::Rename
+        let source = dispatch(FileOperation::Rename, handle_path(h), h as usize, || 0);
+        if source == STATUS_ACCESS_DENIED {
+            return source;
+        }
+        return dispatch(
+            FileOperation::Rename,
+            rename_target_path(info, len),
+            0,
+            || f(h, ios, info, len, class),
+        );
     } else if matches!(class, 13 | 64) {
         FileOperation::Delete
     } else {
@@ -419,6 +459,24 @@ mod tests {
     fn failed_nt_close_keeps_handle_state() {
         assert!(!nt_succeeded(STATUS_ACCESS_DENIED));
         assert!(nt_succeeded(0));
+    }
+
+    #[test]
+    fn parses_relative_rename_target_from_file_information() {
+        let name: Vec<u16> = r"\??\C:\tmp\target.txt".encode_utf16().collect();
+        let mut bytes = vec![0_u8; 20 + name.len() * 2];
+        bytes[16..20].copy_from_slice(&((name.len() * 2) as u32).to_ne_bytes());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                name.as_ptr().cast::<u8>(),
+                bytes.as_mut_ptr().add(20),
+                name.len() * 2,
+            );
+            assert_eq!(
+                rename_target_path(bytes.as_ptr().cast(), bytes.len() as u32).as_deref(),
+                Some("C:/tmp/target.txt")
+            );
+        }
     }
 
     #[test]

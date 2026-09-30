@@ -16,7 +16,7 @@ use std::sync::{Once, OnceLock};
 
 thread_local! { static INSIDE_HOOK: Cell<bool> = const { Cell::new(false) }; }
 
-static HOOK_HITS: [AtomicU64; 26] = [const { AtomicU64::new(0) }; 26];
+static HOOK_HITS: [AtomicU64; 38] = [const { AtomicU64::new(0) }; 38];
 static HOOK_REPORT_ENABLED: AtomicBool = AtomicBool::new(false);
 static INSTALL_HOOK_REPORT: Once = Once::new();
 
@@ -44,6 +44,17 @@ const HOOK_REPORT_NAMES: &[(usize, &str)] = &[
     (23, "file.mmap"),
     (24, "file.mprotect"),
     (25, "file.munmap"),
+    (26, "handle.dup"),
+    (27, "handle.dup2"),
+    (28, "handle.dup3"),
+    (29, "socket.sendto"),
+    (30, "socket.recvfrom"),
+    (31, "socket.sendmsg"),
+    (32, "socket.recvmsg"),
+    (33, "file.readv"),
+    (34, "file.writev"),
+    (35, "file.pread"),
+    (36, "file.pwrite"),
 ];
 
 fn hook_hit(id: usize) {
@@ -107,6 +118,16 @@ impl Drop for HookGuard {
 type ConnectFn = unsafe extern "C" fn(c_int, *const sockaddr, socklen_t) -> c_int;
 type SendFn = unsafe extern "C" fn(c_int, *const c_void, usize, c_int) -> isize;
 type RecvFn = unsafe extern "C" fn(c_int, *mut c_void, usize, c_int) -> isize;
+type SendToFn =
+    unsafe extern "C" fn(c_int, *const c_void, usize, c_int, *const sockaddr, socklen_t) -> isize;
+type RecvFromFn =
+    unsafe extern "C" fn(c_int, *mut c_void, usize, c_int, *mut sockaddr, *mut socklen_t) -> isize;
+type SendMsgFn = unsafe extern "C" fn(c_int, *const libc::msghdr, c_int) -> isize;
+type RecvMsgFn = unsafe extern "C" fn(c_int, *mut libc::msghdr, c_int) -> isize;
+type ReadvFn = unsafe extern "C" fn(c_int, *const libc::iovec, c_int) -> isize;
+type WritevFn = unsafe extern "C" fn(c_int, *const libc::iovec, c_int) -> isize;
+type PreadFn = unsafe extern "C" fn(c_int, *mut c_void, usize, libc::off_t) -> isize;
+type PwriteFn = unsafe extern "C" fn(c_int, *const c_void, usize, libc::off_t) -> isize;
 type GetAddrInfoFn = unsafe extern "C" fn(
     *const libc::c_char,
     *const libc::c_char,
@@ -134,6 +155,22 @@ fn send_fn() -> SendFn {
 fn recv_fn() -> RecvFn {
     static F: OnceLock<RecvFn> = OnceLock::new();
     *F.get_or_init(|| symbol(c"recv"))
+}
+fn sendto_fn() -> SendToFn {
+    static F: OnceLock<SendToFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"sendto"))
+}
+fn recvfrom_fn() -> RecvFromFn {
+    static F: OnceLock<RecvFromFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"recvfrom"))
+}
+fn sendmsg_fn() -> SendMsgFn {
+    static F: OnceLock<SendMsgFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"sendmsg"))
+}
+fn recvmsg_fn() -> RecvMsgFn {
+    static F: OnceLock<RecvMsgFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"recvmsg"))
 }
 fn gai_fn() -> GetAddrInfoFn {
     static F: OnceLock<GetAddrInfoFn> = OnceLock::new();
@@ -354,6 +391,22 @@ unsafe fn send_all(fd: c_int, mut data: &[u8]) -> bool {
     true
 }
 
+unsafe fn file_allowed_for_io(fd: c_int, operation: crate::FileSandboxOperation) -> bool {
+    std::fs::read_link(format!("/proc/self/fd/{fd}"))
+        .map(|path| crate::file_allows(&path.to_string_lossy(), operation))
+        .unwrap_or(true)
+}
+
+unsafe fn audit_io_denial(fd: c_int, operation: &str) {
+    if let Ok(path) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+        audit(
+            crate::SandboxAuditKind::File,
+            operation,
+            &path.to_string_lossy(),
+        );
+    }
+}
+
 unsafe fn recv_all(fd: c_int, mut data: &mut [u8]) -> bool {
     while !data.is_empty() {
         let received = recv_fn()(fd, data.as_mut_ptr() as *mut c_void, data.len(), 0);
@@ -407,6 +460,154 @@ pub unsafe extern "C" fn recv(
     let _ = crate::hh_agent_note_io(fd as u64, result as i64);
     result
 }
+
+pub unsafe extern "C" fn sendto(
+    fd: c_int,
+    buffer: *const c_void,
+    length: usize,
+    flags: c_int,
+    address: *const sockaddr,
+    address_length: socklen_t,
+) -> isize {
+    hook_hit(29);
+    let original = sendto_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, buffer, length, flags, address, address_length);
+    };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
+    let result = original(fd, buffer, length, flags, address, address_length);
+    let _ = crate::hh_agent_note_io(fd as u64, result as i64);
+    result
+}
+
+pub unsafe extern "C" fn recvfrom(
+    fd: c_int,
+    buffer: *mut c_void,
+    length: usize,
+    flags: c_int,
+    address: *mut sockaddr,
+    address_length: *mut socklen_t,
+) -> isize {
+    hook_hit(30);
+    let original = recvfrom_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, buffer, length, flags, address, address_length);
+    };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
+    let result = original(fd, buffer, length, flags, address, address_length);
+    let _ = crate::hh_agent_note_io(fd as u64, result as i64);
+    result
+}
+
+pub unsafe extern "C" fn sendmsg(fd: c_int, message: *const libc::msghdr, flags: c_int) -> isize {
+    hook_hit(31);
+    let original = sendmsg_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, message, flags);
+    };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
+    let result = original(fd, message, flags);
+    let _ = crate::hh_agent_note_io(fd as u64, result as i64);
+    result
+}
+
+pub unsafe extern "C" fn recvmsg(fd: c_int, message: *mut libc::msghdr, flags: c_int) -> isize {
+    hook_hit(32);
+    let original = recvmsg_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, message, flags);
+    };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
+    let result = original(fd, message, flags);
+    let _ = crate::hh_agent_note_io(fd as u64, result as i64);
+    result
+}
+
+pub unsafe extern "C" fn readv(fd: c_int, iov: *const libc::iovec, count: c_int) -> isize {
+    hook_hit(33);
+    let original = readv_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, iov, count);
+    };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
+    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Read) {
+        audit_io_denial(fd, "read");
+        *libc::__errno_location() = libc::EACCES;
+        return -1;
+    }
+    original(fd, iov, count)
+}
+
+pub unsafe extern "C" fn writev(fd: c_int, iov: *const libc::iovec, count: c_int) -> isize {
+    hook_hit(34);
+    let original = writev_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, iov, count);
+    };
+    if !ensure_handshake(fd) {
+        *libc::__errno_location() = libc::ECONNRESET;
+        return -1;
+    }
+    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Write) {
+        audit_io_denial(fd, "write");
+        *libc::__errno_location() = libc::EACCES;
+        return -1;
+    }
+    original(fd, iov, count)
+}
+
+pub unsafe extern "C" fn pread(
+    fd: c_int,
+    buffer: *mut c_void,
+    length: usize,
+    offset: libc::off_t,
+) -> isize {
+    hook_hit(35);
+    let original = pread_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, buffer, length, offset);
+    };
+    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Read) {
+        audit_io_denial(fd, "read");
+        *libc::__errno_location() = libc::EACCES;
+        return -1;
+    }
+    original(fd, buffer, length, offset)
+}
+
+pub unsafe extern "C" fn pwrite(
+    fd: c_int,
+    buffer: *const c_void,
+    length: usize,
+    offset: libc::off_t,
+) -> isize {
+    hook_hit(36);
+    let original = pwrite_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(fd, buffer, length, offset);
+    };
+    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Write) {
+        audit_io_denial(fd, "write");
+        *libc::__errno_location() = libc::EACCES;
+        return -1;
+    }
+    original(fd, buffer, length, offset)
+}
 pub unsafe extern "C" fn getaddrinfo(
     node: *const libc::c_char,
     service: *const libc::c_char,
@@ -447,6 +648,13 @@ type ReadFn = unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize;
 type WriteFn = unsafe extern "C" fn(c_int, *const c_void, usize) -> isize;
 type UnlinkFn = unsafe extern "C" fn(*const libc::c_char) -> c_int;
 type RenameFn = unsafe extern "C" fn(*const libc::c_char, *const libc::c_char) -> c_int;
+type RenameAt2Fn = unsafe extern "C" fn(
+    c_int,
+    *const libc::c_char,
+    c_int,
+    *const libc::c_char,
+    libc::c_uint,
+) -> c_int;
 type ExecveFn = unsafe extern "C" fn(
     *const libc::c_char,
     *const *const libc::c_char,
@@ -470,6 +678,10 @@ fn rename_fn() -> RenameFn {
     static F: OnceLock<RenameFn> = OnceLock::new();
     *F.get_or_init(|| symbol(c"rename"))
 }
+fn renameat2_fn() -> RenameAt2Fn {
+    static F: OnceLock<RenameAt2Fn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"renameat2"))
+}
 fn execve_fn() -> ExecveFn {
     static F: OnceLock<ExecveFn> = OnceLock::new();
     *F.get_or_init(|| symbol(c"execve"))
@@ -477,6 +689,22 @@ fn execve_fn() -> ExecveFn {
 fn mmap_fn() -> MmapFn {
     static F: OnceLock<MmapFn> = OnceLock::new();
     *F.get_or_init(|| symbol(c"mmap"))
+}
+fn readv_fn() -> ReadvFn {
+    static F: OnceLock<ReadvFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"readv"))
+}
+fn writev_fn() -> WritevFn {
+    static F: OnceLock<WritevFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"writev"))
+}
+fn pread_fn() -> PreadFn {
+    static F: OnceLock<PreadFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"pread"))
+}
+fn pwrite_fn() -> PwriteFn {
+    static F: OnceLock<PwriteFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"pwrite"))
 }
 fn audit(kind: crate::SandboxAuditKind, operation: &str, target: &str) {
     let event = crate::SandboxAuditEvent {
@@ -551,6 +779,7 @@ struct ListenerState {
     denied: u8,
     fd: c_int,
     nonblocking: u8,
+    duplicate: u8,
 }
 
 impl Default for ListenerState {
@@ -560,6 +789,7 @@ impl Default for ListenerState {
             denied: 0,
             fd: -1,
             nonblocking: 0,
+            duplicate: 0,
         }
     }
 }
@@ -613,6 +843,11 @@ pub(crate) unsafe extern "C" fn variadic_on_leave(
         if (*state).denied != 0 {
             *libc::__errno_location() = libc::EACCES;
             gum::replace_return_value(context, usize::MAX as *mut c_void);
+        } else if gum::return_value(context) as isize >= 0 && (*state).duplicate != 0 {
+            let _ = crate::hh_agent_dup_socket(
+                (*state).fd as u64,
+                gum::return_value(context) as usize as u64,
+            );
         } else if gum::return_value(context) as isize >= 0 && (*state).fd >= 0 {
             let _ = crate::hh_agent_note_nonblocking(
                 (*state).fd as u64,
@@ -657,7 +892,10 @@ unsafe fn inspect_open(
 
 unsafe fn inspect_fcntl(context: *mut gum::GumInvocationContext, state: *mut ListenerState) {
     let command = gum::argument(context, 1) as usize as c_int;
-    if command == libc::F_SETFL {
+    if command == libc::F_DUPFD || command == libc::F_DUPFD_CLOEXEC {
+        (*state).fd = gum::argument(context, 0) as usize as c_int;
+        (*state).duplicate = 1;
+    } else if command == libc::F_SETFL {
         let flags = gum::argument(context, 2) as usize as c_int;
         (*state).fd = gum::argument(context, 0) as usize as c_int;
         (*state).nonblocking = u8::from(flags & libc::O_NONBLOCK != 0);
@@ -801,11 +1039,69 @@ pub unsafe extern "C" fn renameat(
     }
     f(od, old, nd, new)
 }
+
+pub unsafe extern "C" fn renameat2(
+    od: c_int,
+    old: *const libc::c_char,
+    nd: c_int,
+    new: *const libc::c_char,
+    flags: libc::c_uint,
+) -> c_int {
+    hook_hit(37);
+    let original = renameat2_fn();
+    let Some(_guard) = HookGuard::enter() else {
+        return original(od, old, nd, new, flags);
+    };
+    for path in [
+        cpath(old).map(|raw| relative_path(od, &raw)),
+        cpath(new).map(|raw| relative_path(nd, &raw)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !crate::file_allows(&path, crate::FileSandboxOperation::Rename) {
+            audit(crate::SandboxAuditKind::File, "rename", &path);
+            *libc::__errno_location() = libc::EACCES;
+            return -1;
+        }
+    }
+    original(od, old, nd, new, flags)
+}
 pub unsafe extern "C" fn close(fd: c_int) -> c_int {
     hook_hit(6);
     let _ = crate::hh_agent_close_socket(fd as u64);
     let f: unsafe extern "C" fn(c_int) -> c_int = symbol(c"close");
     f(fd)
+}
+
+pub unsafe extern "C" fn dup(fd: c_int) -> c_int {
+    hook_hit(26);
+    let f: unsafe extern "C" fn(c_int) -> c_int = symbol(c"dup");
+    let result = f(fd);
+    if result >= 0 {
+        let _ = crate::hh_agent_dup_socket(fd as u64, result as u64);
+    }
+    result
+}
+
+pub unsafe extern "C" fn dup2(fd: c_int, destination: c_int) -> c_int {
+    hook_hit(27);
+    let f: unsafe extern "C" fn(c_int, c_int) -> c_int = symbol(c"dup2");
+    let result = f(fd, destination);
+    if result >= 0 {
+        let _ = crate::hh_agent_dup_socket(fd as u64, result as u64);
+    }
+    result
+}
+
+pub unsafe extern "C" fn dup3(fd: c_int, destination: c_int, flags: c_int) -> c_int {
+    hook_hit(28);
+    let f: unsafe extern "C" fn(c_int, c_int, c_int) -> c_int = symbol(c"dup3");
+    let result = f(fd, destination, flags);
+    if result >= 0 {
+        let _ = crate::hh_agent_dup_socket(fd as u64, result as u64);
+    }
+    result
 }
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
     hook_hit(24);

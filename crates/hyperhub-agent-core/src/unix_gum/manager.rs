@@ -146,6 +146,60 @@ static DESCRIPTORS: &[Descriptor] = &[
         native::munmap as *mut c_void,
         true,
     ),
+    replace(26, "dup", "handle.dup", native::dup as *mut c_void, true),
+    replace(27, "dup2", "handle.dup", native::dup2 as *mut c_void, true),
+    replace(28, "dup3", "handle.dup", native::dup3 as *mut c_void, true),
+    replace(
+        29,
+        "sendto",
+        "socket.send",
+        native::sendto as *mut c_void,
+        true,
+    ),
+    replace(
+        30,
+        "recvfrom",
+        "socket.recv",
+        native::recvfrom as *mut c_void,
+        true,
+    ),
+    replace(
+        31,
+        "sendmsg",
+        "socket.send",
+        native::sendmsg as *mut c_void,
+        true,
+    ),
+    replace(
+        32,
+        "recvmsg",
+        "socket.recv",
+        native::recvmsg as *mut c_void,
+        true,
+    ),
+    replace(33, "readv", "file.read", native::readv as *mut c_void, true),
+    replace(
+        34,
+        "writev",
+        "file.write",
+        native::writev as *mut c_void,
+        true,
+    ),
+    replace(35, "pread", "file.read", native::pread as *mut c_void, true),
+    replace(
+        36,
+        "pwrite",
+        "file.write",
+        native::pwrite as *mut c_void,
+        true,
+    ),
+    replace(
+        37,
+        "renameat2",
+        "file.rename",
+        native::renameat2 as *mut c_void,
+        false,
+    ),
 ];
 
 const fn replace(
@@ -343,7 +397,7 @@ mod tests {
                 descriptor.symbol
             );
         }
-        assert_eq!(DESCRIPTORS.len(), 25);
+        assert_eq!(DESCRIPTORS.len(), 37);
         assert!(
             !DESCRIPTORS
                 .iter()
@@ -377,7 +431,7 @@ mod tests {
     fn manifest_preserves_descriptor_order() {
         let manifest = manifest();
         assert_eq!(manifest.first().map(|entry| entry.1), Some("getaddrinfo"));
-        assert_eq!(manifest.last().map(|entry| entry.1), Some("munmap"));
+        assert_eq!(manifest.last().map(|entry| entry.1), Some("renameat2"));
         assert_eq!(manifest[2].2, "socket.connect");
     }
 }

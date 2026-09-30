@@ -21,8 +21,8 @@ use super::{
     GETADDRINFO, GETADDRINFOW, INITIALIZE_SECURITY_CONTEXT_A, INITIALIZE_SECURITY_CONTEXT_W,
     IOCTLSOCKET, LDR_LOAD_DLL, MSYS_FORK, MSYS_VFORK, NT_CLOSE, NT_CREATE_FILE, NT_CREATE_SECTION,
     NT_CREATE_USER_PROCESS, NT_DELETE_FILE, NT_DUPLICATE_OBJECT, NT_MAP_VIEW_OF_SECTION,
-    NT_OPEN_FILE, NT_READ_FILE, NT_SET_INFORMATION_FILE, NT_WRITE_FILE, RECV, SEND, WSACONNECT,
-    WSARECV, WSASEND,
+    NT_OPEN_FILE, NT_READ_FILE, NT_SET_INFORMATION_FILE, NT_WRITE_FILE, RECV, RECVFROM, SEND,
+    SENDTO, WSACONNECT, WSARECV, WSARECVFROM, WSASEND, WSASENDTO,
 };
 
 #[derive(Clone, Copy)]
@@ -261,6 +261,42 @@ pub(super) static BUILTIN_HOOKS: &[HookDescriptor] = &[
         "WSARecv",
         hook_wsa_recv,
         ORIGINAL_WSARECV
+    ),
+    export_hook!(
+        SENDTO,
+        "sendto",
+        "socket.io",
+        "ws2_32.dll",
+        "sendto",
+        hook_sendto,
+        ORIGINAL_SENDTO
+    ),
+    export_hook!(
+        RECVFROM,
+        "recvfrom",
+        "socket.io",
+        "ws2_32.dll",
+        "recvfrom",
+        hook_recvfrom,
+        ORIGINAL_RECVFROM
+    ),
+    export_hook!(
+        WSASENDTO,
+        "WSASendTo",
+        "socket.io",
+        "ws2_32.dll",
+        "WSASendTo",
+        hook_wsa_sendto,
+        ORIGINAL_WSASENDTO
+    ),
+    export_hook!(
+        WSARECVFROM,
+        "WSARecvFrom",
+        "socket.io",
+        "ws2_32.dll",
+        "WSARecvFrom",
+        hook_wsa_recvfrom,
+        ORIGINAL_WSARECVFROM
     ),
     HookDescriptor::connect_ex(
         hook_connect_ex as *const () as *mut c_void,

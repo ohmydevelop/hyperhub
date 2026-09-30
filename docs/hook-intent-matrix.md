@@ -13,7 +13,7 @@ HyperHub 先按安全意图定义语义，再为不同运行后端绑定点位�
 | 非阻塞状态 | `fcntl`、`ioctl` | `SOCK_NONBLOCK`、`fcntl(F_GETFL/F_SETFL)`、`ioctl(FIONBIO)` | C 同时验证设置与读取语义；Go、Rust 覆盖常见路径 |
 | TCP 重定向 | `connect` | `connect` entry/exit | 根进程和 exec 后代都必须经 SOCKS5 |
 | 描述符复制 | 运行时 socket 状态 | `dup/dup2/dup3`、`fcntl(F_DUPFD*)` | C fixture hook report |
-| 数据路径 | `send/recv` | `read/write`、`sendto/recvfrom`、`sendmsg/recvmsg` | C echo 的三种 I/O；Go/Rust 标准库 I/O |
+| 数据路径 | `send/recv/sendto/recvfrom/sendmsg/recvmsg` | `read/write/readv/writev/pread/pwrite`、`sendto/recvfrom`、`sendmsg/recvmsg` | C echo 的多种 I/O；Go/Rust 标准库 I/O |
 | 连接结果 | libc 返回值 | `getsockopt(SO_ERROR)` | C fixture hook report |
 | 关闭 | `close` | `close/close_range`，exec 时清理 `CLOEXEC` 状态 | 每种 fixture、close-range 源码路径与大型程序 |
 

@@ -23,6 +23,10 @@ pub(in crate::windows_gum) type SendFn =
     unsafe extern "system" fn(SOCKET, *const u8, i32, i32) -> i32;
 pub(in crate::windows_gum) type RecvFn =
     unsafe extern "system" fn(SOCKET, *mut u8, i32, i32) -> i32;
+pub(in crate::windows_gum) type SendToFn =
+    unsafe extern "system" fn(SOCKET, *const u8, i32, i32, *const SOCKADDR, i32) -> i32;
+pub(in crate::windows_gum) type RecvFromFn =
+    unsafe extern "system" fn(SOCKET, *mut u8, i32, i32, *mut SOCKADDR, *mut i32) -> i32;
 pub(in crate::windows_gum) type CloseSocketFn = unsafe extern "system" fn(SOCKET) -> i32;
 pub(in crate::windows_gum) type IoctlSocketFn =
     unsafe extern "system" fn(SOCKET, i32, *mut u32) -> i32;
@@ -44,6 +48,28 @@ pub(in crate::windows_gum) type WsaRecvFn = unsafe extern "system" fn(
     *mut OVERLAPPED,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) -> i32;
+pub(in crate::windows_gum) type WsaSendToFn = unsafe extern "system" fn(
+    SOCKET,
+    *const WSABUF,
+    u32,
+    *mut u32,
+    u32,
+    *const SOCKADDR,
+    i32,
+    *mut OVERLAPPED,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) -> i32;
+pub(in crate::windows_gum) type WsaRecvFromFn = unsafe extern "system" fn(
+    SOCKET,
+    *const WSABUF,
+    u32,
+    *mut u32,
+    *mut u32,
+    *mut SOCKADDR,
+    *mut i32,
+    *mut OVERLAPPED,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) -> i32;
 pub(in crate::windows_gum) type ConnectExFn = unsafe extern "system" fn(
     SOCKET,
     *const SOCKADDR,
@@ -62,12 +88,18 @@ pub(in crate::windows_gum) static ORIGINAL_WSACONNECT: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_SEND: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_RECV: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_SENDTO: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_RECVFROM: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_CLOSESOCKET: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_IOCTLSOCKET: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_WSASEND: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_WSARECV: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_WSASENDTO: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_WSARECVFROM: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
 pub(in crate::windows_gum) static ORIGINAL_CONNECTEX: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 
@@ -567,6 +599,90 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_recv(
     )
 }
 
+pub(in crate::windows_gum) unsafe extern "system" fn hook_sendto(
+    socket: SOCKET,
+    buffer: *const u8,
+    length: i32,
+    flags: i32,
+    address: *const SOCKADDR,
+    address_length: i32,
+) -> i32 {
+    let Some(original) = original!(ORIGINAL_SENDTO, SendToFn) else {
+        return SOCKET_ERROR;
+    };
+    if INSIDE_HOOK.with(Cell::get) {
+        return original(socket, buffer, length, flags, address, address_length);
+    }
+    hook_result(
+        Some(socket),
+        || original(socket, buffer, length, flags, address, address_length),
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return original(socket, buffer, length, flags, address, address_length);
+            };
+            let mut context = SocketIoContext {
+                socket,
+                direction: SocketIoDirection::Send,
+                ensure_gateway_handshake: false,
+            };
+            runtime().socket_io.dispatch(
+                &mut context,
+                |context| {
+                    with_gateway_handshake(context, || {
+                        original(socket, buffer, length, flags, address, address_length)
+                    })
+                },
+                |_, _, _| {
+                    WSASetLastError(WSAECONNRESET);
+                    SOCKET_ERROR
+                },
+            )
+        },
+    )
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_recvfrom(
+    socket: SOCKET,
+    buffer: *mut u8,
+    length: i32,
+    flags: i32,
+    address: *mut SOCKADDR,
+    address_length: *mut i32,
+) -> i32 {
+    let Some(original) = original!(ORIGINAL_RECVFROM, RecvFromFn) else {
+        return SOCKET_ERROR;
+    };
+    if INSIDE_HOOK.with(Cell::get) {
+        return original(socket, buffer, length, flags, address, address_length);
+    }
+    hook_result(
+        Some(socket),
+        || original(socket, buffer, length, flags, address, address_length),
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return original(socket, buffer, length, flags, address, address_length);
+            };
+            let mut context = SocketIoContext {
+                socket,
+                direction: SocketIoDirection::Receive,
+                ensure_gateway_handshake: false,
+            };
+            runtime().socket_io.dispatch(
+                &mut context,
+                |context| {
+                    with_gateway_handshake(context, || {
+                        original(socket, buffer, length, flags, address, address_length)
+                    })
+                },
+                |_, _, _| {
+                    WSASetLastError(WSAECONNRESET);
+                    SOCKET_ERROR
+                },
+            )
+        },
+    )
+}
+
 pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_send(
     socket: SOCKET,
     buffers: *const WSABUF,
@@ -651,6 +767,180 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_recv(
                     with_gateway_handshake(context, || {
                         original(
                             socket, buffers, count, received, flags, overlapped, completion,
+                        )
+                    })
+                },
+                |_, _, _| {
+                    WSASetLastError(WSAECONNRESET);
+                    SOCKET_ERROR
+                },
+            )
+        },
+    )
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_sendto(
+    socket: SOCKET,
+    buffers: *const WSABUF,
+    count: u32,
+    sent: *mut u32,
+    flags: u32,
+    address: *const SOCKADDR,
+    address_length: i32,
+    overlapped: *mut OVERLAPPED,
+    completion: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) -> i32 {
+    let Some(original) = original!(ORIGINAL_WSASENDTO, WsaSendToFn) else {
+        return SOCKET_ERROR;
+    };
+    if INSIDE_HOOK.with(Cell::get) {
+        return original(
+            socket,
+            buffers,
+            count,
+            sent,
+            flags,
+            address,
+            address_length,
+            overlapped,
+            completion,
+        );
+    }
+    hook_result(
+        Some(socket),
+        || {
+            original(
+                socket,
+                buffers,
+                count,
+                sent,
+                flags,
+                address,
+                address_length,
+                overlapped,
+                completion,
+            )
+        },
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return original(
+                    socket,
+                    buffers,
+                    count,
+                    sent,
+                    flags,
+                    address,
+                    address_length,
+                    overlapped,
+                    completion,
+                );
+            };
+            let mut context = SocketIoContext {
+                socket,
+                direction: SocketIoDirection::Send,
+                ensure_gateway_handshake: false,
+            };
+            runtime().socket_io.dispatch(
+                &mut context,
+                |context| {
+                    with_gateway_handshake(context, || {
+                        original(
+                            socket,
+                            buffers,
+                            count,
+                            sent,
+                            flags,
+                            address,
+                            address_length,
+                            overlapped,
+                            completion,
+                        )
+                    })
+                },
+                |_, _, _| {
+                    WSASetLastError(WSAECONNRESET);
+                    SOCKET_ERROR
+                },
+            )
+        },
+    )
+}
+
+pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_recvfrom(
+    socket: SOCKET,
+    buffers: *const WSABUF,
+    count: u32,
+    received: *mut u32,
+    flags: *mut u32,
+    address: *mut SOCKADDR,
+    address_length: *mut i32,
+    overlapped: *mut OVERLAPPED,
+    completion: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) -> i32 {
+    let Some(original) = original!(ORIGINAL_WSARECVFROM, WsaRecvFromFn) else {
+        return SOCKET_ERROR;
+    };
+    if INSIDE_HOOK.with(Cell::get) {
+        return original(
+            socket,
+            buffers,
+            count,
+            received,
+            flags,
+            address,
+            address_length,
+            overlapped,
+            completion,
+        );
+    }
+    hook_result(
+        Some(socket),
+        || {
+            original(
+                socket,
+                buffers,
+                count,
+                received,
+                flags,
+                address,
+                address_length,
+                overlapped,
+                completion,
+            )
+        },
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return original(
+                    socket,
+                    buffers,
+                    count,
+                    received,
+                    flags,
+                    address,
+                    address_length,
+                    overlapped,
+                    completion,
+                );
+            };
+            let mut context = SocketIoContext {
+                socket,
+                direction: SocketIoDirection::Receive,
+                ensure_gateway_handshake: false,
+            };
+            runtime().socket_io.dispatch(
+                &mut context,
+                |context| {
+                    with_gateway_handshake(context, || {
+                        original(
+                            socket,
+                            buffers,
+                            count,
+                            received,
+                            flags,
+                            address,
+                            address_length,
+                            overlapped,
+                            completion,
                         )
                     })
                 },

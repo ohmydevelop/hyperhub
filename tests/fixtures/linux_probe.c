@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -81,6 +82,48 @@ static int network_probe(const char *name, const char *service, int nonblocking,
     int ok = sent == (ssize_t)(sizeof(payload) - 1) &&
              received == (ssize_t)(sizeof(payload) - 1) &&
              memcmp(payload, response, sizeof(payload) - 1) == 0;
+    const char sendto_payload[] = "hyperhub-sendto";
+    const char sendmsg_payload[] = "hyperhub-sendmsg";
+    char response_to[sizeof(sendto_payload)] = {0};
+    char response_message[sizeof(sendmsg_payload)] = {0};
+    struct iovec send_iov = {(void *)sendmsg_payload, sizeof(sendmsg_payload) - 1};
+    struct iovec recv_iov = {response_message, sizeof(sendmsg_payload) - 1};
+    struct msghdr send_message = {0};
+    struct msghdr recv_message = {0};
+    send_message.msg_iov = &send_iov;
+    send_message.msg_iovlen = 1;
+    recv_message.msg_iov = &recv_iov;
+    recv_message.msg_iovlen = 1;
+    ssize_t sent_to = sendto(fd, sendto_payload, sizeof(sendto_payload) - 1, 0, NULL, 0);
+    if (sent_to < 0 && nonblocking && errno == EAGAIN) {
+        struct pollfd descriptor = {.fd = fd, .events = POLLOUT};
+        if (poll(&descriptor, 1, 5000) > 0)
+            sent_to = sendto(fd, sendto_payload, sizeof(sendto_payload) - 1, 0, NULL, 0);
+    }
+    ssize_t received_from = recvfrom(fd, response_to, sizeof(sendto_payload) - 1, 0, NULL, NULL);
+    if (received_from < 0 && nonblocking && errno == EAGAIN) {
+        struct pollfd descriptor = {.fd = fd, .events = POLLIN};
+        if (poll(&descriptor, 1, 5000) > 0)
+            received_from = recvfrom(fd, response_to, sizeof(sendto_payload) - 1, 0, NULL, NULL);
+    }
+    ssize_t sent_message = sendmsg(fd, &send_message, 0);
+    if (sent_message < 0 && nonblocking && errno == EAGAIN) {
+        struct pollfd descriptor = {.fd = fd, .events = POLLOUT};
+        if (poll(&descriptor, 1, 5000) > 0)
+            sent_message = sendmsg(fd, &send_message, 0);
+    }
+    ssize_t received_message = recvmsg(fd, &recv_message, 0);
+    if (received_message < 0 && nonblocking && errno == EAGAIN) {
+        struct pollfd descriptor = {.fd = fd, .events = POLLIN};
+        if (poll(&descriptor, 1, 5000) > 0)
+            received_message = recvmsg(fd, &recv_message, 0);
+    }
+    ok = ok && sent_to == (ssize_t)(sizeof(sendto_payload) - 1) &&
+         received_from == (ssize_t)(sizeof(sendto_payload) - 1) &&
+         memcmp(sendto_payload, response_to, sizeof(sendto_payload) - 1) == 0 &&
+         sent_message == (ssize_t)(sizeof(sendmsg_payload) - 1) &&
+         received_message == (ssize_t)(sizeof(sendmsg_payload) - 1) &&
+         memcmp(sendmsg_payload, response_message, sizeof(sendmsg_payload) - 1) == 0;
     close(fd);
     return ok;
 }
@@ -98,6 +141,31 @@ static int file_probe(void) {
         return 0;
     }
     char readback[sizeof(data)] = {0};
+    struct iovec vector = {(void *)data, sizeof(data)};
+    if (lseek(fd, 0, SEEK_SET) < 0 || writev(fd, &vector, 1) != (ssize_t)sizeof(data)) {
+        close(fd);
+        return 0;
+    }
+    struct iovec read_vector = {readback, sizeof(readback)};
+    memset(readback, 0, sizeof(readback));
+    if (lseek(fd, 0, SEEK_SET) < 0 || readv(fd, &read_vector, 1) != (ssize_t)sizeof(data)) {
+        close(fd);
+        return 0;
+    }
+    if (pread(fd, readback, sizeof(data), 0) != (ssize_t)sizeof(data) ||
+        pwrite(fd, data, sizeof(data), 0) != (ssize_t)sizeof(data)) {
+        close(fd);
+        return 0;
+    }
+    memset(readback, 0, sizeof(readback));
+    if (pread(fd, readback, sizeof(data), 0) != (ssize_t)sizeof(data)) {
+        close(fd);
+        return 0;
+    }
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        close(fd);
+        return 0;
+    }
     if (read(fd, readback, sizeof(readback)) != (ssize_t)sizeof(readback)) {
         close(fd);
         return 0;
@@ -195,6 +263,20 @@ static int unix_nonblocking_probe(int mode) {
     }
 
     int flags = fcntl(fd, F_GETFL, 0);
+    int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 100);
+    if (duplicate >= 0)
+        close(duplicate);
+    duplicate = dup(fd);
+    if (duplicate >= 0)
+        close(duplicate);
+    duplicate = dup2(fd, 200);
+    if (duplicate >= 0)
+        close(duplicate);
+#ifdef __linux__
+    duplicate = dup3(fd, 201, O_CLOEXEC);
+    if (duplicate >= 0)
+        close(duplicate);
+#endif
     if (flags < 0 || (flags & O_NONBLOCK) == 0) {
         close(fd);
         return 0;

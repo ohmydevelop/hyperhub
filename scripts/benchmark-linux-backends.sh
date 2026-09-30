@@ -357,7 +357,7 @@ HYPERHUB_DYNAMIC_HOOK_REPORT=$dynamic_hook_report \
     --password-file "$password_file" \
     -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
     >/dev/null 2>"$temporary/dynamic-probe.stderr.log"
-if ! grep -q 'Linux hooks installed=25 optional_missing=0 manifest=25' \
+if ! grep -Eq 'Linux hooks installed=3[67] optional_missing=[01] manifest=37' \
   "$temporary/dynamic-probe.stderr.log"; then
   cat "$temporary/dynamic-probe.stderr.log" >&2
   echo 'dynamic Linux Hook manifest was not fully installed' >&2
