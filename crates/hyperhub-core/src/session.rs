@@ -66,6 +66,12 @@ pub enum ForkLeaseStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAuthMethod {
+    AdministratorPassword,
+    ApiKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinishedForkLease {
     pub candidate_pid: Option<u32>,
     pub attested: bool,
@@ -73,6 +79,7 @@ pub struct FinishedForkLease {
 
 struct SessionState {
     auth_key: Zeroizing<Vec<u8>>,
+    api_key: Option<Zeroizing<Vec<u8>>>,
     descriptor: KdfDescriptor,
     sessions: HashMap<String, SessionRecord>,
     challenges: HashMap<String, ChallengeRecord>,
@@ -313,6 +320,7 @@ impl SessionRegistry {
     pub fn new(auth_key: Zeroizing<Vec<u8>>, descriptor: KdfDescriptor) -> Self {
         Self(Arc::new(Mutex::new(SessionState {
             auth_key,
+            api_key: None,
             descriptor,
             sessions: HashMap::new(),
             challenges: HashMap::new(),
@@ -321,6 +329,13 @@ impl SessionRegistry {
             blocked_until: None,
             next_member_instance: 1,
         })))
+    }
+
+    pub fn with_api_key(self, api_key: Zeroizing<Vec<u8>>) -> Self {
+        if let Ok(mut state) = self.0.lock() {
+            state.api_key = Some(api_key);
+        }
+        self
     }
 
     pub fn begin_auth(
@@ -368,12 +383,28 @@ impl SessionRegistry {
         proof: &[u8],
         pending_ttl: Duration,
     ) -> Option<SessionRecord> {
+        self.finish_auth_with_method(challenge_id, proof, pending_ttl)
+            .map(|(record, _)| record)
+    }
+
+    pub fn finish_auth_with_method(
+        &self,
+        challenge_id: &str,
+        proof: &[u8],
+        pending_ttl: Duration,
+    ) -> Option<(SessionRecord, SessionAuthMethod)> {
         let mut state = self.0.lock().ok()?;
         let now = Instant::now();
         cleanup(&mut state, now);
         let record = state.challenges.remove(challenge_id)?;
         let expected = session_proof(&state.auth_key, &record.challenge).ok()?;
-        if !constant_time_eq(&expected, proof) {
+        let admin_match = constant_time_eq(&expected, proof);
+        let api_match = state
+            .api_key
+            .as_ref()
+            .and_then(|key| session_proof(key, &record.challenge).ok())
+            .is_some_and(|expected| constant_time_eq(&expected, proof));
+        if !admin_match && !api_match {
             state.failed_attempts = state.failed_attempts.saturating_add(1);
             let delay = 1u64 << state.failed_attempts.min(3);
             state.blocked_until = Some(now + Duration::from_secs(delay));
@@ -381,7 +412,9 @@ impl SessionRegistry {
         }
         state.failed_attempts = 0;
         state.blocked_until = None;
-        state.password_authorized = true;
+        if admin_match {
+            state.password_authorized = true;
+        }
         if state.sessions.contains_key(&record.challenge.session_id) {
             return None;
         }
@@ -394,7 +427,14 @@ impl SessionRegistry {
         state
             .sessions
             .insert(session.session_id.clone(), session.clone());
-        Some(session)
+        Some((
+            session,
+            if admin_match {
+                SessionAuthMethod::AdministratorPassword
+            } else {
+                SessionAuthMethod::ApiKey
+            },
+        ))
     }
 
     pub fn begin_cached_auth(
@@ -1960,6 +2000,24 @@ mod tests {
         assert!(registry.clear_password_authorization());
         assert!(registry
             .begin_cached_auth("third".into(), "ssh".into(), Duration::from_secs(10))
+            .is_none());
+    }
+
+    #[test]
+    fn api_key_auth_accepts_run_session_without_authorizing_cached_sessions() {
+        let admin_key = Zeroizing::new(vec![8; 32]);
+        let api_key = Zeroizing::new(vec![6; 32]);
+        let registry = SessionRegistry::new(admin_key, crate::config_store::new_descriptor())
+            .with_api_key(api_key.clone());
+        let challenge = registry
+            .begin_auth("api".into(), "bash".into(), [4; 32])
+            .unwrap();
+        let proof = session_proof(&api_key, &challenge).unwrap();
+        assert!(registry
+            .finish_auth(&challenge.challenge_id, &proof, Duration::from_secs(10))
+            .is_some());
+        assert!(registry
+            .begin_cached_auth("second".into(), "curl".into(), Duration::from_secs(10))
             .is_none());
     }
 

@@ -37,13 +37,14 @@ healthy-provider latency percentile.
 
 ```bash
 umask 077
-printf '%s' 'your-config-password' > /tmp/hyperhub-password
+cp "$HOME/.hyperhub/runtime/api-key" /tmp/hyperhub-api-key
+chmod 0600 /tmp/hyperhub-api-key
 
 python3 scripts/benchmark-smart-protection.py \
   --backend jev \
   --transport hyperhub \
   --hyperhub-bin ./target/release/hyperhub \
-  --password-file /tmp/hyperhub-password \
+  --password-file /tmp/hyperhub-api-key \
   --timeout-ms 10000 \
   --output target/benchmarks/smart-protection-hyperhub-jev
 ```
@@ -58,7 +59,7 @@ python3 scripts/benchmark-smart-protection.py \
 - Jev pass 是否允许测试替身执行；
 - 审计输出中是否泄漏命令行测试 Secret。
 
-完整链路模式只接受 `--password-file`，不会把配置密码或 Jev Key写入报告。
+完整链路模式的目标运行阶段只接受 Serve 生成的 API Key；不会把管理员密码或 Jev Key 写入报告。需要导入或修改配置时，另行使用 `--admin-password-file`。
 
 ## Matrix
 

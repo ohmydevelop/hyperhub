@@ -26,7 +26,7 @@ options:
   --output DIR         output directory (default: target/benchmarks/linux-static)
   --hyperhub PATH      HyperHub CLI used for native-vs-HyperHub comparison
   --runtime PATH       deprecated compatibility option; ignored for static targets
-  --password-file PATH password file passed to HyperHub run
+  --password-file PATH API Key file passed to HyperHub run
   --fixtures DIR       reusable fixture cache (default: target/benchmarks/linux-fixtures/<arch>)
   --rebuild-fixtures   rebuild cached fixture binaries
   --skip-large         only run the C, Go, and Rust probes

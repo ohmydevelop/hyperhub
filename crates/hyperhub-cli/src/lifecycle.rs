@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartConfig {
     pub debug: bool,
-    pub password_file: Option<PathBuf>,
+    pub admin_password_file: Option<PathBuf>,
+    pub api_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +49,8 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
 
     let config_path = default_config_path().map_err(|error| error.to_string())?;
     let first_run = !config_path.is_file();
-    let password = password::acquire(config.password_file.as_deref(), first_run)?;
+    let password = password::acquire(config.admin_password_file.as_deref(), first_run)?;
+    let (api_key_path, _) = password::ensure_api_key(config.api_key_file.as_deref())?;
     if first_run {
         crate::initialize_config_for_start(&config_path, password.as_bytes())?;
         println!(
@@ -82,7 +84,11 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("cannot resolve HyperHub executable: {error}"))?;
     let mut command = Command::new(executable);
-    command.arg("serve").arg("--password-stdin");
+    command
+        .arg("serve")
+        .arg("--password-stdin")
+        .arg("--api-key-file")
+        .arg(&api_key_path);
     if config.debug {
         command.arg("--debug");
     }
@@ -122,10 +128,11 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
         if let Some(status) = running {
             if status.pid == pid {
                 println!(
-                    "HyperHub serve started (pid {pid})\nhome: {}\ncontrol: {}\nsocks: {}\nlog: {}",
+                    "HyperHub serve started (pid {pid})\nhome: {}\napi-key: {}\ncontrol: {}\nsocks: {}\nlog: {}",
                     hyperhub_core::config_store::hyperhub_home()
                         .map_err(|error| error.to_string())?
                         .display(),
+                    api_key_path.display(),
                     discovery_control_endpoint(),
                     status.socks_address,
                     log_path.display()

@@ -1,4 +1,4 @@
 interface:
   display_name: "HyperHub CLI 配置"
   short_description: "用完整操作手册规划、审批并验证 HyperHub 配置和运行"
-  default_prompt: "使用 $hyperhub-cli 完成 HyperHub 配置或运行任务：优先依据 Skill、配置参考、用户意图和当前 CLI 输出推进；安全效果不明确时询问，Proposal 由 Agent 提交后交给我运行 hyperhub approve，确认审批后再验证。若公开操作语义仍不足，明确不确定点，并仅在任务需要根因或实现修复时升级到实现调试。"
+  default_prompt: "使用 $hyperhub-cli 完成 HyperHub 配置或运行任务：优先依据 Skill、配置参考、用户意图和当前 CLI 输出推进；目标程序运行使用 Serve 生成的 API Key，管理员密码只用于配置解密和人工审批；安全效果不明确时询问，Proposal 由 Agent 提交后交给我运行 hyperhub approve，确认审批后再验证。若公开操作语义仍不足，明确不确定点，并仅在任务需要根因或实现修复时升级到实现调试。"

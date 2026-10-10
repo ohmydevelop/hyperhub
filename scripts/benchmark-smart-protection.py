@@ -629,7 +629,7 @@ def main() -> int:
     parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--hyperhub-bin", default=os.getenv("HYPERHUB_BIN", "hyperhub"))
-    parser.add_argument("--password-file", type=Path)
+    parser.add_argument("--password-file", type=Path, help="HyperHub runtime API Key file")
     args = parser.parse_args()
     if args.timeout_ms < 1:
         parser.error("--timeout-ms must be positive")
@@ -667,7 +667,7 @@ def main() -> int:
             if args.backend != "jev":
                 parser.error("--transport hyperhub currently requires --backend jev")
             if args.password_file is None:
-                parser.error("--transport hyperhub requires --password-file")
+                parser.error("--transport hyperhub requires the runtime API Key --password-file")
             if not args.password_file.is_file():
                 parser.error("--password-file does not exist")
             binary = shutil.which(args.hyperhub_bin) or (

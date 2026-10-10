@@ -170,7 +170,7 @@ Agent **不得代替用户运行** `hyperhub approve`、输入主密码、填写
 用户明确表示已完成审批后，才执行：
 
 ```sh
-hyperhub validate --password-file /path/to/password
+hyperhub validate --admin-password-file /path/to/admin-password
 hyperhub show
 hyperhub status --json
 ```
@@ -189,7 +189,8 @@ hyperhub doctor
 ### 基本规则
 
 - 不向用户索取真实 Token、API Key、密码或私钥。
-- 非交互命令需要密码时，只能使用用户明确提供、权限受限的 `--password-file`。
+- 需要解密配置的管理员命令使用交互式输入，或使用权限受限的 `--admin-password-file`；该文件内容是管理员密码，不应交给 Agent 或目标程序。
+- `hyperhub run --password-file` 使用运行时 API Key 文件，不接受管理员密码。Serve 首次启动会在当前 Home 的 `runtime/api-key` 生成权限受限的 API Key；也可以通过 `--api-key-file` 指定路径。
 - 不把 Secret 写入回复、命令参数、日志或普通临时文件。
 - 新 Secret 使用 `{"value":"${APPROVE:meaningful-name}"}`，由人工在 `approve` 中填写。
 - 不使用 `export --plain` 获取真实值。
@@ -233,20 +234,20 @@ JSON patch does not change the configuration
 POSIX Shell：
 
 ```sh
-hyperhub run --password-file /path/to/password -- \
+hyperhub run --password-file /path/to/api-key -- \
   ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
 ```
 
 PowerShell：
 
 ```powershell
-hyperhub run --password-file C:\path\password.txt -- ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
+hyperhub run --password-file C:\path\api-key.txt -- ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
 ```
 
 规则：
 
 - 必须使用 `hyperhub run ... -- ssh ...`；直接运行 `ssh` 不经过 HyperHub，不能作为验证。
-- 沿用同一 `HYPERHUB_HOME`。
+- `--password-file` 必须指向 HyperHub API Key，而不是管理员密码；沿用同一 `HYPERHUB_HOME`，默认 API Key 位于其 `runtime/api-key`。
 - 不添加 `StrictHostKeyChecking=no`、真实密码、私钥内容或用户未要求的危险选项。
 - 测试失败后先报告 SSH 退出码，再查看 `status --json`、`logs --lines 100` 和 `doctor --target ssh`；不要立即改配置或重启。
 - 审计验证只检查本次连接产生的脱敏事件，不输出认证材料或转录正文。
@@ -267,14 +268,15 @@ hyperhub run --password-file C:\path\password.txt -- ssh -o BatchMode=yes -o Con
 ## Serve 与目标程序
 
 ```sh
-hyperhub start --password-file /path/to/password
+hyperhub start --admin-password-file /path/to/admin-password
 hyperhub stop
-hyperhub restart --password-file /path/to/password
+hyperhub restart --admin-password-file /path/to/admin-password
 hyperhub status --json
-hyperhub run --password-file /path/to/password -- program args...
+hyperhub run --password-file /path/to/api-key -- program args...
 ```
 
 - 只有用户明确要求 start/stop/restart 时执行；配置热更新不自动重启。
+- Serve 首次启动会生成权限受限的 `runtime/api-key`；若需要固定位置，可在启动时使用 `--api-key-file`。该文件可提供给 `hyperhub run --password-file`，不等同于管理员密码。
 - Linux 默认使用 ptrace；只有用户明确要求 Gum 时才加 `--backend gum`。
 - 目标测试使用 `--` 分隔 HyperHub 参数和目标程序参数。
 

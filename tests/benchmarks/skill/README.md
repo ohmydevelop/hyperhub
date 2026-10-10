@@ -54,6 +54,7 @@ HYPERHUB_SKILL_AGENT_CMD='my-agent-adapter'
 - 验证 `ssh_transcript=false` 只关闭内容文件，同一路由绑定 SSH 凭证与审计 Profile 时结构化命令事件仍保留；
 - 验证仅替换 `<redacted>` Secret 被 CLI 判为无变化时，Agent 报告限制且不删除重建凭证或改变 UUID；
 - 验证 SSH 行为测试必须在审批完成、Serve 运行后通过 `hyperhub run -- ssh ...` 执行。
+- 验证目标运行阶段使用 Serve 生成的 API Key，管理员密码仅用于配置解密/审批，且两种文件语义不会混淆。
 
 新增或修改 Skill 后，至少运行契约检查；如果有可用 subagent，再运行带 `--require-agent` 的黑盒
 检查。这个 Benchmark 不会写入用户的 HyperHub 配置，也不会执行 `approve`。

@@ -11,7 +11,7 @@ use crate::sandbox::{
 };
 use crate::session::{
     unix_timestamp_after, unix_timestamp_ms, verify_config_update_proof, AgentFlags,
-    ConnectionRegistry, ControlRequest, ControlResponse, SessionRegistry,
+    ConnectionRegistry, ControlRequest, ControlResponse, SessionAuthMethod, SessionRegistry,
 };
 use crate::socks::SocksListenerController;
 use std::io;
@@ -319,7 +319,10 @@ impl ControlService {
                 proof,
             } => {
                 let ttl = Duration::from_secs(runtime.config.listener.pending_session_ttl_secs);
-                let Some(record) = self.sessions.finish_auth(&challenge_id, &proof, ttl) else {
+                let Some((record, auth_method)) =
+                    self.sessions
+                        .finish_auth_with_method(&challenge_id, &proof, ttl)
+                else {
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     write_frame(
                         &mut stream,
@@ -336,7 +339,10 @@ impl ControlService {
                     peer_pid,
                     Some(&record.executable),
                     serde_json::json!({
-                        "mode": "password",
+                        "mode": match auth_method {
+                            SessionAuthMethod::AdministratorPassword => "administrator_password",
+                            SessionAuthMethod::ApiKey => "api_key",
+                        },
                     }),
                 );
                 self.bootstrap(&runtime, record, ttl)

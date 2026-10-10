@@ -136,6 +136,9 @@ require(skill, "ssh_transcript: false", "SSH transcript-off semantics")
 require(skill, "结构化 SSH 事件仍会记录", "structured SSH event semantics")
 require(skill, "未绑定 SSH 凭证", "SSH credential requirement")
 require(skill, "hyperhub run --password-file", "SSH test through HyperHub")
+require(skill, "API Key", "runtime API key guidance")
+require(skill, "--admin-password-file", "administrator password option")
+require(skill, "runtime/api-key", "runtime API key path")
 require(skill, "直接运行 `ssh` 不经过 HyperHub", "direct SSH invalidation")
 require(reference, '"type":"http_bearer"', "Bearer schema")
 require(reference, '"path":"/gateway/protections/-"', "protection append example")
@@ -151,6 +154,7 @@ require(reference, "JSON patch does not change the configuration", "reference se
 require(reference, "ssh_transcript: false", "reference SSH transcript semantics")
 require(reference, "同时绑定 SSH 凭证", "reference SSH credential requirement")
 require(reference, "直接运行 `ssh` 不经过 HyperHub", "reference SSH test path")
+require(reference, "API Key 文件", "reference runtime API key guidance")
 require(metadata, "hyperhub approve", "metadata approval guidance")
 require(metadata, "安全效果不明确", "metadata decision gate")
 require(metadata, "公开操作语义仍不足", "metadata escalation guidance")
@@ -347,6 +351,16 @@ if "secret" not in secret_policy_text or ("approve" not in secret_policy_text an
     errors.append("secret_policy does not describe approval placeholders or approval handling")
 if not any(term in secret_policy_text for term in ("patch", "命令", "log", "日志", "reply", "回复")):
     errors.append("secret_policy does not prohibit secret leakage from generated artifacts")
+
+runtime_auth_text = json.dumps(answer.get("runtime_auth_policy"), ensure_ascii=False).lower()
+if "api" not in runtime_auth_text or "password-file" not in runtime_auth_text:
+    errors.append("runtime_auth_policy does not distinguish the run API Key file")
+if "admin-password-file" not in runtime_auth_text or "administrator" not in runtime_auth_text and "管理员" not in runtime_auth_text:
+    errors.append("runtime_auth_policy does not distinguish administrator password handling")
+if "runtime/api-key" not in runtime_auth_text:
+    errors.append("runtime_auth_policy does not identify the generated runtime/api-key path")
+if not any(term in runtime_auth_text for term in ("reject", "拒绝", "不是", "not")):
+    errors.append("runtime_auth_policy does not reject administrator passwords as API Keys")
 
 evidence_text = json.dumps(answer.get("evidence_strategy"), ensure_ascii=False).lower()
 if "skill" not in evidence_text or not any(term in evidence_text for term in ("reference", "参考")):

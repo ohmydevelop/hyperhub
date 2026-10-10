@@ -135,8 +135,12 @@ pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
             .ok_or_else(|| format!("{option} requires a value"))?
             .clone();
         match option.as_ref() {
-            "--password-file" => password_file = Some(value.into()),
+            "--admin-password-file" => password_file = Some(value.into()),
             "--editor" => editor = Some(value.into()),
+            "--password-file" => return Err(
+                "--password-file is a runtime API Key file; use --admin-password-file for approve"
+                    .into(),
+            ),
             _ => return Err(format!("unknown approve option '{option}'")),
         }
         index += 1;
@@ -182,7 +186,7 @@ fn show() -> Result<i32, String> {
     let bytes = if path.is_file() {
         read_redacted_json(&path).map_err(|error| match error {
             StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
-                "redacted configuration view is not initialized; run `hyperhub validate --password-file <file>` once to migrate the existing encrypted config".into()
+                "redacted configuration view is not initialized; run `hyperhub validate --admin-password-file <file>` once to migrate the existing encrypted config".into()
             }
             other => other.to_string(),
         })?
@@ -538,7 +542,7 @@ fn load_planning_config(path: &Path) -> Result<Config, String> {
     if path.is_file() {
         let bytes = read_redacted_json(path).map_err(|error| match error {
             StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
-                "redacted configuration view is not initialized; run `hyperhub validate --password-file <file>` once before submitting configuration requests".into()
+                "redacted configuration view is not initialized; run `hyperhub validate --admin-password-file <file>` once before submitting configuration requests".into()
             }
             other => other.to_string(),
         })?;

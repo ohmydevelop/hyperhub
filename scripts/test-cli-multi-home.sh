@@ -10,10 +10,10 @@ temporary=$(mktemp -d "$root/target/hyperhub-multi-home.XXXXXX")
 home_a="$temporary/instance-a"
 home_b="$temporary/instance-b"
 agent_home="$temporary/agent-home"
-password_file="$temporary/password"
+admin_password_file="$temporary/admin-password"
 mkdir -p "$home_a" "$home_b" "$agent_home"
-printf '%s\n' 'multi-home-test-password' > "$password_file"
-chmod 0600 "$password_file"
+printf '%s\n' 'multi-home-test-password' > "$admin_password_file"
+chmod 0600 "$admin_password_file"
 
 stop_instance() {
   local instance=$1
@@ -29,9 +29,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
-  "$hyperhub" start --password-file "$password_file" > "$temporary/start-a.out"
+  "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/start-a.out"
 HOME="$agent_home" HYPERHUB_HOME="$home_b" \
-  "$hyperhub" start --password-file "$password_file" > "$temporary/start-b.out"
+  "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/start-b.out"
 
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
   "$hyperhub" status --json > "$temporary/status-a.json"
@@ -62,6 +62,7 @@ PY
 
 [[ -f $home_a/config.bin && -f $home_b/config.bin ]]
 [[ -S $home_a/runtime/control.sock && -S $home_b/runtime/control.sock ]]
+[[ -f $home_a/runtime/api-key && -f $home_b/runtime/api-key ]]
 
 printf 'HyperHub multi-home isolation passed; a=%s b=%s\n' \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["socks_address"])' "$temporary/status-a.json")" \

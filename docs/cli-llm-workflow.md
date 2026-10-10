@@ -82,7 +82,7 @@ hyperhub approve
 也可从权限受限的文件读取密码，并指定编辑器：
 
 ```sh
-hyperhub approve --password-file ./password --editor /path/to/editor
+hyperhub approve --admin-password-file ./admin-password --editor /path/to/editor
 ```
 
 执行后首先输入 HyperHub 密码，然后逐条显示：
@@ -108,12 +108,12 @@ hyperhub approve --password-file ./password --editor /path/to/editor
 
 ## 4. 初始化与密码
 
-配置不存在时，`config patch` 以默认配置为基线并创建不含真实 Secret 的权限受限 Proposal，首次 `approve` 时才创建活动配置。密码只在人工审批阶段通过权限受限的文件或 `HYPERHUB_CONFIG_PASSWORD` 提供。例如：
+配置不存在时，`config patch` 以默认配置为基线并创建不含真实 Secret 的权限受限 Proposal，首次 `approve` 时才创建活动配置。管理员密码只在人工审批阶段通过交互式输入、权限受限的 `--admin-password-file` 或 `HYPERHUB_CONFIG_PASSWORD` 提供；`hyperhub run --password-file` 使用的是 Serve 生成的 API Key，不是管理员密码。例如：
 
 ```sh
 printf 'replace-with-a-long-password
-' > password
-chmod 0600 password
+' > admin-password
+chmod 0600 admin-password
 ```
 
 密码文件只用于 CLI，不得提交。`show`、计划结果、逐条审批显示和应用结果均不得泄漏 inline secret。

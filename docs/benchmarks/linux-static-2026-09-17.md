@@ -16,7 +16,7 @@
 ./scripts/benchmark-linux-static.sh \
   --iterations 5 \
   --hyperhub ./target/release/hyperhub \
-  --password-file /path/to/password
+  --password-file /path/to/api-key
 ```
 
 ## 结果

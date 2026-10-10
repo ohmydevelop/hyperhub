@@ -15,6 +15,7 @@ external-runtime = []
 embedded-agent = []
 
 [dependencies]
+base64 = "0.22"
 crossterm = "0.28"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ipnet = "2"

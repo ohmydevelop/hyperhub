@@ -1320,6 +1320,7 @@ dependencies = [
 name = "hyperhub"
 version = "0.2.7"
 dependencies = [
+ "base64",
  "crossterm",
  "flate2",
  "frida-sys",

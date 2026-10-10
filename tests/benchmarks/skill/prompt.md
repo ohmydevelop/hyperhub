@@ -26,6 +26,10 @@ The JSON object must also contain:
   `hyperhub config patch <patch-file>` and then run `hyperhub approve`;
 - `secret_policy`: a short statement that real secrets must be entered by the human during
   approval and must not appear in the patch, command arguments, logs, or Agent response.
+- `runtime_auth_policy`: explain that `hyperhub run --password-file` reads a Serve-generated
+  runtime API Key, while administrator commands use interactive input or `--admin-password-file`.
+  Mention the default `runtime/api-key` path and that an administrator password must be rejected
+  as an API Key.
 - `evidence_strategy`: summarize the preferred evidence for ordinary operations (the Skill and
   bundled reference, user intent, `show`, and current CLI diagnostics), then explain when an
   implementation investigation is relevant. Present this as a sufficient workflow and escalation

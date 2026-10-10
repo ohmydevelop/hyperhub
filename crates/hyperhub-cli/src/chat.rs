@@ -47,16 +47,26 @@ pub(crate) fn parse(args: &[OsString]) -> Result<ChatConfig, String> {
         let option = args[index].to_string_lossy();
         index += 1;
         match option.as_ref() {
-            "--password-file" => {
+            "--admin-password-file" => {
                 password_file = Some(
                     args.get(index)
-                        .ok_or("--password-file requires a value")?
+                        .ok_or("--admin-password-file requires a value")?
                         .clone()
                         .into(),
                 );
                 index += 1;
             }
-            _ => return Err(format!("unknown chat option '{option}'")),
+            "--password-file" => {
+                return Err(
+                    "--password-file is a runtime API Key file; use --admin-password-file for chat"
+                        .into(),
+                )
+            }
+            _ => {
+                return Err(format!(
+                    "unknown chat option '{option}'; use --admin-password-file"
+                ))
+            }
         }
     }
     Ok(ChatConfig { password_file })
@@ -1675,7 +1685,11 @@ mod tests {
     #[test]
     fn chat_parser_accepts_only_password_file() {
         assert_eq!(
-            parse(&[OsString::from("--password-file"), OsString::from("secret")]).unwrap(),
+            parse(&[
+                OsString::from("--admin-password-file"),
+                OsString::from("secret"),
+            ])
+            .unwrap(),
             ChatConfig {
                 password_file: Some("secret".into())
             }
