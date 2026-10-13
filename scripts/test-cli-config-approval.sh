@@ -285,7 +285,7 @@ assert route["uuid"] == plan["requests"][2]["config_item_uuid"]
 assert route["id"] == "llm-deny-example"
 assert route["priority"] == 120
 PY
-"$hyperhub" validate --admin-password-file "$admin_password_file" >/dev/null
+"$hyperhub" validate --password-file "$HOME/.hyperhub/runtime/api-key" >/dev/null
 if "$hyperhub" approve --admin-password-file "$admin_password_file" >/dev/null 2>&1; then
   echo 'approve unexpectedly succeeded without pending requests' >&2
   exit 1
@@ -298,14 +298,14 @@ if "$hyperhub" show >/dev/null 2>"$temporary/missing-view.stderr"; then
   exit 1
 fi
 grep -q 'run `hyperhub validate' "$temporary/missing-view.stderr"
-"$hyperhub" validate --admin-password-file "$admin_password_file" >/dev/null
+"$hyperhub" validate --password-file "$HOME/.hyperhub/runtime/api-key" >/dev/null
 migrated_show="$temporary/migrated-show.json"
 "$hyperhub" show > "$migrated_show"
 cmp "$migrated_show" "$redacted_view"
 
 live_transcript=skipped
 run_live_update_test() {
-  "$hyperhub" start --admin-password-file "$admin_password_file" \
+  "$hyperhub" start --password-file "$HOME/.hyperhub/runtime/api-key" \
     >"$temporary/start.stdout" 2>"$temporary/start.stderr"
   skill="$HOME/.agents/skills/hyperhub-cli"
   [[ -f $skill/SKILL.md ]]
@@ -320,7 +320,7 @@ assert marker["name"] == "hyperhub-cli"
 assert len(marker["content_sha256"]) == 64
 assert marker["bundle_version"].startswith(marker["cli_version"] + "+sha256.")
 PY
-  "$hyperhub" start --admin-password-file "$admin_password_file" >"$temporary/start-again.stdout"
+  "$hyperhub" start --password-file "$HOME/.hyperhub/runtime/api-key" >"$temporary/start-again.stdout"
   ! grep -q 'Agent Skill installed\|Agent Skill upgraded' "$temporary/start-again.stdout"
   status=$("$hyperhub" status --json)
   grep -q '"state".*"running"' <<<"$status"

@@ -1,6 +1,6 @@
 use crate::audit::AuditWriter;
 use crate::config::{new_config_uuid, Config, RootCertificate, SshHostKey};
-use crate::config_store::{self, KdfDescriptor};
+use crate::config_store::{self, ConfigKeyring};
 use crate::runtime::RuntimeState;
 use rustls::pki_types::CertificateDer;
 use rustls::RootCertStore;
@@ -9,15 +9,13 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use zeroize::Zeroizing;
 
 #[derive(Clone)]
 pub struct TrustStore(Arc<TrustStoreInner>);
 
 struct TrustStoreInner {
     config_path: PathBuf,
-    password: Zeroizing<Vec<u8>>,
-    descriptor: KdfDescriptor,
+    keyring: ConfigKeyring,
     runtime: RuntimeState,
     audit: AuditWriter,
     mutation: Mutex<()>,
@@ -39,15 +37,13 @@ pub struct TlsTrustMaterial {
 impl TrustStore {
     pub fn new(
         config_path: PathBuf,
-        password: Vec<u8>,
-        descriptor: KdfDescriptor,
+        keyring: ConfigKeyring,
         runtime: RuntimeState,
         audit: AuditWriter,
     ) -> Self {
         Self(Arc::new(TrustStoreInner {
             config_path,
-            password: Zeroizing::new(password),
-            descriptor,
+            keyring,
             runtime,
             audit,
             mutation: Mutex::new(()),
@@ -110,9 +106,9 @@ impl TrustStore {
                 format!("TLS certificate changed for {authority}"),
             ));
         }
-        config_store::import_root_certificates_from_der(
+        config_store::import_root_certificates_from_der_with_keyring(
             &self.0.config_path,
-            self.0.password.as_slice(),
+            &self.0.keyring,
             std::slice::from_ref(certificate),
         )
         .map_err(io::Error::other)?;
@@ -181,13 +177,8 @@ impl TrustStore {
 
     fn persist(&self, config: Config) -> io::Result<()> {
         config.validate().map_err(io::Error::other)?;
-        config_store::save_encrypted_with_descriptor(
-            &self.0.config_path,
-            &config,
-            self.0.password.as_slice(),
-            &self.0.descriptor,
-        )
-        .map_err(io::Error::other)?;
+        config_store::save_encrypted_with_keyring(&self.0.config_path, &config, &self.0.keyring)
+            .map_err(io::Error::other)?;
         let prepared = self
             .0
             .runtime
@@ -207,9 +198,9 @@ impl TrustStore {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let mut host_certificates = HashMap::new();
         for item in config.root_certificates.iter().filter(|item| item.enabled) {
-            let certificate = config_store::read_root_certificate(
+            let certificate = config_store::read_root_certificate_with_keyring(
                 &self.0.config_path,
-                self.0.password.as_slice(),
+                &self.0.keyring,
                 &item.fingerprint,
             )
             .map_err(io::Error::other)?;
@@ -259,13 +250,8 @@ mod tests {
         let unlocked = config_store::load_encrypted(&path, password).unwrap();
         let runtime = RuntimeState::new(Arc::new(unlocked.config)).unwrap();
         let audit = AuditWriter::open(None).unwrap();
-        let store = TrustStore::new(
-            path.clone(),
-            password.to_vec(),
-            unlocked.descriptor,
-            runtime,
-            audit,
-        );
+        let keyring = config_store::ConfigKeyring::derive(password, unlocked.descriptor).unwrap();
+        let store = TrustStore::new(path.clone(), keyring, runtime, audit);
 
         let key = KeyPair::generate().unwrap();
         let certificate = CertificateParams::new(vec!["localhost".into()])

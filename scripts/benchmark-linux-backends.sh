@@ -157,7 +157,7 @@ PY
 
 start_serve() {
   local stdout=$1 stderr=$2
-  "$hyperhub" serve --admin-password-file "$admin_password_file" --api-key-file "$api_key_file" >"$stdout" 2>"$stderr" &
+  "$hyperhub" serve --password-file "$api_key_file" >"$stdout" 2>"$stderr" &
   serve_pid=$!
   for ((attempt = 0; attempt < 100; attempt++)); do
     status=$("$hyperhub" status --json 2>/dev/null || true)

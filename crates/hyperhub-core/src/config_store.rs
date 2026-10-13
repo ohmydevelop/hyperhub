@@ -20,6 +20,7 @@ const HEADER_LEN: usize = 120;
 const CONFIG_LABEL: &[u8] = b"hyperhub/config-aead/v1";
 const APPROVAL_STATE_LABEL: &[u8] = b"hyperhub/approval-state-aead/v1";
 const SESSION_STATE_LABEL: &[u8] = b"hyperhub/session-state-aead/v1";
+const RUNTIME_KEY_LABEL: &[u8] = b"hyperhub/runtime-key-aead/v1";
 const SESSION_STATE_MAGIC: &[u8; 8] = b"HHSESS01";
 const DEFAULT_MEMORY_KIB: u32 = 64 * 1024;
 const DEFAULT_ITERATIONS: u32 = 3;
@@ -62,6 +63,7 @@ pub struct KdfDescriptor {
 /// after password entry and use domain-separated HKDF subkeys for config,
 /// approval-state, certificate, and control operations. The master key is
 /// zeroized when this value is dropped.
+#[derive(Clone)]
 pub struct ConfigKeyring {
     descriptor: KdfDescriptor,
     master: Zeroizing<Vec<u8>>,
@@ -79,6 +81,22 @@ impl ConfigKeyring {
 
     pub fn session_auth_key(&self) -> Result<Zeroizing<Vec<u8>>, StoreError> {
         self.subkey(b"hyperhub/session-auth/v1")
+    }
+
+    pub fn runtime_master(&self) -> Zeroizing<Vec<u8>> {
+        self.master.clone()
+    }
+
+    pub fn from_runtime_master(
+        descriptor: KdfDescriptor,
+        master: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, StoreError> {
+        if master.len() != 32 {
+            return Err(StoreError::Format(
+                "runtime configuration key is invalid".into(),
+            ));
+        }
+        Ok(Self { descriptor, master })
     }
 
     fn subkey(&self, label: &[u8]) -> Result<Zeroizing<Vec<u8>>, StoreError> {
@@ -286,6 +304,34 @@ pub fn load_encrypted_with_keyring(
         descriptor: header.descriptor,
         session_auth_key,
     })
+}
+
+/// Stores the configuration master key in a separate envelope protected by the
+/// runtime API key. The administrator password remains the authority for
+/// creating or changing the encrypted configuration; the API key only unlocks
+/// the already-approved runtime snapshot.
+pub fn save_runtime_key(
+    path: &Path,
+    keyring: &ConfigKeyring,
+    api_key: &[u8],
+) -> Result<(), StoreError> {
+    let envelope = ConfigKeyring::derive(api_key, keyring.descriptor().clone())?;
+    let encrypted =
+        encrypt_payload_with_keyring(&keyring.runtime_master(), &envelope, RUNTIME_KEY_LABEL)?;
+    atomic_write(path, &encrypted)
+}
+
+pub fn load_runtime_key(path: &Path, api_key: &[u8]) -> Result<ConfigKeyring, StoreError> {
+    let bytes = read(path)?;
+    let header = parse_header(&bytes)?;
+    if !header.encrypted {
+        return Err(StoreError::Format(
+            "runtime key envelope must be encrypted".into(),
+        ));
+    }
+    let envelope = ConfigKeyring::derive(api_key, header.descriptor.clone())?;
+    let master = decrypt_payload_with_keyring(&bytes, &envelope, RUNTIME_KEY_LABEL)?;
+    ConfigKeyring::from_runtime_master(header.descriptor, master)
 }
 
 /// Persist the resumable human-approval queue with a key domain separated from
@@ -841,16 +887,21 @@ pub fn import_root_certificates_from_der(
     certificates: &[CertificateDer<'_>],
 ) -> Result<Vec<ImportedRootCertificate>, StoreError> {
     let descriptor = read_descriptor(config_path)?;
+    let keyring = ConfigKeyring::derive(password, descriptor)?;
+    import_root_certificates_from_der_with_keyring(config_path, &keyring, certificates)
+}
+
+pub fn import_root_certificates_from_der_with_keyring(
+    config_path: &Path,
+    keyring: &ConfigKeyring,
+    certificates: &[CertificateDer<'_>],
+) -> Result<Vec<ImportedRootCertificate>, StoreError> {
     let mut imported = Vec::new();
     for certificate in certificates {
         let fingerprint = crate::certificate::fingerprint(certificate);
         let destination = root_certificate_path(config_path, &fingerprint);
-        let encrypted = encrypt_payload(
-            certificate.as_ref(),
-            password,
-            &descriptor,
-            ROOT_CERTIFICATE_LABEL,
-        )?;
+        let encrypted =
+            encrypt_payload_with_keyring(certificate.as_ref(), keyring, ROOT_CERTIFICATE_LABEL)?;
         atomic_write(&destination, &encrypted)?;
         imported.push(ImportedRootCertificate { fingerprint });
     }
@@ -868,6 +919,17 @@ pub fn read_root_certificate(
     Ok(CertificateDer::from(plaintext.to_vec()))
 }
 
+pub fn read_root_certificate_with_keyring(
+    config_path: &Path,
+    keyring: &ConfigKeyring,
+    fingerprint: &str,
+) -> Result<CertificateDer<'static>, StoreError> {
+    let path = root_certificate_path(config_path, fingerprint);
+    let bytes = read(&path)?;
+    let plaintext = decrypt_payload_with_keyring(&bytes, keyring, ROOT_CERTIFICATE_LABEL)?;
+    Ok(CertificateDer::from(plaintext.to_vec()))
+}
+
 pub fn load_root_certificates<'a>(
     config_path: &Path,
     password: &[u8],
@@ -875,6 +937,16 @@ pub fn load_root_certificates<'a>(
 ) -> Result<Vec<CertificateDer<'static>>, StoreError> {
     fingerprints
         .map(|fingerprint| read_root_certificate(config_path, password, fingerprint))
+        .collect()
+}
+
+pub fn load_root_certificates_with_keyring<'a>(
+    config_path: &Path,
+    keyring: &ConfigKeyring,
+    fingerprints: impl Iterator<Item = &'a str>,
+) -> Result<Vec<CertificateDer<'static>>, StoreError> {
+    fingerprints
+        .map(|fingerprint| read_root_certificate_with_keyring(config_path, keyring, fingerprint))
         .collect()
 }
 
@@ -1230,6 +1302,32 @@ mod tests {
         fs::remove_file(&config_path).unwrap();
         fs::remove_file(redacted_config_path(&config_path)).unwrap();
         fs::remove_file(approval_path).unwrap();
+    }
+
+    #[test]
+    fn runtime_api_key_envelope_unlocks_config_without_admin_password() {
+        let config_path = temp_path("runtime-envelope-config");
+        let runtime_key_path = temp_path("runtime-envelope-key");
+        let mut descriptor = new_descriptor();
+        descriptor.memory_kib = 8 * 1024;
+        descriptor.iterations = 1;
+        let admin = ConfigKeyring::derive(b"administrator password", descriptor).unwrap();
+        let mut config = Config::default();
+        config.debug = true;
+        save_encrypted_with_keyring(&config_path, &config, &admin).unwrap();
+
+        save_runtime_key(&runtime_key_path, &admin, b"hhk_runtime-api-key").unwrap();
+        let runtime = load_runtime_key(&runtime_key_path, b"hhk_runtime-api-key").unwrap();
+        let unlocked = load_encrypted_with_keyring(&config_path, &runtime).unwrap();
+        assert!(unlocked.config.debug);
+        assert!(matches!(
+            load_runtime_key(&runtime_key_path, b"hhk_wrong-api-key"),
+            Err(StoreError::Authentication)
+        ));
+
+        fs::remove_file(&config_path).unwrap();
+        fs::remove_file(redacted_config_path(&config_path)).unwrap();
+        fs::remove_file(runtime_key_path).unwrap();
     }
 
     #[test]

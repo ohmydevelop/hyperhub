@@ -1,5 +1,8 @@
 use hyperhub_core::config::{Config, EnvironmentVariable, SandboxAction, SecretValue};
-use hyperhub_core::config_store::{self, default_config_path, load_encrypted, ExportFormat};
+use hyperhub_core::config_store::{
+    self, default_config_path, load_encrypted, load_encrypted_with_keyring, ConfigKeyring,
+    ExportFormat,
+};
 use hyperhub_core::control::{
     control_request, discovery_control_endpoint, run_control_server, ControlService,
 };
@@ -164,10 +167,11 @@ fn execute(command: Command) -> Result<i32, String> {
             Ok(0)
         }
         Command::Doctor(target) => print_doctor(target.as_deref()),
-        Command::Validate(admin_password_file) => {
+        Command::Validate(api_key_file) => {
             let path = default_config_path().map_err(|error| error.to_string())?;
-            let password = password::acquire(admin_password_file.as_deref(), false)?;
-            let unlocked = load_encrypted(&path, password.as_bytes()).map_err(|e| e.to_string())?;
+            let keyring = password::load_runtime_keyring(api_key_file.as_deref())?;
+            let unlocked =
+                load_encrypted_with_keyring(&path, &keyring).map_err(|error| error.to_string())?;
             config_store::save_redacted_json(&path, &unlocked.config)
                 .map_err(|error| error.to_string())?;
             println!("configuration is valid: {}", path.display());
@@ -208,6 +212,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
             source,
             run.admin_password_file.as_deref(),
             input_password_file.as_deref(),
+            run.api_key_file.as_deref(),
         );
     }
     if let ServeAction::Export {
@@ -220,7 +225,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
             &path,
             destination,
             *plain,
-            run.admin_password_file.as_deref(),
+            run.api_key_file.as_deref(),
             export_password_file.as_deref(),
         );
     }
@@ -238,38 +243,53 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     if first_run && live {
         return Err("Serve is running but the local encrypted configuration is missing".into());
     }
-    let password = if run.password_stdin {
-        password::acquire_stdin()?
-    } else {
-        password::acquire(run.admin_password_file.as_deref(), first_run)?
-    };
-    let initial = if first_run {
-        initialize_config_for_start(&path, password.as_bytes())?
-    } else {
-        load_encrypted(&path, password.as_bytes())
-            .map_err(|error| error.to_string())?
-            .config
-    };
-    let password = if configure || first_run {
+    if configure || first_run {
+        let password = password::acquire(run.admin_password_file.as_deref(), first_run)?;
+        let initial = if first_run {
+            initialize_config_for_start(&path, password.as_bytes())?
+        } else {
+            load_encrypted(&path, password.as_bytes())
+                .map_err(|error| error.to_string())?
+                .config
+        };
         let result = config_tui::run(&path, password, initial, live, first_run)?;
+        refresh_runtime_key(
+            &path,
+            result.password.as_bytes(),
+            run.api_key_file.as_deref(),
+        )?;
         if configure {
             if !path.is_file() {
                 return Err("configuration was not saved".into());
             }
             return Ok(0);
         }
-        result.password
+    }
+    let keyring = if password::runtime_key_exists()?
+        && run.admin_password_file.is_none()
+        && !run.password_stdin
+    {
+        password::load_runtime_keyring(run.api_key_file.as_deref())?
     } else {
-        password
+        let admin_password = if run.password_stdin {
+            password::acquire_stdin()?
+        } else {
+            password::acquire(run.admin_password_file.as_deref(), false)?
+        };
+        refresh_runtime_key(
+            &path,
+            admin_password.as_bytes(),
+            run.api_key_file.as_deref(),
+        )?
     };
-    let unlocked = load_encrypted(&path, password.as_bytes()).map_err(|error| error.to_string())?;
+    let unlocked =
+        load_encrypted_with_keyring(&path, &keyring).map_err(|error| error.to_string())?;
     config_store::save_redacted_json(&path, &unlocked.config).map_err(|error| error.to_string())?;
     let debug = run.debug || unlocked.config.debug;
     let config = Arc::new(unlocked.config);
     let mut output = ServeOutput::open(run.output.as_deref())?;
     let session_auth_key = unlocked.session_auth_key.clone();
-    let (_, api_key) = password::ensure_api_key(run.api_key_file.as_deref())?;
-    let descriptor = unlocked.descriptor.clone();
+    let api_key = password::acquire_api_key(run.api_key_file.as_deref())?;
     let session_state_path = config_store::hyperhub_home()
         .map_err(|error| error.to_string())?
         .join("runtime/session-state.bin");
@@ -294,9 +314,9 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
             }
         }
     }
-    let root_certificates = config_store::load_root_certificates(
+    let root_certificates = config_store::load_root_certificates_with_keyring(
         &path,
-        password.as_bytes(),
+        &keyring,
         config
             .root_certificates
             .iter()
@@ -315,8 +335,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     .map_err(|e| e.to_string())?;
     let trust = Arc::new(hyperhub_core::trust::TrustStore::new(
         path.clone(),
-        password.as_bytes().to_vec(),
-        descriptor,
+        keyring,
         socks.runtime(),
         socks.audit_writer(),
     ));
@@ -384,6 +403,19 @@ pub(crate) fn initialize_config_for_start(path: &Path, password: &[u8]) -> Resul
     Ok(config)
 }
 
+fn refresh_runtime_key(
+    config_path: &Path,
+    admin_password: &[u8],
+    api_key_file: Option<&Path>,
+) -> Result<ConfigKeyring, String> {
+    let descriptor =
+        config_store::read_descriptor(config_path).map_err(|error| error.to_string())?;
+    let keyring =
+        ConfigKeyring::derive(admin_password, descriptor).map_err(|error| error.to_string())?;
+    password::save_runtime_keyring(&keyring, api_key_file)?;
+    Ok(keyring)
+}
+
 fn default_environment() -> Vec<EnvironmentVariable> {
     ["GITLAB_HOST", "GITLAB_TOKEN", "GH_TOKEN"]
         .into_iter()
@@ -402,6 +434,7 @@ fn import_config(
     source: &Path,
     password_file: Option<&Path>,
     input_password_file: Option<&Path>,
+    api_key_file: Option<&Path>,
 ) -> Result<i32, String> {
     let first_run = !active_path.is_file();
     let local_password = password::acquire(password_file, first_run)?;
@@ -423,6 +456,7 @@ fn import_config(
     config.validate().map_err(|error| error.to_string())?;
     config_store::save_encrypted(active_path, &config, local_password.as_bytes())
         .map_err(|error| error.to_string())?;
+    refresh_runtime_key(active_path, local_password.as_bytes(), api_key_file)?;
     println!(
         "configuration imported from {} and encrypted at {}",
         source.display(),
@@ -435,7 +469,7 @@ fn export_config(
     active_path: &Path,
     destination: &Path,
     plain: bool,
-    password_file: Option<&Path>,
+    api_key_file: Option<&Path>,
     export_password_file: Option<&Path>,
 ) -> Result<i32, String> {
     if !active_path.is_file() {
@@ -444,9 +478,9 @@ fn export_config(
             active_path.display()
         ));
     }
-    let local_password = password::acquire(password_file, false)?;
-    let unlocked = load_encrypted(active_path, local_password.as_bytes())
-        .map_err(|error| error.to_string())?;
+    let keyring = password::load_runtime_keyring(api_key_file)?;
+    let unlocked =
+        load_encrypted_with_keyring(active_path, &keyring).map_err(|error| error.to_string())?;
     let toml = destination
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"));
@@ -465,7 +499,7 @@ fn export_config(
         let export_password = if let Some(path) = export_password_file {
             password::acquire(Some(path), false)?
         } else {
-            local_password
+            password::acquire_api_key(api_key_file)?
         };
         config_store::export(
             destination,
@@ -782,10 +816,10 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         "export" => parse_export(&args[1..]).map(Command::Serve),
         "validate" => match &args[1..] {
             [] => Ok(Command::Validate(None)),
-            [option, path] if option == "--admin-password-file" => {
+            [option, path] if option == "--password-file" || option == "--api-key-file" => {
                 Ok(Command::Validate(Some(path.clone().into())))
             }
-            _ => Err("validate accepts only --admin-password-file <file>".into()),
+            _ => Err("validate accepts only --password-file <api-key-file>".into()),
         },
         "doctor" => match &args[1..] {
             [] => Ok(Command::Doctor(None)),
@@ -834,13 +868,7 @@ fn parse_start(args: &[OsString]) -> Result<lifecycle::StartConfig, String> {
                         .into(),
                 );
             }
-            "--password-file" => {
-                return Err(
-                    "--password-file is a runtime API Key file; use --admin-password-file for the administrator password"
-                        .into(),
-                );
-            }
-            "--api-key-file" => {
+            "--password-file" | "--api-key-file" => {
                 index += 1;
                 api_key_file = Some(
                     args.get(index)
@@ -920,13 +948,7 @@ fn parse_serve(args: &[OsString]) -> Result<ServeConfig, String> {
                         .into(),
                 );
             }
-            "--password-file" => {
-                return Err(
-                    "--password-file is a runtime API Key file for `run`; use --admin-password-file or --api-key-file here"
-                        .into(),
-                );
-            }
-            "--api-key-file" => {
+            "--password-file" | "--api-key-file" => {
                 index += 1;
                 api_key_file = Some(
                     args.get(index)
@@ -966,13 +988,30 @@ fn parse_config_command(args: &[OsString]) -> Result<Command, String> {
     {
         return Err("`config show` was removed; use `hyperhub show`".into());
     }
-    let admin_password_file = parse_single_admin_password_file("config", args)?;
+    let mut admin_password_file = None;
+    let mut api_key_file = None;
+    let mut index = 0;
+    while index < args.len() {
+        let target = match args[index].to_string_lossy().as_ref() {
+            "--admin-password-file" => &mut admin_password_file,
+            "--password-file" | "--api-key-file" => &mut api_key_file,
+            value => return Err(format!("unknown config option '{value}'")),
+        };
+        index += 1;
+        *target = Some(
+            args.get(index)
+                .ok_or("config file option requires a value")?
+                .clone()
+                .into(),
+        );
+        index += 1;
+    }
     Ok(Command::Serve(ServeConfig {
         output: None,
         debug: false,
         action: ServeAction::Config,
         admin_password_file,
-        api_key_file: None,
+        api_key_file,
         password_stdin: false,
     }))
 }
@@ -981,15 +1020,16 @@ fn parse_import(args: &[OsString]) -> Result<ServeConfig, String> {
     let path = args.first().ok_or("import requires a file")?.clone().into();
     let mut admin_password_file = None;
     let mut input_admin_password_file = None;
+    let mut api_key_file = None;
     let mut index = 1;
     while index < args.len() {
         let destination = match args[index].to_string_lossy().as_ref() {
             "--admin-password-file" => &mut admin_password_file,
             "--input-admin-password-file" => &mut input_admin_password_file,
-            "--password-file" | "--input-password-file" => {
+            "--password-file" | "--api-key-file" => &mut api_key_file,
+            "--input-password-file" => {
                 return Err(
-                    "administrator configuration files use --admin-password-file and --input-admin-password-file; --password-file is an API Key file for `run`"
-                        .into(),
+                    "encrypted input configuration uses --input-admin-password-file".into(),
                 );
             }
             value => return Err(format!("unknown import option '{value}'")),
@@ -1011,7 +1051,7 @@ fn parse_import(args: &[OsString]) -> Result<ServeConfig, String> {
             input_password_file: input_admin_password_file,
         },
         admin_password_file,
-        api_key_file: None,
+        api_key_file,
         password_stdin: false,
     })
 }
@@ -1019,8 +1059,8 @@ fn parse_import(args: &[OsString]) -> Result<ServeConfig, String> {
 fn parse_export(args: &[OsString]) -> Result<ServeConfig, String> {
     let path = args.first().ok_or("export requires a file")?.clone().into();
     let mut plain = false;
-    let mut admin_password_file = None;
-    let mut export_admin_password_file = None;
+    let mut api_key_file = None;
+    let mut export_password_file = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].to_string_lossy().as_ref() {
@@ -1028,8 +1068,8 @@ fn parse_export(args: &[OsString]) -> Result<ServeConfig, String> {
                 plain = true;
                 index += 1;
             }
-            "--admin-password-file" | "--export-admin-password-file" => {
-                let export = args[index] == "--export-admin-password-file";
+            "--password-file" | "--api-key-file" | "--export-password-file" => {
+                let export = args[index] == "--export-password-file";
                 index += 1;
                 let path = args
                     .get(index)
@@ -1037,15 +1077,15 @@ fn parse_export(args: &[OsString]) -> Result<ServeConfig, String> {
                     .clone()
                     .into();
                 if export {
-                    export_admin_password_file = Some(path);
+                    export_password_file = Some(path);
                 } else {
-                    admin_password_file = Some(path);
+                    api_key_file = Some(path);
                 }
                 index += 1;
             }
-            "--password-file" => {
+            "--admin-password-file" | "--export-admin-password-file" => {
                 return Err(
-                    "administrator configuration files use --admin-password-file; --password-file is an API Key file for `run`"
+                    "export reads the approved configuration with --password-file <api-key-file>; use --export-password-file only to choose a separate backup password"
                         .into(),
                 );
             }
@@ -1058,29 +1098,12 @@ fn parse_export(args: &[OsString]) -> Result<ServeConfig, String> {
         action: ServeAction::Export {
             path,
             plain,
-            export_password_file: export_admin_password_file,
+            export_password_file,
         },
-        admin_password_file,
-        api_key_file: None,
+        admin_password_file: None,
+        api_key_file,
         password_stdin: false,
     })
-}
-
-fn parse_single_admin_password_file(
-    command: &str,
-    args: &[OsString],
-) -> Result<Option<PathBuf>, String> {
-    match args {
-        [] => Ok(None),
-        [option, path] if option == "--admin-password-file" => Ok(Some(path.clone().into())),
-        [option, _] if option == "--password-file" => Err(
-            "--password-file is a runtime API Key file; use --admin-password-file for the administrator password"
-                .into(),
-        ),
-        _ => Err(format!(
-            "{command} accepts only --admin-password-file <file>"
-        )),
-    }
 }
 
 fn parse_run(args: &[OsString]) -> Result<RunConfig, String> {
@@ -1324,13 +1347,13 @@ configuration and Agent guidance:
   hyperhub config patch <file|->        queue a JSON Patch without requiring a password
   hyperhub approve ...                  review, edit, approve, or reject queued changes
   hyperhub import <file> ...            import and encrypt a configuration
-  hyperhub export <file> ...            export configuration (redacted by default)
-  hyperhub validate [--admin-password-file file] validate and refresh the redacted view
+  hyperhub export <file> [--password-file api-key] export configuration (redacted by default)
+  hyperhub validate [--password-file api-key] validate and refresh the redacted view
 
 server management:
-  hyperhub start [--admin-password-file file] [--api-key-file file] start the local gateway
+  hyperhub start [--password-file api-key] start the local gateway
   hyperhub stop                         stop the local gateway
-  hyperhub restart [--admin-password-file file] [--api-key-file file] restart the local gateway
+  hyperhub restart [--password-file api-key] restart the local gateway
   hyperhub upgrade                       check and install the latest CLI release
   hyperhub status [--json]              show gateway and managed-process status
   hyperhub logs ...                     view gateway logs
@@ -1460,7 +1483,8 @@ mod tests {
         .unwrap() else {
             panic!()
         };
-        assert_eq!(chat.password_file, Some("password.txt".into()));
+        assert_eq!(chat.admin_password_file, Some("password.txt".into()));
+        assert_eq!(chat.api_key_file, None);
 
         let Command::Serve(configure) = parse_args(vec![
             os("config"),
@@ -1490,6 +1514,29 @@ mod tests {
             os("password.txt")
         ])
         .is_err());
+        assert!(matches!(
+            parse_args(vec![
+                os("validate"),
+                os("--password-file"),
+                os("api-key.txt")
+            ])
+            .unwrap(),
+            Command::Validate(Some(path)) if path == PathBuf::from("api-key.txt")
+        ));
+        assert!(parse_args(vec![
+            os("validate"),
+            os("--admin-password-file"),
+            os("password.txt")
+        ])
+        .is_err());
+
+        let Command::Start(start) =
+            parse_args(vec![os("start"), os("--password-file"), os("api-key.txt")]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(start.api_key_file, Some("api-key.txt".into()));
+        assert_eq!(start.admin_password_file, None);
 
         let Command::ConfigCli(config_cli::Command::Patch { patch }) =
             parse_args(vec![os("config"), os("patch"), os("patch.json")]).unwrap()
@@ -1554,6 +1601,17 @@ mod tests {
                 export_password_file: None
             }
         );
+        let Command::Serve(export) = parse_args(vec![
+            os("export"),
+            os("backup.bin"),
+            os("--password-file"),
+            os("api-key.txt"),
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(export.api_key_file, Some("api-key.txt".into()));
+        assert_eq!(export.admin_password_file, None);
 
         let Command::Run(run) =
             parse_args(vec![os("run"), os("curl"), os("https://baidu.com")]).unwrap()

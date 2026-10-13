@@ -321,7 +321,7 @@ TLS `scope` 为 `{"type":"global"}` 或 `{"type":"host","authority":"host:port"}
 用户完成 `approve` 后再执行：
 
 ```sh
-hyperhub validate --admin-password-file /path/to/admin-password
+hyperhub validate --password-file /path/to/api-key
 hyperhub show
 hyperhub status --json
 hyperhub logs --lines 100

@@ -139,6 +139,8 @@ require(skill, "hyperhub run --password-file", "SSH test through HyperHub")
 require(skill, "API Key", "runtime API key guidance")
 require(skill, "--admin-password-file", "administrator password option")
 require(skill, "runtime/api-key", "runtime API key path")
+require(skill, "runtime/config-key.bin", "runtime key envelope path")
+require(skill, "常规 `start`/`restart` 不需要管理员密码", "passwordless lifecycle guidance")
 require(skill, "直接运行 `ssh` 不经过 HyperHub", "direct SSH invalidation")
 require(reference, '"type":"http_bearer"', "Bearer schema")
 require(reference, '"path":"/gateway/protections/-"', "protection append example")
@@ -354,11 +356,17 @@ if not any(term in secret_policy_text for term in ("patch", "命令", "log", "�
 
 runtime_auth_text = json.dumps(answer.get("runtime_auth_policy"), ensure_ascii=False).lower()
 if "api" not in runtime_auth_text or "password-file" not in runtime_auth_text:
-    errors.append("runtime_auth_policy does not distinguish the run API Key file")
+    errors.append("runtime_auth_policy does not identify the runtime API Key file")
 if "admin-password-file" not in runtime_auth_text or "administrator" not in runtime_auth_text and "管理员" not in runtime_auth_text:
     errors.append("runtime_auth_policy does not distinguish administrator password handling")
 if "runtime/api-key" not in runtime_auth_text:
     errors.append("runtime_auth_policy does not identify the generated runtime/api-key path")
+if "runtime/config-key.bin" not in runtime_auth_text:
+    errors.append("runtime_auth_policy does not identify the runtime configuration-key envelope")
+if not all(term in runtime_auth_text for term in ("start", "restart", "run", "validate", "export")):
+    errors.append("runtime_auth_policy does not cover all API-Key-authorized operations")
+if not all(term in runtime_auth_text for term in ("config", "chat", "approve", "import")):
+    errors.append("runtime_auth_policy does not cover all administrator-password operations")
 if not any(term in runtime_auth_text for term in ("reject", "拒绝", "不是", "not")):
     errors.append("runtime_auth_policy does not reject administrator passwords as API Keys")
 

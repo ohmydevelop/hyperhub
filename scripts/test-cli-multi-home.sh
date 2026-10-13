@@ -63,6 +63,19 @@ PY
 [[ -f $home_a/config.bin && -f $home_b/config.bin ]]
 [[ -S $home_a/runtime/control.sock && -S $home_b/runtime/control.sock ]]
 [[ -f $home_a/runtime/api-key && -f $home_b/runtime/api-key ]]
+[[ -f $home_a/runtime/config-key.bin && -f $home_b/runtime/config-key.bin ]]
+
+HOME="$agent_home" HYPERHUB_HOME="$home_a" "$hyperhub" stop >/dev/null
+HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" start --password-file "$home_a/runtime/api-key" > "$temporary/restart-a.out"
+HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" validate --password-file "$home_a/runtime/api-key" >/dev/null
+
+HOME="$agent_home" HYPERHUB_HOME="$home_b" "$hyperhub" stop >/dev/null
+rm "$home_b/runtime/config-key.bin"
+HOME="$agent_home" HYPERHUB_HOME="$home_b" \
+  "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/migrate-b.out"
+[[ -f $home_b/runtime/config-key.bin ]]
 
 printf 'HyperHub multi-home isolation passed; a=%s b=%s\n' \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["socks_address"])' "$temporary/status-a.json")" \

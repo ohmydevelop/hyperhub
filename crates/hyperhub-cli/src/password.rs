@@ -96,6 +96,45 @@ pub fn default_api_key_path() -> Result<PathBuf, String> {
         .join("runtime/api-key"))
 }
 
+pub fn default_runtime_key_path() -> Result<PathBuf, String> {
+    Ok(hyperhub_core::config_store::hyperhub_home()
+        .map_err(|error| error.to_string())?
+        .join("runtime/config-key.bin"))
+}
+
+pub fn runtime_key_exists() -> Result<bool, String> {
+    Ok(default_runtime_key_path()?.is_file())
+}
+
+pub fn load_runtime_keyring(
+    api_key_file: Option<&Path>,
+) -> Result<hyperhub_core::config_store::ConfigKeyring, String> {
+    let api_key = acquire_api_key(api_key_file)?;
+    hyperhub_core::config_store::load_runtime_key(
+        &default_runtime_key_path()?,
+        api_key.as_bytes(),
+    )
+    .map_err(|error| {
+        format!(
+            "cannot unlock runtime configuration with the API key: {error}; run `hyperhub start --admin-password-file <file>` once to migrate or repair the runtime key"
+        )
+    })
+}
+
+pub fn save_runtime_keyring(
+    keyring: &hyperhub_core::config_store::ConfigKeyring,
+    api_key_file: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let (api_key_path, api_key) = ensure_api_key(api_key_file)?;
+    hyperhub_core::config_store::save_runtime_key(
+        &default_runtime_key_path()?,
+        keyring,
+        api_key.as_bytes(),
+    )
+    .map_err(|error| format!("cannot save runtime configuration key: {error}"))?;
+    Ok(api_key_path)
+}
+
 pub fn acquire_api_key(path: Option<&Path>) -> Result<Zeroizing<String>, String> {
     let path = match path {
         Some(path) => path.to_owned(),

@@ -44,7 +44,7 @@ description: Use for HyperHub CLI configuration and runtime operations, includin
 | 修改 Secret | 使用 `${APPROVE:name}`；先读“Secret、脱敏值与 UUID”和参考中的同名章节 | Proposal，或明确 Secret-only CLI 限制 |
 | 配置智能防护 | 参考“智能防护 Profile”“路由与智能防护绑定”“沙盒与智能防护”，确认 observe/enforce 与失败动作 | Proposal + 审批后 Provider/引用验证 |
 | 配置 SSH 审计 | 同时核对 SSH 凭证、SSH 审计 Profile、路由绑定与 transcript 语义 | Proposal + 审批后结构化事件验证 |
-| 启停 Serve | `start`、`stop`、`restart`、`status --json`，只执行用户要求的生命周期动作 | 实际运行态 |
+| 启停 Serve | `start`、`stop`、`restart`、`status --json`；冷启动和重启使用 API Key | 实际运行态 |
 | 测试目标程序 | Serve 运行后使用 `hyperhub run -- program args...` | `runtime_tested` |
 | 排查操作失败 | 保留原错，按错误表收集 `status`、`doctor`、`logs` 与版本 | 可操作诊断或实现调试入口 |
 | 调试实现 | 按仓库开发流程检查源码、测试与构建；仍以 CLI 实测验证用户可见结果 | 根因、修复与回归 |
@@ -170,7 +170,7 @@ Agent **不得代替用户运行** `hyperhub approve`、输入主密码、填写
 用户明确表示已完成审批后，才执行：
 
 ```sh
-hyperhub validate --admin-password-file /path/to/admin-password
+hyperhub validate --password-file /path/to/api-key
 hyperhub show
 hyperhub status --json
 ```
@@ -189,8 +189,9 @@ hyperhub doctor
 ### 基本规则
 
 - 不向用户索取真实 Token、API Key、密码或私钥。
-- 需要解密配置的管理员命令使用交互式输入，或使用权限受限的 `--admin-password-file`；该文件内容是管理员密码，不应交给 Agent 或目标程序。
-- `hyperhub run --password-file` 使用运行时 API Key 文件，不接受管理员密码。Serve 首次启动会在当前 Home 的 `runtime/api-key` 生成权限受限的 API Key；也可以通过 `--api-key-file` 指定路径。
+- 管理员密码只用于创建或修改配置：`config`、`chat`、`approve`、`import`，以及旧配置首次生成运行封套时的一次性迁移。使用交互式输入或权限受限的 `--admin-password-file`，不要交给 Agent 或目标程序。
+- `start`、`restart`、`serve`、`run`、`validate` 和 `export` 使用运行时 API Key。Serve 首次初始化会在当前 Home 的 `runtime/api-key` 生成 API Key，并创建 `runtime/config-key.bin` 运行解锁封套。
+- 已有旧配置没有运行封套时，执行一次 `hyperhub start --admin-password-file /path/to/admin-password` 完成迁移；之后常规启动只用 API Key。
 - 不把 Secret 写入回复、命令参数、日志或普通临时文件。
 - 新 Secret 使用 `{"value":"${APPROVE:meaningful-name}"}`，由人工在 `approve` 中填写。
 - 不使用 `export --plain` 获取真实值。
@@ -268,15 +269,16 @@ hyperhub run --password-file C:\path\api-key.txt -- ssh -o BatchMode=yes -o Conn
 ## Serve 与目标程序
 
 ```sh
-hyperhub start --admin-password-file /path/to/admin-password
+hyperhub start --password-file /path/to/api-key
 hyperhub stop
-hyperhub restart --admin-password-file /path/to/admin-password
+hyperhub restart --password-file /path/to/api-key
 hyperhub status --json
 hyperhub run --password-file /path/to/api-key -- program args...
 ```
 
 - 只有用户明确要求 start/stop/restart 时执行；配置热更新不自动重启。
-- Serve 首次启动会生成权限受限的 `runtime/api-key`；若需要固定位置，可在启动时使用 `--api-key-file`。该文件可提供给 `hyperhub run --password-file`，不等同于管理员密码。
+- Serve 首次初始化会生成权限受限的 `runtime/api-key` 和 API Key 加密的 `runtime/config-key.bin`；运行封套只用于解锁已审批配置，不取代配置修改时的管理员确认。
+- 常规 `start`/`restart` 不需要管理员密码。只有首次创建配置、旧配置迁移、API Key 轮换或封套修复时才给 `start` 传 `--admin-password-file`。
 - Linux 默认使用 ptrace；只有用户明确要求 Gum 时才加 `--backend gum`。
 - 目标测试使用 `--` 分隔 HyperHub 参数和目标程序参数。
 

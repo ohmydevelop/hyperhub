@@ -1,5 +1,5 @@
 use crate::password;
-use hyperhub_core::config_store::default_config_path;
+use hyperhub_core::config_store::{default_config_path, load_encrypted, ConfigKeyring};
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
 use hyperhub_core::session::{ControlRequest, ControlResponse};
 use std::collections::VecDeque;
@@ -49,15 +49,41 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
 
     let config_path = default_config_path().map_err(|error| error.to_string())?;
     let first_run = !config_path.is_file();
-    let password = password::acquire(config.admin_password_file.as_deref(), first_run)?;
-    let (api_key_path, _) = password::ensure_api_key(config.api_key_file.as_deref())?;
-    if first_run {
+    let api_key_path = if first_run {
+        let password = password::acquire(config.admin_password_file.as_deref(), true)?;
         crate::initialize_config_for_start(&config_path, password.as_bytes())?;
+        let descriptor = hyperhub_core::config_store::read_descriptor(&config_path)
+            .map_err(|error| error.to_string())?;
+        let keyring = ConfigKeyring::derive(password.as_bytes(), descriptor)
+            .map_err(|error| error.to_string())?;
+        let api_key_path =
+            password::save_runtime_keyring(&keyring, config.api_key_file.as_deref())?;
         println!(
             "HyperHub configuration initialized: {}",
             config_path.display()
         );
-    }
+        api_key_path
+    } else if password::runtime_key_exists()? && config.admin_password_file.is_none() {
+        password::load_runtime_keyring(config.api_key_file.as_deref())?;
+        config
+            .api_key_file
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(password::default_api_key_path)?
+    } else {
+        let password = password::acquire(config.admin_password_file.as_deref(), false)?;
+        let unlocked =
+            load_encrypted(&config_path, password.as_bytes()).map_err(|error| error.to_string())?;
+        let keyring = ConfigKeyring::derive(password.as_bytes(), unlocked.descriptor)
+            .map_err(|error| error.to_string())?;
+        let api_key_path =
+            password::save_runtime_keyring(&keyring, config.api_key_file.as_deref())?;
+        println!(
+            "HyperHub runtime key initialized: {}",
+            password::default_runtime_key_path()?.display()
+        );
+        api_key_path
+    };
     let log_path = default_log_path()?;
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -86,14 +112,13 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
     let mut command = Command::new(executable);
     command
         .arg("serve")
-        .arg("--password-stdin")
         .arg("--api-key-file")
         .arg(&api_key_path);
     if config.debug {
         command.arg("--debug");
     }
     command
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::from(
             log.try_clone().map_err(|error| error.to_string())?,
         ))
@@ -104,18 +129,6 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
         .spawn()
         .map_err(|error| format!("cannot start HyperHub serve: {error}"))?;
     let pid = child.id();
-    let Some(mut stdin) = child.stdin.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("cannot open the serve password channel".into());
-    };
-    if let Err(error) = stdin.write_all(password.as_bytes()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("cannot send password to HyperHub serve: {error}"));
-    }
-    drop(stdin);
-
     for _ in 0..100 {
         let running = match query_status() {
             Ok(status) => status,
@@ -347,6 +360,8 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
                 error.kind(),
                 std::io::ErrorKind::NotFound
                     | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
                     | std::io::ErrorKind::TimedOut
                     | std::io::ErrorKind::BrokenPipe
             ) =>

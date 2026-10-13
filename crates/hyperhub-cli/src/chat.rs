@@ -37,18 +37,20 @@ const EMBEDDED_RUNNER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/needle3
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatConfig {
-    pub(crate) password_file: Option<PathBuf>,
+    pub(crate) admin_password_file: Option<PathBuf>,
+    pub(crate) api_key_file: Option<PathBuf>,
 }
 
 pub(crate) fn parse(args: &[OsString]) -> Result<ChatConfig, String> {
-    let mut password_file = None;
+    let mut admin_password_file = None;
+    let mut api_key_file = None;
     let mut index = 0;
     while index < args.len() {
         let option = args[index].to_string_lossy();
         index += 1;
         match option.as_ref() {
             "--admin-password-file" => {
-                password_file = Some(
+                admin_password_file = Some(
                     args.get(index)
                         .ok_or("--admin-password-file requires a value")?
                         .clone()
@@ -56,11 +58,14 @@ pub(crate) fn parse(args: &[OsString]) -> Result<ChatConfig, String> {
                 );
                 index += 1;
             }
-            "--password-file" => {
-                return Err(
-                    "--password-file is a runtime API Key file; use --admin-password-file for chat"
+            "--password-file" | "--api-key-file" => {
+                api_key_file = Some(
+                    args.get(index)
+                        .ok_or("--password-file requires a value")?
+                        .clone()
                         .into(),
-                )
+                );
+                index += 1;
             }
             _ => {
                 return Err(format!(
@@ -69,7 +74,10 @@ pub(crate) fn parse(args: &[OsString]) -> Result<ChatConfig, String> {
             }
         }
     }
-    Ok(ChatConfig { password_file })
+    Ok(ChatConfig {
+        admin_password_file,
+        api_key_file,
+    })
 }
 
 pub(crate) fn run(options: ChatConfig) -> Result<i32, String> {
@@ -78,7 +86,7 @@ pub(crate) fn run(options: ChatConfig) -> Result<i32, String> {
     }
     let path = default_config_path().map_err(|error| error.to_string())?;
     let first_run = !path.is_file();
-    let password = crate::password::acquire(options.password_file.as_deref(), first_run)?;
+    let password = crate::password::acquire(options.admin_password_file.as_deref(), first_run)?;
     let mut config = if first_run {
         let mut config = Config::default();
         config.apply_managed_audit_paths(&path);
@@ -91,6 +99,12 @@ pub(crate) fn run(options: ChatConfig) -> Result<i32, String> {
     };
 
     run_tui(&path, &password, &mut config)?;
+    let descriptor =
+        hyperhub_core::config_store::read_descriptor(&path).map_err(|error| error.to_string())?;
+    let keyring =
+        hyperhub_core::config_store::ConfigKeyring::derive(password.as_bytes(), descriptor)
+            .map_err(|error| error.to_string())?;
+    crate::password::save_runtime_keyring(&keyring, options.api_key_file.as_deref())?;
     Ok(0)
 }
 
@@ -1691,7 +1705,21 @@ mod tests {
             ])
             .unwrap(),
             ChatConfig {
-                password_file: Some("secret".into())
+                admin_password_file: Some("secret".into()),
+                api_key_file: None,
+            }
+        );
+        assert_eq!(
+            parse(&[
+                OsString::from("--admin-password-file"),
+                OsString::from("secret"),
+                OsString::from("--password-file"),
+                OsString::from("api-key"),
+            ])
+            .unwrap(),
+            ChatConfig {
+                admin_password_file: Some("secret".into()),
+                api_key_file: Some("api-key".into()),
             }
         );
         assert!(parse(&[OsString::from("--unknown")]).is_err());

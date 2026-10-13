@@ -108,7 +108,7 @@ hyperhub approve --admin-password-file ./admin-password --editor /path/to/editor
 
 ## 4. 初始化与密码
 
-配置不存在时，`config patch` 以默认配置为基线并创建不含真实 Secret 的权限受限 Proposal，首次 `approve` 时才创建活动配置。管理员密码只在人工审批阶段通过交互式输入、权限受限的 `--admin-password-file` 或 `HYPERHUB_CONFIG_PASSWORD` 提供；`hyperhub run --password-file` 使用的是 Serve 生成的 API Key，不是管理员密码。例如：
+配置不存在时，`config patch` 以默认配置为基线并创建不含真实 Secret 的权限受限 Proposal，首次 `approve` 时才创建活动配置。管理员密码只在配置创建/修改、人工审批和导入阶段通过交互式输入、权限受限的 `--admin-password-file` 或 `HYPERHUB_CONFIG_PASSWORD` 提供。`start`、`restart`、`serve`、`run`、`validate` 和 `export` 使用 Serve 生成的运行 API Key。例如：
 
 ```sh
 printf 'replace-with-a-long-password
@@ -117,6 +117,15 @@ chmod 0600 admin-password
 ```
 
 密码文件只用于 CLI，不得提交。`show`、计划结果、逐条审批显示和应用结果均不得泄漏 inline secret。
+
+首次创建配置或升级旧配置时，HyperHub 会生成 `runtime/api-key`，并把配置主密钥封装到 API Key 加密的 `runtime/config-key.bin`。完成一次迁移后，常规冷启动不再要求管理员密码：
+
+```sh
+hyperhub start --password-file "$HOME/.hyperhub/runtime/api-key"
+hyperhub validate --password-file "$HOME/.hyperhub/runtime/api-key"
+```
+
+如果 API Key 轮换、封套缺失或损坏，使用一次 `start --admin-password-file ...` 重新生成封套。
 
 ## 5. 自动测试
 
