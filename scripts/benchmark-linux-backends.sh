@@ -142,7 +142,6 @@ record_check() {
   printf '%s\tpass\t%s\n' "$name" "$details" >> "$checks_file"
 }
 admin_password_file="$temporary/password"
-api_key_file="$temporary/api-key"
 printf 'static-coverage-password\n' > "$admin_password_file"
 chmod 0600 "$admin_password_file"
 
@@ -157,7 +156,7 @@ PY
 
 start_serve() {
   local stdout=$1 stderr=$2
-  "$hyperhub" serve --password-file "$api_key_file" >"$stdout" 2>"$stderr" &
+  "$hyperhub" serve --password-file "$HOME/.hyperhub/runtime/api-key" >"$stdout" 2>"$stderr" &
   serve_pid=$!
   for ((attempt = 0; attempt < 100; attempt++)); do
     status=$("$hyperhub" status --json 2>/dev/null || true)
@@ -243,7 +242,7 @@ benchmark_args=(
   --output "$result_dir"
   --fixtures "$fixture_dir"
   --hyperhub "$hyperhub"
-  --password-file "$api_key_file"
+  --password-file "$HOME/.hyperhub/runtime/api-key"
 )
 ((include_large)) || benchmark_args+=(--skip-large)
 ((rebuild_fixtures)) && benchmark_args+=(--rebuild-fixtures)
@@ -270,14 +269,14 @@ chmod 0755 "$standalone_hyperhub"
 (
   cd "$temporary"
   "$standalone_hyperhub" run \
-    --password-file "$api_key_file" \
+    --password-file "$HOME/.hyperhub/runtime/api-key" \
     -- /bin/true >/dev/null
   "$standalone_hyperhub" run \
     --backend gum \
-    --password-file "$api_key_file" \
+    --password-file "$HOME/.hyperhub/runtime/api-key" \
     -- /bin/true >/dev/null 2>"$temporary/dynamic-embedded-runtime.stderr.log"
   "$standalone_hyperhub" run \
-    --password-file "$api_key_file" \
+    --password-file "$HOME/.hyperhub/runtime/api-key" \
     -- "$fixture_dir/linux-static-c" --intent-read /etc/hosts >/dev/null
 )
 record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum uses embedded Agent"
@@ -344,7 +343,7 @@ manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
 PYCODE
 "$hyperhub" run \
   --backend ptrace \
-  --password-file "$api_key_file" \
+  --password-file "$HOME/.hyperhub/runtime/api-key" \
   -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
   >/dev/null 2>"$temporary/dynamic-ptrace.stderr.log"
 record_check dynamic.ptrace_descendants "fork+exec,posix_spawn,posix_spawnp,vfork+exec"
@@ -355,7 +354,7 @@ HYPERHUB_AGENT_DEBUG=1 \
 HYPERHUB_DYNAMIC_HOOK_REPORT=$dynamic_hook_report \
   "$hyperhub" run \
     --backend gum \
-    --password-file "$api_key_file" \
+    --password-file "$HOME/.hyperhub/runtime/api-key" \
     -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
     >/dev/null 2>"$temporary/dynamic-probe.stderr.log"
 if ! grep -Eq 'Linux hooks installed=3[67] optional_missing=[01] manifest=37' \
@@ -376,7 +375,7 @@ record_check dynamic.gum_manifest "report=$dynamic_hook_report"
 set +e
 "$hyperhub" run \
   --backend gum \
-  --password-file "$api_key_file" \
+  --password-file "$HOME/.hyperhub/runtime/api-key" \
   -- /bin/sh -c 'exit 7' >/dev/null 2>"$temporary/dynamic-gum-exit.stderr.log"
 gum_exit_status=$?
 set -e
@@ -392,7 +391,7 @@ HYPERHUB_DNS_PORTS=$dns_port \
 HYPERHUB_STATIC_HOOK_REPORT=$hook_report \
 HYPERHUB_STATIC_REQUIRE_ALL_HOOKS=1 \
   "$hyperhub" run \
-    --password-file "$api_key_file" \
+    --password-file "$HOME/.hyperhub/runtime/api-key" \
     -- "$fixture_dir/linux-static-c" 127.0.0.1 "$echo_port" "$dns_port" >/dev/null
 kill "$echo_pid" 2>/dev/null || true
 wait "$echo_pid" 2>/dev/null || true
@@ -447,7 +446,7 @@ TOML
 start_serve "$temporary/credential-serve.stdout.log" "$temporary/credential-serve.stderr.log"
 "$hyperhub" run \
   --backend ptrace \
-  --password-file "$api_key_file" \
+  --password-file "$HOME/.hyperhub/runtime/api-key" \
   -- python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
   localhost "$credential_port"
 wait "$credential_pid"
@@ -476,7 +475,7 @@ hot_fifo="$temporary/hot-update/commands.fifo"
 hot_output="$temporary/hot-update/output.log"
 mkfifo "$hot_fifo"
 exec 9<>"$hot_fifo"
-"$hyperhub" run --backend ptrace --password-file "$api_key_file" -- \
+"$hyperhub" run --backend ptrace --password-file "$HOME/.hyperhub/runtime/api-key" -- \
   "$hot_update_probe" "$hot_target" /usr/bin/true \
   <&9 >"$hot_output" 2>"$temporary/hot-update/target.stderr.log" &
 hot_update_pid=$!
@@ -666,7 +665,7 @@ action = "allow"
 TOML
 "$hyperhub" import "$trust_config" --admin-password-file "$admin_password_file" >/dev/null
 start_serve "$temporary/trust-serve.stdout.log" "$temporary/trust-serve.stderr.log"
-"$hyperhub" run --backend ptrace --password-file "$api_key_file" -- \
+"$hyperhub" run --backend ptrace --password-file "$HOME/.hyperhub/runtime/api-key" -- \
   python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
   --tls-client localhost "$trust_tls_port"
 wait "$trust_tls_pid"
@@ -674,7 +673,7 @@ trust_tls_pid=
 python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
   --tls-server "$trust_tls_port_file" placeholder-token "$trust_tls_cert" "$trust_tls_key" &
 trust_tls_pid=$!
-"$hyperhub" run --backend ptrace --password-file "$api_key_file" -- \
+"$hyperhub" run --backend ptrace --password-file "$HOME/.hyperhub/runtime/api-key" -- \
   python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
   --tls-client localhost "$trust_tls_port"
 wait "$trust_tls_pid"
@@ -694,7 +693,7 @@ python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
   --tls-server "$trust_tls_port_file" placeholder-token "$trust_tls_cert" "$trust_tls_key" &
 trust_tls_pid=$!
 set +e
-"$hyperhub" run --backend ptrace --password-file "$api_key_file" -- \
+"$hyperhub" run --backend ptrace --password-file "$HOME/.hyperhub/runtime/api-key" -- \
   python3 "$root/tests/fixtures/linux_http_credential_probe.py" \
   --tls-client localhost "$trust_tls_port" >/dev/null 2>"$temporary/trust-tls-rotated.stderr.log"
 rotated_tls_status=$?
@@ -730,7 +729,7 @@ for ((attempt = 0; attempt < 100; attempt++)); do
   sleep 0.05
 done
 set +e
-"$hyperhub" run --backend ptrace --password-file "$api_key_file" -- \
+"$hyperhub" run --backend ptrace --password-file "$HOME/.hyperhub/runtime/api-key" -- \
   ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null -p "$trust_ssh_port" nobody@localhost true \
   >/dev/null 2>"$temporary/trust-ssh-first.stderr.log"
@@ -755,7 +754,7 @@ for ((attempt = 0; attempt < 100; attempt++)); do
   sleep 0.05
 done
 set +e
-"$hyperhub" run --backend ptrace --password-file "$api_key_file" -- \
+"$hyperhub" run --backend ptrace --password-file "$HOME/.hyperhub/runtime/api-key" -- \
   ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null -p "$trust_ssh_port" nobody@localhost true \
   >/dev/null 2>"$temporary/trust-ssh-rotated.stderr.log"
@@ -869,7 +868,7 @@ expect_denied() {
   shift
   set +e
   "$hyperhub" run \
-    --password-file "$api_key_file" \
+    --password-file "$HOME/.hyperhub/runtime/api-key" \
     -- "$fixture_dir/linux-static-c" "$@" >/dev/null 2>"$temporary/$name.stderr.log"
   local code=$?
   set -e
@@ -889,7 +888,7 @@ printf 'intent\n' > "$temporary/intents/rename-old"
 set +e
 "$hyperhub" run \
   --backend gum \
-  --password-file "$api_key_file" \
+  --password-file "$HOME/.hyperhub/runtime/api-key" \
   -- "$dynamic_probe" --intent-rename "$temporary/intents/rename-old" "$temporary/intents/rename-new" \
   >/dev/null 2>"$temporary/rename-gum.stderr.log"
 rename_gum_status=$?
@@ -904,7 +903,7 @@ printf 'intent\n' > "$temporary/intents/mprotect-write"
 set +e
 "$hyperhub" run \
   --backend gum \
-  --password-file "$api_key_file" \
+  --password-file "$HOME/.hyperhub/runtime/api-key" \
   -- "$dynamic_probe" --intent-mprotect-write "$temporary/intents/mprotect-write" \
   >/dev/null 2>"$temporary/mprotect-write-gum.stderr.log"
 mprotect_gum_status=$?
@@ -921,7 +920,7 @@ record_check dynamic.gum_mprotect_upgrade "read-only mapping write upgrade denie
 set +e
 "$hyperhub" run \
   --backend gum \
-  --password-file "$api_key_file" \
+  --password-file "$HOME/.hyperhub/runtime/api-key" \
   -- "$dynamic_probe" --intent-create "$temporary/intents/create-write" \
   >/dev/null 2>"$temporary/create-write-gum.stderr.log"
 create_gum_status=$?
