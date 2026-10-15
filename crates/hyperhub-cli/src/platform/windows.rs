@@ -15,9 +15,9 @@ use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateProcessW, CreateRemoteThread, GetExitCodeProcess, ResumeThread,
-    TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CreateEventW, CreateProcessW, CreateRemoteThread, GetExitCodeProcess, GetExitCodeThread,
+    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
@@ -428,10 +428,14 @@ where
     if WaitForSingleObject(remote_thread.0, INFINITE) == WAIT_FAILED {
         return Err(last_error("waiting for agent loader failed"));
     }
+    let mut loader_status = 0;
+    if GetExitCodeThread(remote_thread.0, &mut loader_status) == 0 {
+        return Err(last_error("cannot read agent loader status"));
+    }
     match WaitForSingleObject(loaded_event, 5_000) {
         WAIT_OBJECT_0 => {}
         WAIT_TIMEOUT => {
-            return Err("agent DLL did not report initialization before timeout".into());
+            return Err(format!("agent DLL did not report initialization before timeout (loader_status=0x{loader_status:08x})"));
         }
         WAIT_FAILED => return Err(last_error("waiting for Gum Agent loaded event failed")),
         status => return Err(format!("unexpected Gum Agent loaded wait status {status}")),

@@ -213,11 +213,17 @@ unsafe fn signal_inherited_child_event() {
 }
 
 unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
-    if crate::hh_agent_abi_version() != crate::ABI_VERSION
-        || crate::hh_agent_initialize_from_env() != HH_OK
-    {
+    initialization_log("worker_started");
+    if crate::hh_agent_abi_version() != crate::ABI_VERSION {
+        initialization_log("abi_failed");
         return ERROR_DLL_INIT_FAILED;
     }
+    let status = crate::hh_agent_initialize_from_env();
+    if status != HH_OK {
+        initialization_log(&format!("bootstrap_failed status={status}"));
+        return ERROR_DLL_INIT_FAILED;
+    }
+    initialization_log("bootstrap_complete");
     if let Err(error) = initialize_builtin_plugins() {
         if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
             eprintln!("hyperhub-gum: failed to initialize hook plugins: {error}");
@@ -225,11 +231,13 @@ unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
         return ERROR_DLL_INIT_FAILED;
     }
     gum_init_embedded();
+    initialization_log("gum_initialized");
     let interceptor = gum_interceptor_obtain();
     if interceptor.is_null() {
         return ERROR_DLL_INIT_FAILED;
     }
     let report = HookManager::new(interceptor).install_builtin_hooks();
+    initialization_log(&format!("hooks_installed success={}", report.success()));
     if !manager::start_msys_runtime_hook_watcher(interceptor) {
         return ERROR_DLL_INIT_FAILED;
     }
@@ -290,6 +298,25 @@ unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
     signal_inherited_child_event();
     // Gum intentionally remains initialized for the injected process lifetime.
     0
+}
+
+fn initialization_log(stage: &str) {
+    use std::io::Write;
+    let line = format!("hyperhub-agent: pid={} stage={stage}\n", unsafe {
+        GetCurrentProcessId()
+    });
+    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+        eprint!("{line}");
+    }
+    if let Some(path) = std::env::var_os("HYPERHUB_AGENT_INIT_LOG") {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
 }
 
 #[no_mangle]

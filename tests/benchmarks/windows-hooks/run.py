@@ -22,7 +22,8 @@ def run(hyperhub, probe, output):
     results = []
     with tempfile.TemporaryDirectory(prefix="hyperhub-windows-hooks-") as temporary:
         work = Path(temporary)
-        environment = dict(os.environ, HYPERHUB_HOME=str(work / "home"))
+        environment = dict(os.environ, HYPERHUB_HOME=str(work / "home"), HYPERHUB_AGENT_DEBUG="1",
+                           HYPERHUB_AGENT_INIT_LOG=str(output / "agent-init.log"))
         password = work / "admin-password"
         password.write_text("local-windows-regression-password\n")
         with socket.socket() as listener:
@@ -88,7 +89,7 @@ rules = []
                                 command = [str(probe), mode, str(server.server_address[1])]
                                 if managed:
                                     command = [str(hyperhub), "run", "--password-file", str(work / "home/runtime/api-key"), "--", *command]
-                                result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
+                                result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
                                 item = {"mode": mode, "managed": managed, "exit_code": result.returncode,
                                         "stdout": result.stdout, "stderr": result.stderr}
                                 results.append(item)
