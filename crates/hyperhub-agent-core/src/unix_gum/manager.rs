@@ -200,6 +200,8 @@ static DESCRIPTORS: &[Descriptor] = &[
         native::renameat2 as *mut c_void,
         false,
     ),
+    listen(38, "_exit", "process.exit", native::LISTENER_EXIT, true),
+    listen(39, "_Exit", "process.exit", native::LISTENER_EXIT, true),
 ];
 
 const fn replace(
@@ -397,7 +399,7 @@ mod tests {
                 descriptor.symbol
             );
         }
-        assert_eq!(DESCRIPTORS.len(), 37);
+        assert_eq!(DESCRIPTORS.len(), 39);
         assert!(
             !DESCRIPTORS
                 .iter()
@@ -431,7 +433,7 @@ mod tests {
     fn manifest_preserves_descriptor_order() {
         let manifest = manifest();
         assert_eq!(manifest.first().map(|entry| entry.1), Some("getaddrinfo"));
-        assert_eq!(manifest.last().map(|entry| entry.1), Some("renameat2"));
+        assert_eq!(manifest.last().map(|entry| entry.1), Some("_Exit"));
         assert_eq!(manifest[2].2, "socket.connect");
     }
 }

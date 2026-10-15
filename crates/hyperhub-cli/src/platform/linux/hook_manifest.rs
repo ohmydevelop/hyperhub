@@ -68,6 +68,9 @@ pub mod syscall {
     pub const CLOSE_RANGE: i64 = 436;
     pub const OPENAT2: i64 = 437;
     pub const GETPID: i64 = 39;
+    pub const SENDMMSG: i64 = 307;
+    pub const RECVMMSG: i64 = 299;
+    pub const UNSHARE: i64 = 272;
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -116,6 +119,9 @@ pub mod syscall {
     pub const FORK: i64 = -1;
     pub const VFORK: i64 = -1;
     pub const GETPID: i64 = 172;
+    pub const SENDMMSG: i64 = 269;
+    pub const RECVMMSG: i64 = 243;
+    pub const UNSHARE: i64 = 97;
 }
 
 use syscall::*;
@@ -141,6 +147,10 @@ pub static HOOK_POINTS: &[HookPoint] = &[
     hook("dns.recvfrom", Intent::DnsResolution, RECVFROM, true),
     hook("dns.sendmsg", Intent::DnsResolution, SENDMSG, true),
     hook("dns.recvmsg", Intent::DnsResolution, RECVMSG, true),
+    hook("dns.sendmmsg", Intent::DnsResolution, SENDMMSG, false),
+    hook("dns.recvmmsg", Intent::DnsResolution, RECVMMSG, false),
+    hook("dns.readv", Intent::DnsResolution, READV, false),
+    hook("dns.writev", Intent::DnsResolution, WRITEV, false),
     hook("descriptor.fcntl", Intent::DescriptorState, FCNTL, true),
     hook("descriptor.ioctl", Intent::DescriptorState, IOCTL, true),
     hook("descriptor.close", Intent::DescriptorState, CLOSE, true),

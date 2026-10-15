@@ -14,6 +14,9 @@ use hyperhub_core::sandbox::{
 };
 use hyperhub_core::session::{ControlRequest, ControlResponse};
 
+#[cfg(test)]
+use super::dns_tracking::parse_dns_query;
+use super::dns_tracking::{parse_dns_addresses, DnsTransactions};
 use super::hook_manifest::{self, syscall};
 
 const PTRACE_TRACEME: libc::c_uint = 0;
@@ -40,6 +43,14 @@ const SYSCALL_STOP: i32 = libc::SIGTRAP | 0x80;
 const SCRATCH_SIZE: usize = 4096;
 const SANDBOX_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
+const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
+
+#[derive(Debug)]
+struct DnsReceivePacket {
+    buffers: Vec<(usize, usize)>,
+    header: Option<usize>,
+    source: Option<(usize, usize)>,
+}
 
 #[derive(Clone, Debug)]
 struct TargetAddress {
@@ -91,7 +102,9 @@ enum PendingSyscall {
     CloseRange {
         first: u32,
         last: u32,
+        flags: u32,
     },
+    UnshareFiles,
     Dup {
         old_fd: i32,
     },
@@ -103,9 +116,16 @@ enum PendingSyscall {
         fd: i32,
         target: TargetAddress,
     },
+    DnsSend {
+        socket_id: u64,
+        packets: Vec<Option<(SocketAddr, Vec<u8>)>>,
+        batched: bool,
+    },
     DnsReceive {
-        fd: i32,
-        buffers: Vec<(usize, usize)>,
+        socket_id: u64,
+        packets: Vec<DnsReceivePacket>,
+        batched: bool,
+        peer: Option<SocketAddr>,
     },
     FcntlSetfl {
         socket_id: u64,
@@ -164,10 +184,14 @@ struct Supervisor {
     parents: HashMap<libc::pid_t, libc::pid_t>,
     members: HashSet<libc::pid_t>,
     logical_nonblocking: HashSet<u64>,
-    sockets: HashMap<(libc::pid_t, i32), SocketDescriptor>,
-    udp_peers: HashMap<(libc::pid_t, i32), TargetAddress>,
-    dns_queries: HashMap<(libc::pid_t, i32), String>,
-    dns_addresses: HashMap<IpAddr, String>,
+    file_tables: HashMap<libc::pid_t, u64>,
+    pending_child_stops: HashSet<libc::pid_t>,
+    next_file_table: u64,
+    clone_flags: HashMap<libc::pid_t, u64>,
+    sockets: HashMap<(u64, i32), SocketDescriptor>,
+    udp_peers: HashMap<(u64, i32), TargetAddress>,
+    dns_queries: DnsTransactions,
+    dns_addresses: HashMap<(u64, IpAddr), (String, Instant)>,
     dns_ports: HashSet<u16>,
     root_status: Option<i32>,
 }
@@ -257,9 +281,13 @@ where
         parents: HashMap::new(),
         members: HashSet::from([child]),
         logical_nonblocking: HashSet::new(),
+        file_tables: HashMap::from([(child, 1)]),
+        pending_child_stops: HashSet::new(),
+        next_file_table: 2,
+        clone_flags: HashMap::new(),
         sockets: HashMap::new(),
         udp_peers: HashMap::new(),
-        dns_queries: HashMap::new(),
+        dns_queries: DnsTransactions::default(),
         dns_addresses: HashMap::new(),
         dns_ports,
         root_status: None,
@@ -275,7 +303,7 @@ where
 }
 
 impl Supervisor {
-    fn copy_descriptor(&mut self, process_pid: libc::pid_t, old_fd: i32, new_fd: i32) {
+    fn copy_descriptor(&mut self, process_pid: u64, old_fd: i32, new_fd: i32) {
         if old_fd == new_fd {
             return;
         }
@@ -283,19 +311,16 @@ impl Supervisor {
         let new_key = (process_pid, new_fd);
         self.remove_descriptor(new_key);
         self.udp_peers.remove(&new_key);
-        self.dns_queries.remove(&new_key);
+
         if let Some(descriptor) = self.sockets.get(&old_key).copied() {
             self.sockets.insert(new_key, descriptor);
         }
         if let Some(peer) = self.udp_peers.get(&old_key).cloned() {
             self.udp_peers.insert(new_key, peer);
         }
-        if let Some(query) = self.dns_queries.get(&old_key).cloned() {
-            self.dns_queries.insert(new_key, query);
-        }
     }
 
-    fn inherit_descriptors(&mut self, parent_pid: libc::pid_t, child_pid: libc::pid_t) {
+    fn inherit_descriptors(&mut self, parent_pid: u64, child_pid: u64) {
         let sockets = self
             .sockets
             .iter()
@@ -310,19 +335,19 @@ impl Supervisor {
                 (pid == parent_pid).then_some(((child_pid, fd), target.clone()))
             })
             .collect::<Vec<_>>();
-        let dns_queries = self
-            .dns_queries
-            .iter()
-            .filter_map(|(&(pid, fd), hostname)| {
-                (pid == parent_pid).then_some(((child_pid, fd), hostname.clone()))
-            })
-            .collect::<Vec<_>>();
         self.sockets.extend(sockets);
         self.udp_peers.extend(udp_peers);
-        self.dns_queries.extend(dns_queries);
+        let addresses = self
+            .dns_addresses
+            .iter()
+            .filter_map(|(&(table, ip), value)| {
+                (table == parent_pid).then_some(((child_pid, ip), value.clone()))
+            })
+            .collect::<Vec<_>>();
+        self.dns_addresses.extend(addresses);
     }
 
-    fn remove_descriptor(&mut self, key: (libc::pid_t, i32)) {
+    fn remove_descriptor(&mut self, key: (u64, i32)) {
         let Some(descriptor) = self.sockets.remove(&key) else {
             return;
         };
@@ -332,15 +357,15 @@ impl Supervisor {
             .any(|candidate| candidate.id == descriptor.id)
         {
             self.logical_nonblocking.remove(&descriptor.id);
+            self.dns_queries.forget(descriptor.id);
         }
     }
 
-    fn remove_descriptor_range(&mut self, process_pid: libc::pid_t, first: u32, last: u32) {
+    fn remove_descriptor_range(&mut self, process_pid: u64, first: u32, last: u32) {
         let keys = self
             .sockets
             .keys()
             .chain(self.udp_peers.keys())
-            .chain(self.dns_queries.keys())
             .filter_map(|&(pid, fd)| {
                 let fd = u32::try_from(fd).ok()?;
                 (pid == process_pid && fd >= first && fd <= last).then_some((pid, fd as i32))
@@ -349,23 +374,20 @@ impl Supervisor {
         for key in keys {
             self.remove_descriptor(key);
             self.udp_peers.remove(&key);
-            self.dns_queries.remove(&key);
         }
     }
 
-    fn reconcile_descriptors(&mut self, process_pid: libc::pid_t) {
+    fn reconcile_descriptors(&mut self, tid: libc::pid_t, process_pid: u64) {
         let keys = self
             .sockets
             .keys()
             .chain(self.udp_peers.keys())
-            .chain(self.dns_queries.keys())
             .filter_map(|&(pid, fd)| (pid == process_pid).then_some((pid, fd)))
             .collect::<HashSet<_>>();
         for key in keys {
-            if !std::path::Path::new(&format!("/proc/{process_pid}/fd/{}", key.1)).exists() {
+            if !std::path::Path::new(&format!("/proc/{tid}/fd/{}", key.1)).exists() {
                 self.remove_descriptor(key);
                 self.udp_peers.remove(&key);
-                self.dns_queries.remove(&key);
             }
         }
     }
@@ -378,14 +400,38 @@ impl Supervisor {
         }
     }
 
-    fn cleanup_exited_thread(&mut self, tid: libc::pid_t) {
-        let process_pid = self.thread_groups.remove(&tid).unwrap_or(tid);
-        if !self
-            .thread_groups
+    fn descriptor_table(&self, tid: libc::pid_t) -> u64 {
+        *self
+            .file_tables
+            .get(&tid)
+            .expect("traced thread has an fd table")
+    }
+
+    fn detach_file_table(&mut self, tid: libc::pid_t) {
+        let old = self.descriptor_table(tid);
+        if self
+            .file_tables
             .values()
-            .any(|group| *group == process_pid)
+            .filter(|&&table| table == old)
+            .count()
+            <= 1
         {
-            self.remove_descriptor_range(process_pid, 0, u32::MAX);
+            return;
+        }
+        let new = self.next_file_table;
+        self.next_file_table += 1;
+        self.inherit_descriptors(old, new);
+        self.file_tables.insert(tid, new);
+    }
+
+    fn cleanup_exited_thread(&mut self, tid: libc::pid_t) {
+        self.thread_groups.remove(&tid);
+        self.clone_flags.remove(&tid);
+        if let Some(table) = self.file_tables.remove(&tid) {
+            if !self.file_tables.values().any(|&other| other == table) {
+                self.remove_descriptor_range(table, 0, u32::MAX);
+                self.dns_addresses.retain(|(owner, _), _| *owner != table);
+            }
         }
     }
 
@@ -435,6 +481,10 @@ impl Supervisor {
                 resume_syscall(tid, 0)?;
                 continue;
             }
+            if !self.file_tables.contains_key(&tid) {
+                self.pending_child_stops.insert(tid);
+                continue;
+            }
             self.threads.entry(tid).or_default();
             self.thread_groups
                 .entry(tid)
@@ -465,17 +515,51 @@ impl Supervisor {
                     let parent_group = thread_group(tid);
                     let child_group = thread_group(child);
                     self.thread_groups.insert(child, child_group);
+                    let parent_table = self.descriptor_table(tid);
+                    let table = if self.clone_flags.get(&tid).copied().unwrap_or(0)
+                        & libc::CLONE_FILES as u64
+                        != 0
+                    {
+                        parent_table
+                    } else {
+                        let table = self.next_file_table;
+                        self.next_file_table += 1;
+                        self.inherit_descriptors(parent_table, table);
+                        table
+                    };
+                    self.file_tables.insert(child, table);
+                    if self.pending_child_stops.remove(&child) {
+                        resume_syscall(child, 0)?;
+                    }
                     if child_group != parent_group {
                         self.parents.entry(child_group).or_insert(parent_group);
-                        self.inherit_descriptors(parent_group, child_group);
                     }
                 }
             }
             PTRACE_EVENT_EXEC => {
+                let mut former = 0usize;
+                ptrace(
+                    PTRACE_GETEVENTMSG,
+                    tid,
+                    std::ptr::null_mut(),
+                    (&mut former as *mut usize).cast(),
+                )?;
+                if former != 0 && former as libc::pid_t != tid {
+                    let former = former as libc::pid_t;
+                    let table = self.file_tables.remove(&former);
+                    if let Some(state) = self.threads.remove(&former) {
+                        self.threads.insert(tid, state);
+                    }
+                    self.thread_groups.remove(&former);
+                    if let Some(table) = table {
+                        self.file_tables.insert(tid, table);
+                    }
+                }
                 self.threads.entry(tid).or_default().pending = None;
                 let process_pid = thread_group(tid);
                 self.thread_groups.insert(tid, process_pid);
-                self.reconcile_descriptors(process_pid);
+                self.detach_file_table(tid);
+                self.reconcile_descriptors(tid, self.descriptor_table(tid));
             }
             _ => {}
         }
@@ -577,11 +661,37 @@ impl Supervisor {
         registers: &mut Registers,
     ) -> Result<Option<PendingSyscall>, String> {
         let number = registers.syscall_number();
+        self.clone_flags.insert(
+            tid,
+            if number == syscall::CLONE {
+                registers.argument(0)
+            } else if number == syscall::CLONE3 {
+                read_memory(tid, registers.argument(0) as usize, 8)
+                    .ok()
+                    .map(|bytes| u64::from_ne_bytes(bytes.try_into().unwrap()))
+                    .unwrap_or(0)
+            } else {
+                0
+            },
+        );
         self.record_hooks(number);
+        // Fast Open combines connect and first payload. Until the supervisor can
+        // mediate both atomically, refuse it before any kernel network side effect.
+        let flags = if number == syscall::SENDTO {
+            registers.argument(3)
+        } else if number == syscall::SENDMSG || number == syscall::SENDMMSG {
+            registers.argument(2)
+        } else {
+            0
+        };
+        if flags & libc::MSG_FASTOPEN as u64 != 0 {
+            return Ok(Some(deny_syscall(registers, libc::EOPNOTSUPP)));
+        }
         if let Some(pending) = self.intent_enter(tid, number, registers)? {
             return Ok(Some(pending));
         }
-        if let Some(pending) = self.dns_enter(tid, number, registers)? {
+        // Observation must not turn a native EFAULT/partial batch into supervisor failure.
+        if let Ok(Some(pending)) = self.dns_enter(tid, number, registers) {
             return Ok(Some(pending));
         }
         if number == syscall::SOCKET {
@@ -611,7 +721,7 @@ impl Supervisor {
             if command == libc::F_DUPFD || command == libc::F_DUPFD_CLOEXEC {
                 return Ok(Some(PendingSyscall::Dup { old_fd: fd }));
             }
-            let key = (thread_group(tid), fd);
+            let key = (self.descriptor_table(tid), fd);
             let Some(descriptor) = self.sockets.get(&key).copied() else {
                 return Ok(None);
             };
@@ -640,7 +750,7 @@ impl Supervisor {
             let request = registers.argument(1) as libc::c_ulong;
             let value_address = registers.argument(2) as usize;
             if request == libc::FIONBIO as libc::c_ulong && value_address != 0 {
-                let key = (thread_group(tid), fd);
+                let key = (self.descriptor_table(tid), fd);
                 let Some(descriptor) = self.sockets.get(&key).copied() else {
                     return Ok(None);
                 };
@@ -673,10 +783,9 @@ impl Supervisor {
         let Some(mut target) = parse_sockaddr(&original) else {
             return Ok(None);
         };
-        let process_pid = thread_group(tid);
         let socket_type = self
             .sockets
-            .get(&(process_pid, fd))
+            .get(&(self.descriptor_table(tid), fd))
             .map(|descriptor| descriptor.socket_type);
         if socket_type == Some(libc::SOCK_DGRAM) {
             return Ok(Some(PendingSyscall::UdpConnect { fd, target }));
@@ -684,7 +793,11 @@ impl Supervisor {
         if socket_type.is_some_and(|kind| kind != libc::SOCK_STREAM) {
             return Ok(None);
         }
-        target.hostname = self.dns_addresses.get(&target.ip).cloned();
+        target.hostname = self
+            .dns_addresses
+            .get(&(self.descriptor_table(tid), target.ip))
+            .filter(|(_, expires)| *expires > Instant::now())
+            .map(|(name, _)| name.clone());
         if SocketAddr::new(target.ip, target.port) == self.proxy {
             return Ok(None);
         }
@@ -711,21 +824,30 @@ impl Supervisor {
             }
             Some(PendingSyscall::Close { fd }) => {
                 if registers.result() >= 0 {
-                    let key = (thread_group(tid), fd);
+                    let key = (self.descriptor_table(tid), fd);
                     self.remove_descriptor(key);
                     self.udp_peers.remove(&key);
-                    self.dns_queries.remove(&key);
                 }
             }
-            Some(PendingSyscall::CloseRange { first, last }) => {
+            Some(PendingSyscall::CloseRange { first, last, flags }) => {
                 if registers.result() >= 0 {
-                    self.remove_descriptor_range(thread_group(tid), first, last);
+                    if flags & CLOSE_RANGE_UNSHARE != 0 {
+                        self.detach_file_table(tid);
+                    }
+                    if flags & CLOSE_RANGE_CLOEXEC == 0 {
+                        self.remove_descriptor_range(self.descriptor_table(tid), first, last);
+                    }
+                }
+            }
+            Some(PendingSyscall::UnshareFiles) => {
+                if registers.result() >= 0 {
+                    self.detach_file_table(tid);
                 }
             }
             Some(PendingSyscall::Dup { old_fd }) => {
                 let new_fd = registers.result();
                 if new_fd >= 0 {
-                    self.copy_descriptor(thread_group(tid), old_fd, new_fd as i32);
+                    self.copy_descriptor(self.descriptor_table(tid), old_fd, new_fd as i32);
                 }
             }
             Some(PendingSyscall::Socket {
@@ -734,10 +856,9 @@ impl Supervisor {
             }) => {
                 let fd = registers.result();
                 if fd >= 0 {
-                    let key = (thread_group(tid), fd as i32);
+                    let key = (self.descriptor_table(tid), fd as i32);
                     self.remove_descriptor(key);
                     self.udp_peers.remove(&key);
-                    self.dns_queries.remove(&key);
                     self.sockets.insert(key, descriptor);
                     if logical_nonblocking {
                         self.logical_nonblocking.insert(descriptor.id);
@@ -746,7 +867,8 @@ impl Supervisor {
             }
             Some(PendingSyscall::UdpConnect { fd, target }) => {
                 if registers.result() >= 0 {
-                    self.udp_peers.insert((thread_group(tid), fd), target);
+                    self.udp_peers
+                        .insert((self.descriptor_table(tid), fd), target);
                 }
             }
             Some(PendingSyscall::FcntlSetfl {
@@ -783,14 +905,67 @@ impl Supervisor {
                     }
                 }
             }
-            Some(PendingSyscall::DnsReceive { fd, buffers }) => {
-                let length = registers.result();
-                if length > 0 {
-                    let response = read_buffers(tid, &buffers, length as usize)?;
-                    if let Some(hostname) = self.dns_queries.get(&(thread_group(tid), fd)).cloned()
-                    {
-                        for address in parse_dns_addresses(&response) {
-                            self.dns_addresses.insert(address, hostname.clone());
+            Some(PendingSyscall::DnsSend {
+                socket_id,
+                packets,
+                batched,
+            }) => {
+                let result = registers.result();
+                if result >= 0 {
+                    let count = if batched { result as usize } else { 1 };
+                    for packet in packets.into_iter().take(count).flatten() {
+                        if batched || result as usize == packet.1.len() {
+                            self.dns_queries.sent(socket_id, packet.0, &packet.1);
+                        }
+                    }
+                }
+            }
+            Some(PendingSyscall::DnsReceive {
+                socket_id,
+                packets,
+                batched,
+                peer,
+            }) => {
+                let result = registers.result();
+                if result > 0 {
+                    let count = if batched { result as usize } else { 1 };
+                    for packet in packets.into_iter().take(count) {
+                        let length = if batched {
+                            u32::from_ne_bytes(
+                                read_memory(tid, packet.header.unwrap() + 56, 4)?
+                                    .try_into()
+                                    .unwrap(),
+                            ) as usize
+                        } else {
+                            result as usize
+                        };
+                        let response = read_buffers(tid, &packet.buffers, length.min(65535))?;
+                        let source = if let Some(header) = packet.header {
+                            read_msghdr(tid, header)?
+                                .name
+                                .as_deref()
+                                .and_then(parse_sockaddr)
+                        } else if let Some((address, length)) = packet.source {
+                            let length = u32::from_ne_bytes(
+                                read_memory(tid, length, 4)?.try_into().unwrap(),
+                            ) as usize;
+                            parse_sockaddr(&read_memory(tid, address, length.min(128))?)
+                        } else {
+                            None
+                        };
+                        let source = source
+                            .map(|target| SocketAddr::new(target.ip, target.port))
+                            .or(peer);
+                        if let Some(hostname) =
+                            self.dns_queries.received(socket_id, source, &response)
+                        {
+                            let table = self.descriptor_table(tid);
+                            for address in parse_dns_addresses(&response) {
+                                self.dns_addresses.insert(
+                                    (table, address),
+                                    (hostname.clone(), Instant::now() + Duration::from_secs(60)),
+                                );
+                            }
                         }
                     }
                 }
@@ -805,7 +980,7 @@ impl Supervisor {
                 if registers.result() >= 0 {
                     let socket_id = self
                         .sockets
-                        .get(&(thread_group(tid), fd))
+                        .get(&(self.descriptor_table(tid), fd))
                         .map(|descriptor| descriptor.id);
                     let handshake = self.socks_handshake(tid, registers, fd, target);
                     if let Err(error) = handshake {
@@ -832,96 +1007,181 @@ impl Supervisor {
         number: i64,
         registers: &Registers,
     ) -> Result<Option<PendingSyscall>, String> {
-        let process_pid = thread_group(tid);
         let fd = registers.argument(0) as i32;
-        let key = (process_pid, fd);
-        if self
+        let key = (self.descriptor_table(tid), fd);
+        let Some(descriptor) = self
             .sockets
             .get(&key)
-            .map(|descriptor| descriptor.socket_type)
-            != Some(libc::SOCK_DGRAM)
-        {
+            .copied()
+            .filter(|socket| socket.socket_type == libc::SOCK_DGRAM)
+        else {
             return Ok(None);
-        }
-
-        let (payload, target, hook_name) = if number == syscall::SENDTO {
-            let length = (registers.argument(2) as usize).min(4096);
-            let payload = read_memory(tid, registers.argument(1) as usize, length)?;
-            let target = if registers.argument(4) != 0 {
-                let address_length = (registers.argument(5) as usize).min(128);
-                parse_sockaddr(&read_memory(
-                    tid,
-                    registers.argument(4) as usize,
-                    address_length,
-                )?)
-            } else {
-                self.udp_peers.get(&key).cloned()
-            };
-            (Some(payload), target, Some("dns.sendto"))
-        } else if number == syscall::SENDMSG {
-            let message = read_msghdr(tid, registers.argument(1) as usize)?;
-            let target = message
-                .name
-                .as_ref()
-                .and_then(|bytes| parse_sockaddr(bytes))
-                .or_else(|| self.udp_peers.get(&key).cloned());
-            (
-                Some(read_buffers(tid, &message.buffers, 4096)?),
-                target,
-                Some("dns.sendmsg"),
-            )
-        } else if number == syscall::WRITE {
-            let length = (registers.argument(2) as usize).min(4096);
-            (
-                Some(read_memory(tid, registers.argument(1) as usize, length)?),
-                self.udp_peers.get(&key).cloned(),
-                Some("dns.write"),
-            )
-        } else {
-            (None, None, None)
         };
-        if let (Some(payload), Some(target), Some(hook_name)) = (payload, target, hook_name) {
-            if self.dns_ports.contains(&target.port) {
-                if let Some(hostname) = parse_dns_query(&payload) {
-                    self.dns_queries.insert(key, hostname);
-                    self.record_named_hook(hook_name);
+        let peer = self.udp_peers.get(&key).cloned();
+        let peer_address = peer
+            .as_ref()
+            .map(|target| SocketAddr::new(target.ip, target.port));
+        let is_send = is_one_of(
+            number,
+            &[
+                syscall::SENDTO,
+                syscall::SENDMSG,
+                syscall::SENDMMSG,
+                syscall::WRITE,
+                syscall::WRITEV,
+            ],
+        );
+        if is_send {
+            let batched = number == syscall::SENDMMSG;
+            let mut packets = Vec::new();
+            if number == syscall::SENDMSG || batched {
+                let count = if batched {
+                    (registers.argument(2) as usize).min(1024)
+                } else {
+                    1
+                };
+                for index in 0..count {
+                    let Some(header) = (registers.argument(1) as usize).checked_add(index * 64)
+                    else {
+                        break;
+                    };
+                    let Ok(message) = read_msghdr(tid, header) else {
+                        break;
+                    };
+                    let target = message
+                        .name
+                        .as_deref()
+                        .and_then(parse_sockaddr)
+                        .or_else(|| peer.clone());
+                    let Ok(payload) = read_buffers(tid, &message.buffers, 65535) else {
+                        break;
+                    };
+                    packets.push(
+                        target
+                            .filter(|target| self.dns_ports.contains(&target.port))
+                            .map(|target| (SocketAddr::new(target.ip, target.port), payload)),
+                    );
                 }
+            } else {
+                let payload = if number == syscall::WRITEV {
+                    let buffers = read_iovecs(
+                        tid,
+                        registers.argument(1) as usize,
+                        registers.argument(2) as usize,
+                    )?;
+                    read_buffers(tid, &buffers, 65535)?
+                } else {
+                    read_memory(
+                        tid,
+                        registers.argument(1) as usize,
+                        (registers.argument(2) as usize).min(65535),
+                    )?
+                };
+                let target = if number == syscall::SENDTO && registers.argument(4) != 0 {
+                    parse_sockaddr(&read_memory(
+                        tid,
+                        registers.argument(4) as usize,
+                        (registers.argument(5) as usize).min(128),
+                    )?)
+                } else {
+                    peer
+                };
+                packets.push(
+                    target
+                        .filter(|target| self.dns_ports.contains(&target.port))
+                        .map(|target| (SocketAddr::new(target.ip, target.port), payload)),
+                );
+            }
+            if packets.iter().any(Option::is_some) {
+                self.record_named_hook(if number == syscall::SENDTO {
+                    "dns.sendto"
+                } else if number == syscall::SENDMSG {
+                    "dns.sendmsg"
+                } else if batched {
+                    "dns.sendmmsg"
+                } else if number == syscall::WRITEV {
+                    "dns.writev"
+                } else {
+                    "dns.write"
+                });
+                return Ok(Some(PendingSyscall::DnsSend {
+                    socket_id: descriptor.id,
+                    packets,
+                    batched,
+                }));
             }
             return Ok(None);
         }
-
-        if !self.dns_queries.contains_key(&key) {
+        if !self.dns_queries.has_queries(descriptor.id) {
             return Ok(None);
         }
-        if number == syscall::RECVFROM {
-            self.record_named_hook("dns.recvfrom");
-            return Ok(Some(PendingSyscall::DnsReceive {
-                fd,
-                buffers: vec![(
+        let batched = number == syscall::RECVMMSG;
+        let mut packets = Vec::new();
+        if number == syscall::RECVMSG || batched {
+            let count = if batched {
+                (registers.argument(2) as usize).min(1024)
+            } else {
+                1
+            };
+            for index in 0..count {
+                let Some(header) = (registers.argument(1) as usize).checked_add(index * 64) else {
+                    break;
+                };
+                let Ok(message) = read_msghdr(tid, header) else {
+                    break;
+                };
+                packets.push(DnsReceivePacket {
+                    buffers: message.buffers,
+                    header: Some(header),
+                    source: None,
+                });
+            }
+        } else if number == syscall::RECVFROM || number == syscall::READ || number == syscall::READV
+        {
+            let buffers = if number == syscall::READV {
+                read_iovecs(
+                    tid,
                     registers.argument(1) as usize,
                     registers.argument(2) as usize,
-                )],
-            }));
-        }
-        if number == syscall::RECVMSG {
-            let message = read_msghdr(tid, registers.argument(1) as usize)?;
-            self.record_named_hook("dns.recvmsg");
-            return Ok(Some(PendingSyscall::DnsReceive {
-                fd,
-                buffers: message.buffers,
-            }));
-        }
-        if number == syscall::READ {
-            self.record_named_hook("dns.read");
-            return Ok(Some(PendingSyscall::DnsReceive {
-                fd,
-                buffers: vec![(
+                )?
+            } else {
+                vec![(
                     registers.argument(1) as usize,
                     registers.argument(2) as usize,
-                )],
-            }));
+                )]
+            };
+            let source = (number == syscall::RECVFROM
+                && registers.argument(4) != 0
+                && registers.argument(5) != 0)
+                .then_some((
+                    registers.argument(4) as usize,
+                    registers.argument(5) as usize,
+                ));
+            packets.push(DnsReceivePacket {
+                buffers,
+                header: None,
+                source,
+            });
+        } else {
+            return Ok(None);
         }
-        Ok(None)
+        self.record_named_hook(if batched {
+            "dns.recvmmsg"
+        } else if number == syscall::RECVMSG {
+            "dns.recvmsg"
+        } else if number == syscall::RECVFROM {
+            "dns.recvfrom"
+        } else if number == syscall::READV {
+            "dns.readv"
+        } else {
+            "dns.read"
+        });
+        Ok(Some(PendingSyscall::DnsReceive {
+            socket_id: descriptor.id,
+            packets,
+            batched,
+            peer: peer_address,
+        }))
     }
 
     fn intent_enter(
@@ -930,20 +1190,20 @@ impl Supervisor {
         number: i64,
         registers: &mut Registers,
     ) -> Result<Option<PendingSyscall>, String> {
+        if number == syscall::UNSHARE && registers.argument(0) & libc::CLONE_FILES as u64 != 0 {
+            return Ok(Some(PendingSyscall::UnshareFiles));
+        }
         if number == syscall::CLOSE {
             return Ok(Some(PendingSyscall::Close {
                 fd: registers.argument(0) as i32,
             }));
         }
         if number == syscall::CLOSE_RANGE {
-            let flags = registers.argument(2) as u32;
-            if flags & CLOSE_RANGE_CLOEXEC == 0 {
-                return Ok(Some(PendingSyscall::CloseRange {
-                    first: registers.argument(0) as u32,
-                    last: registers.argument(1) as u32,
-                }));
-            }
-            return Ok(None);
+            return Ok(Some(PendingSyscall::CloseRange {
+                first: registers.argument(0) as u32,
+                last: registers.argument(1) as u32,
+                flags: registers.argument(2) as u32,
+            }));
         }
         if is_one_of(number, &[syscall::DUP, syscall::DUP2, syscall::DUP3]) {
             return Ok(Some(PendingSyscall::Dup {
@@ -1086,26 +1346,36 @@ impl Supervisor {
                 operations: vec![(FileSandboxOperation::Rename, "rename")],
             }));
         }
-        if number == syscall::MMAP {
+        if number == syscall::MMAP || number == syscall::MPROTECT {
             let protection = registers.argument(2) as i32;
-            let fd = registers.argument(4) as i32;
-            if fd >= 0 && protection & libc::PROT_WRITE != 0 {
-                if let Some(path) = fd_path(tid, fd) {
-                    return Ok(Some(file_intent(path, FileSandboxOperation::Write, "map")));
-                }
+            let mut operations = Vec::new();
+            if protection & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) != 0 {
+                operations.push((FileSandboxOperation::Read, "map_read"));
             }
-        }
-        if number == syscall::MPROTECT && registers.argument(2) as i32 & libc::PROT_WRITE != 0 {
-            let targets = mapped_file_paths(
-                thread_group(tid),
-                registers.argument(0) as usize,
-                registers.argument(1) as usize,
-            )?;
-            if !targets.is_empty() {
-                return Ok(Some(FileIntent {
-                    targets,
-                    operations: vec![(FileSandboxOperation::Write, "protect")],
-                }));
+            if protection & libc::PROT_WRITE != 0 {
+                operations.push((FileSandboxOperation::Write, "map_write"));
+            }
+            if !operations.is_empty() {
+                let targets = if number == syscall::MMAP {
+                    if registers.argument(3) as i32 & libc::MAP_ANONYMOUS != 0 {
+                        return Ok(None);
+                    }
+                    fd_path(tid, registers.argument(4) as i32)
+                        .into_iter()
+                        .collect()
+                } else {
+                    mapped_file_paths(
+                        tid,
+                        registers.argument(0) as usize,
+                        registers.argument(1) as usize,
+                    )?
+                };
+                if !targets.is_empty() {
+                    return Ok(Some(FileIntent {
+                        targets,
+                        operations,
+                    }));
+                }
             }
         }
         Ok(None)
@@ -1521,7 +1791,7 @@ impl Supervisor {
         let original = read_memory(tid, scratch, SCRATCH_SIZE)?;
         let socket_id = self
             .sockets
-            .get(&(thread_group(tid), fd))
+            .get(&(self.descriptor_table(tid), fd))
             .map(|descriptor| descriptor.id);
         let was_logical_nonblocking =
             socket_id.is_some_and(|socket_id| self.logical_nonblocking.contains(&socket_id));
@@ -1840,22 +2110,34 @@ fn read_msghdr(tid: libc::pid_t, address: usize) -> Result<RemoteMessage, String
     let name_address = u64::from_ne_bytes(header[0..8].try_into().unwrap()) as usize;
     let name_length = u32::from_ne_bytes(header[8..12].try_into().unwrap()) as usize;
     let iov_address = u64::from_ne_bytes(header[16..24].try_into().unwrap()) as usize;
-    let iov_count = (u64::from_ne_bytes(header[24..32].try_into().unwrap()) as usize).min(64);
+    let iov_count = (u64::from_ne_bytes(header[24..32].try_into().unwrap()) as usize).min(1024);
     let name = if name_address != 0 && name_length != 0 {
         Some(read_memory(tid, name_address, name_length.min(128))?)
     } else {
         None
     };
-    let mut buffers = Vec::with_capacity(iov_count);
-    for index in 0..iov_count {
-        let iovec = read_memory(tid, iov_address + index * 16, 16)?;
+    let buffers = read_iovecs(tid, iov_address, iov_count)?;
+    Ok(RemoteMessage { name, buffers })
+}
+
+fn read_iovecs(
+    tid: libc::pid_t,
+    iov_address: usize,
+    count: usize,
+) -> Result<Vec<(usize, usize)>, String> {
+    let mut buffers = Vec::with_capacity(count.min(1024));
+    for index in 0..count.min(1024) {
+        let address = iov_address
+            .checked_add(index * 16)
+            .ok_or("iovec address overflow")?;
+        let iovec = read_memory(tid, address, 16)?;
         let base = u64::from_ne_bytes(iovec[0..8].try_into().unwrap()) as usize;
         let length = u64::from_ne_bytes(iovec[8..16].try_into().unwrap()) as usize;
         if base != 0 && length != 0 {
             buffers.push((base, length));
         }
     }
-    Ok(RemoteMessage { name, buffers })
+    Ok(buffers)
 }
 
 fn read_buffers(
@@ -1872,96 +2154,6 @@ fn read_buffers(
         output.extend_from_slice(&read_memory(tid, *address, count)?);
     }
     Ok(output)
-}
-
-fn parse_dns_query(packet: &[u8]) -> Option<String> {
-    if packet.len() < 12 || packet[2] & 0x80 != 0 || u16::from_be_bytes([packet[4], packet[5]]) == 0
-    {
-        return None;
-    }
-    let (hostname, _) = parse_dns_name(packet, 12)?;
-    (!hostname.is_empty()).then_some(hostname)
-}
-
-fn parse_dns_addresses(packet: &[u8]) -> Vec<IpAddr> {
-    if packet.len() < 12 || packet[2] & 0x80 == 0 {
-        return Vec::new();
-    }
-    let questions = u16::from_be_bytes([packet[4], packet[5]]) as usize;
-    let answers = u16::from_be_bytes([packet[6], packet[7]]) as usize;
-    let mut offset = 12usize;
-    for _ in 0..questions {
-        let Some((_, next)) = parse_dns_name(packet, offset) else {
-            return Vec::new();
-        };
-        offset = next.saturating_add(4);
-        if offset > packet.len() {
-            return Vec::new();
-        }
-    }
-    let mut addresses = Vec::new();
-    for _ in 0..answers {
-        let Some((_, next)) = parse_dns_name(packet, offset) else {
-            break;
-        };
-        if next + 10 > packet.len() {
-            break;
-        }
-        let record_type = u16::from_be_bytes([packet[next], packet[next + 1]]);
-        let data_length = u16::from_be_bytes([packet[next + 8], packet[next + 9]]) as usize;
-        let data = next + 10;
-        if data + data_length > packet.len() {
-            break;
-        }
-        match (record_type, data_length) {
-            (1, 4) => addresses.push(IpAddr::V4(Ipv4Addr::new(
-                packet[data],
-                packet[data + 1],
-                packet[data + 2],
-                packet[data + 3],
-            ))),
-            (28, 16) => {
-                if let Ok(bytes) = <[u8; 16]>::try_from(&packet[data..data + 16]) {
-                    addresses.push(IpAddr::V6(Ipv6Addr::from(bytes)));
-                }
-            }
-            _ => {}
-        }
-        offset = data + data_length;
-    }
-    addresses
-}
-
-fn parse_dns_name(packet: &[u8], start: usize) -> Option<(String, usize)> {
-    let mut labels = Vec::new();
-    let mut offset = start;
-    let mut next = None;
-    let mut jumps = 0usize;
-    loop {
-        let length = *packet.get(offset)?;
-        if length & 0xc0 == 0xc0 {
-            let second = *packet.get(offset + 1)?;
-            let pointer = (((length & 0x3f) as usize) << 8) | second as usize;
-            next.get_or_insert(offset + 2);
-            offset = pointer;
-            jumps += 1;
-            if jumps > 16 {
-                return None;
-            }
-            continue;
-        }
-        offset += 1;
-        if length == 0 {
-            return Some((labels.join("."), next.unwrap_or(offset)));
-        }
-        if length > 63 {
-            return None;
-        }
-        let end = offset.checked_add(length as usize)?;
-        let label = std::str::from_utf8(packet.get(offset..end)?).ok()?;
-        labels.push(label.to_ascii_lowercase());
-        offset = end;
-    }
 }
 
 fn deny_syscall(registers: &mut Registers, error: i32) -> PendingSyscall {
@@ -2076,7 +2268,7 @@ fn resolve_path(tid: libc::pid_t, dirfd: i32, raw: &str) -> Result<String, Strin
     if path.is_absolute() {
         return Ok(normalize_path(path));
     }
-    let process_pid = thread_group(tid);
+    let process_pid = tid;
     let root = if dirfd == libc::AT_FDCWD {
         std::fs::read_link(format!("/proc/{process_pid}/cwd"))
             .map_err(|error| format!("cannot resolve cwd for {process_pid}: {error}"))?
@@ -2105,7 +2297,7 @@ fn fd_path(tid: libc::pid_t, fd: i32) -> Option<String> {
     if fd < 0 {
         return None;
     }
-    let process_pid = thread_group(tid);
+    let process_pid = tid;
     let path = std::fs::read_link(format!("/proc/{process_pid}/fd/{fd}")).ok()?;
     path.is_absolute().then(|| normalize_path(&path))
 }
@@ -2306,6 +2498,9 @@ fn ptrace(
 }
 
 fn read_memory(tid: libc::pid_t, address: usize, length: usize) -> Result<Vec<u8>, String> {
+    address
+        .checked_add(length)
+        .ok_or("remote memory address overflow")?;
     let word = std::mem::size_of::<libc::c_long>();
     let mut output = vec![0u8; length];
     let mut offset = 0usize;
@@ -2325,6 +2520,9 @@ fn read_memory(tid: libc::pid_t, address: usize, length: usize) -> Result<Vec<u8
 }
 
 fn write_memory(tid: libc::pid_t, address: usize, data: &[u8]) -> Result<(), String> {
+    address
+        .checked_add(data.len())
+        .ok_or("remote memory address overflow")?;
     let word = std::mem::size_of::<libc::c_long>();
     let mut offset = 0usize;
     while offset < data.len() {

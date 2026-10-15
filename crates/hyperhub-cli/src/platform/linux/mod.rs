@@ -1,3 +1,4 @@
+mod dns_tracking;
 mod frida_core;
 mod hook_manifest;
 mod launcher;

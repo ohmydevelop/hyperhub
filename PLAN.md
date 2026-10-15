@@ -5,7 +5,7 @@ User authorization: repair the seven findings from the Fake-IP/coverage investig
 ## Milestones
 
 1. Confirm release version/process and executable verification environments. DONE: next release v0.2.10; origin/main is current; GitHub authentication works. Existing tag workflow builds Linux x86_64/aarch64 and Windows x64. Windows GNU cross-check is available; native Windows runs via CI.
-2. Fix Linux DNS scalar/vectored/batch I/O and transaction identity, implicit TCP Fast Open, shared fd-table lifetime, and read-only mapping checks. Register deterministic source fixtures in the unified Linux Suite. Run focused checks, review, commit, immediately push, and inspect CI.
+2. Linux implementation and local self-review DONE: full unified Suite passes with 46 independent semantic cases; CLI 137, Agent core 21, core 189 and Gum Agent 28 tests pass. Commit/push the Linux correction and track CI next.
 3. Fix Windows GetAddrInfoEx asynchronous parameter preservation and ConnectEx initial payload handling. Add native source regression fixtures to a Windows verification entry point. Run available Windows build/tests (CI if no local Windows host), review, commit, immediately push, and inspect CI.
 4. Run formatting, workspace all-target tests, Linux unified Suite and cross-platform CI. Fix failures; inspect all task changes and update issues/bugfix records.
 5. Bump the next available patch version, commit and immediately push. Wait for required CI. Publish the corresponding tag/release through the existing workflow, then verify release artifacts and status.
@@ -39,6 +39,12 @@ User authorization: repair the seven findings from the Fake-IP/coverage investig
 - Local workspace tests passed (136 CLI, 21 Agent core, 189 core), and initial 25-case Linux semantic suite passed. A full Linux Suite subsequently passed after the Gum exit-status fix. Expanded partial-batch/fd-lifetime/exit cases are being rerun.
 - Additional release blocker found by the existing Suite: explicit Gum could lose the target exit status when Frida reaped it. Added private per-PID exit metadata from on_exit/_exit/_Exit and consume it only as a fallback; missing status is now an error rather than a fabricated success. Dedicated C source regression covers main return and three exit APIs.
 - Windows implementation and probe cross-check passed; `--all-targets` exposed the pre-existing test-initializer omissions, now repaired. Native CI validation is pending.
-- All diagnostic logs and machine results are under target/diagnostics/release-fixes/. No commits or publication yet.
+- All diagnostic logs and machine results are under target/diagnostics/release-fixes/.
+- Windows commit ba5c881 was self-reviewed, committed and immediately pushed to origin/main. CI run 38724715889 is in progress; no tag or release has been published.
+- The Linux Suite passed once with 37 expanded cases; later reruns exposed an intermittent Gum descendant stop. Exit telemetry now uses raw syscalls like the existing signal_ready path, avoiding Hook reentry and inherited runtime locks. The pidfd status probe is nonblocking. Final verification remains required.
+- File mapping checks conservatively include Read for PROT_WRITE-only mappings because writable pages can be readable on supported architectures. Anonymous mappings ignore the unused fd. Added explicit write-only mapping/upgrade denials plus pwrite positive controls; the expanded Suite now has 45 behavioral cases.
 
 Commit grouping adjustment: commit Windows corrections and native Suite registration first after cross-target/self-review, immediately push and start CI. Continue diagnosing an intermittent Linux Gum descendant hang seen in the expanded full-suite rerun, then commit/push the Linux corrections after verification. Version/release preparation remains separate. Do not tag until both platform paths pass.
+
+- Windows follow-up 570ca68 corrected a pre-existing native replacement-range assertion exposed by the newly enabled Gum tests (60/61 passed before correction). It was immediately pushed; CI run 38725416243 is in progress.
+- Latest Linux full Suite passed with 46 semantic cases and 13 sandbox deny assertions, including nonleader thread exec. Pointer arithmetic/partial-batch malformed iovec regression also passed. All primary Linux changes have been self-reviewed; no release tag yet.

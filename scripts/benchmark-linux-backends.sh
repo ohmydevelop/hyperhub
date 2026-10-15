@@ -357,7 +357,7 @@ HYPERHUB_DYNAMIC_HOOK_REPORT=$dynamic_hook_report \
     --password-file "$HOME/.hyperhub/runtime/api-key" \
     -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
     >/dev/null 2>"$temporary/dynamic-probe.stderr.log"
-if ! grep -Eq 'Linux hooks installed=3[67] optional_missing=[01] manifest=37' \
+if ! grep -Eq 'Linux hooks installed=3[89] optional_missing=[01] manifest=39' \
   "$temporary/dynamic-probe.stderr.log"; then
   cat "$temporary/dynamic-probe.stderr.log" >&2
   echo 'dynamic Linux Hook manifest was not fully installed' >&2
@@ -406,6 +406,12 @@ if report["missing_required"]:
 PY
 record_check static.ptrace_manifest "report=$hook_report"
 stop_serve
+
+# These assertions use operation semantics and destination identity independently
+# of the syscall-count manifest, with their own isolated configuration and Serve.
+python3 "$root/tests/benchmarks/linux-static/hook_regressions.py" \
+  --hyperhub "$hyperhub" --output "$result_dir/hook-regressions"
+record_check semantic.hook_regressions "DNS transactions/I/O, Fast Open, shared fd tables, mapping permissions"
 
 # Reproduce the dynamic ptrace route-refinement bug with a source fixture. The
 # client connects to localhost by IP at the syscall boundary; only the HTTP Host

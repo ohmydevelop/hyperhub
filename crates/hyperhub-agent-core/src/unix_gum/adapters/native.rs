@@ -64,6 +64,7 @@ fn hook_hit(id: usize) {
 }
 
 pub(crate) fn install_hook_report() {
+    install_exit_status();
     if std::env::var_os("HYPERHUB_DYNAMIC_HOOK_REPORT").is_none() {
         return;
     }
@@ -71,6 +72,87 @@ pub(crate) fn install_hook_report() {
         HOOK_REPORT_ENABLED.store(true, Ordering::Release);
         libc::atexit(write_hook_report);
     });
+}
+
+static EXIT_STATUS_DIRECTORY: OnceLock<std::path::PathBuf> = OnceLock::new();
+static EXIT_STATUS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn install_exit_status() {
+    let Some(directory) = std::env::var_os("HYPERHUB_GUM_EXIT_DIRECTORY") else {
+        return;
+    };
+    if EXIT_STATUS_DIRECTORY.set(directory.into()).is_ok() {
+        unsafe extern "C" {
+            fn on_exit(
+                callback: unsafe extern "C" fn(c_int, *mut c_void),
+                argument: *mut c_void,
+            ) -> c_int;
+        }
+        unsafe {
+            on_exit(record_exit_status, std::ptr::null_mut());
+        }
+    }
+}
+
+unsafe extern "C" fn record_exit_status(status: c_int, _: *mut c_void) {
+    let Some(directory) = EXIT_STATUS_DIRECTORY.get() else {
+        return;
+    };
+    let pid = libc::getpid();
+    let sequence = EXIT_STATUS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let Ok(path) = CString::new(directory.join(format!("{pid}.exit")).as_os_str().as_bytes())
+    else {
+        return;
+    };
+    let Ok(temporary) = CString::new(
+        directory
+            .join(format!("{pid}.{sequence}.tmp"))
+            .as_os_str()
+            .as_bytes(),
+    ) else {
+        return;
+    };
+    // Exit can run after fork or while another Agent thread owns runtime locks.
+    // Use the same raw-syscall approach as signal_ready: no Hook reentry or
+    // socket-state locks, and never follow a target-created symlink.
+    let fd = libc::syscall(
+        libc::SYS_openat,
+        libc::AT_FDCWD,
+        temporary.as_ptr(),
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        0o600,
+    ) as c_int;
+    if fd < 0 {
+        return;
+    }
+    let status = (status & 255).to_string();
+    let mut written = 0;
+    while written < status.len() {
+        let result = libc::syscall(
+            libc::SYS_write,
+            fd,
+            status.as_ptr().add(written),
+            status.len() - written,
+        );
+        if result < 0 && *libc::__errno_location() == libc::EINTR {
+            continue;
+        }
+        if result <= 0 {
+            break;
+        }
+        written += result as usize;
+    }
+    libc::syscall(libc::SYS_close, fd);
+    if written == status.len() {
+        libc::syscall(
+            libc::SYS_renameat,
+            libc::AT_FDCWD,
+            temporary.as_ptr(),
+            libc::AT_FDCWD,
+            path.as_ptr(),
+        );
+    }
+    libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, temporary.as_ptr(), 0);
 }
 
 extern "C" fn write_hook_report() {
@@ -469,6 +551,10 @@ pub unsafe extern "C" fn sendto(
     address: *const sockaddr,
     address_length: socklen_t,
 ) -> isize {
+    if flags & libc::MSG_FASTOPEN != 0 {
+        *libc::__errno_location() = libc::EOPNOTSUPP;
+        return -1;
+    }
     hook_hit(29);
     let original = sendto_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -506,6 +592,10 @@ pub unsafe extern "C" fn recvfrom(
 }
 
 pub unsafe extern "C" fn sendmsg(fd: c_int, message: *const libc::msghdr, flags: c_int) -> isize {
+    if flags & libc::MSG_FASTOPEN != 0 {
+        *libc::__errno_location() = libc::EOPNOTSUPP;
+        return -1;
+    }
     hook_hit(31);
     let original = sendmsg_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -774,6 +864,7 @@ pub(crate) const LISTENER_OPEN: usize = 1;
 pub(crate) const LISTENER_OPENAT: usize = 2;
 pub(crate) const LISTENER_FCNTL: usize = 3;
 pub(crate) const LISTENER_IOCTL: usize = 4;
+pub(crate) const LISTENER_EXIT: usize = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -806,6 +897,13 @@ pub(crate) unsafe extern "C" fn variadic_on_enter(
         return;
     }
     state.write(ListenerState::default());
+    if data as usize == LISTENER_EXIT {
+        record_exit_status(
+            gum::argument(context, 0) as usize as c_int,
+            std::ptr::null_mut(),
+        );
+        return;
+    }
     let active = INSIDE_HOOK.with(|inside| !inside.replace(true));
     if !active {
         return;
@@ -1114,15 +1212,26 @@ pub unsafe extern "C" fn dup3(fd: c_int, destination: c_int, flags: c_int) -> c_
     }
     result
 }
+fn mapping_operations(prot: c_int) -> Vec<crate::FileSandboxOperation> {
+    let mut operations = Vec::new();
+    if prot & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) != 0 {
+        operations.push(crate::FileSandboxOperation::Read);
+    }
+    if prot & libc::PROT_WRITE != 0 {
+        operations.push(crate::FileSandboxOperation::Write);
+    }
+    operations
+}
+
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
     hook_hit(24);
     let f: unsafe extern "C" fn(*mut c_void, usize, c_int) -> c_int = symbol(c"mprotect");
     let Some(_guard) = HookGuard::enter() else {
         return f(addr, len, prot);
     };
-    if prot & libc::PROT_WRITE != 0 {
-        for path in mapped_file_paths(addr as usize, len) {
-            if !crate::file_allows(&path, crate::FileSandboxOperation::Write) {
+    for path in mapped_file_paths(addr as usize, len) {
+        for operation in mapping_operations(prot) {
+            if !crate::file_allows(&path, operation) {
                 audit(crate::SandboxAuditKind::File, "protect", &path);
                 *libc::__errno_location() = libc::EACCES;
                 return -1;
@@ -1382,12 +1491,18 @@ pub unsafe extern "C" fn mmap(
     let Some(_guard) = HookGuard::enter() else {
         return original(addr, len, prot, flags, fd, off);
     };
-    if fd >= 0 && prot & libc::PROT_WRITE != 0 {
-        if let Ok(p) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
-            if !crate::file_allows(&p.to_string_lossy(), crate::FileSandboxOperation::Write) {
-                audit(crate::SandboxAuditKind::File, "write", &p.to_string_lossy());
-                *libc::__errno_location() = libc::EACCES;
-                return libc::MAP_FAILED;
+    if fd >= 0 && flags & libc::MAP_ANONYMOUS == 0 {
+        if let Ok(path) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+            for operation in mapping_operations(prot) {
+                if !crate::file_allows(&path.to_string_lossy(), operation) {
+                    audit(
+                        crate::SandboxAuditKind::File,
+                        "map",
+                        &path.to_string_lossy(),
+                    );
+                    *libc::__errno_location() = libc::EACCES;
+                    return libc::MAP_FAILED;
+                }
             }
         }
     }

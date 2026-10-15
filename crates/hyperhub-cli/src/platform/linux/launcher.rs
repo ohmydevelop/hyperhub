@@ -262,7 +262,7 @@ pub fn run_injected<F>(
 where
     F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
 {
-    let environment = merged_environment(env);
+    let mut environment = merged_environment(env);
     if backend == TargetBackend::PtraceSyscall {
         return super::syscall_supervisor::run(
             target,
@@ -273,6 +273,13 @@ where
             activate,
         );
     }
+
+    let exit_directory = GumExitDirectory::new()?;
+    environment.retain(|(name, _)| name != "HYPERHUB_GUM_EXIT_DIRECTORY");
+    environment.push((
+        "HYPERHUB_GUM_EXIT_DIRECTORY".into(),
+        exit_directory.0.clone().into_os_string(),
+    ));
 
     let runtime = runtime
         .ok_or("Linux requires libhyperhub_gum_agent.so")?
@@ -338,7 +345,7 @@ where
     })?;
     let result = match pty.as_mut() {
         Some(pty) => pty.relay(pid, process_start_time.unwrap()),
-        None => wait_for_process(pid, process_start_time),
+        None => wait_for_process(pid, process_start_time, &exit_directory.0),
     };
     monitor.stop();
     result
@@ -721,7 +728,34 @@ fn terminate_process(pid: u32) {
     let _ = unsafe { libc::waitpid(pid as i32, &mut status, 0) };
 }
 
-fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, String> {
+struct GumExitDirectory(PathBuf);
+
+impl GumExitDirectory {
+    fn new() -> Result<Self, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "hyperhub-gum-exit-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for GumExitDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn wait_for_process(
+    pid: u32,
+    expected_start_time: Option<u64>,
+    exit_directory: &Path,
+) -> Result<i32, String> {
     let mut observed_exit = wait_pidfd_status(pid);
     loop {
         // A blocking waitpid consumes ptrace stops used by Frida child gating.
@@ -746,7 +780,10 @@ fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, S
                 while process_exists(pid, expected_start_time) {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                return Ok(observed_exit.unwrap_or_default());
+                let reported = read_reported_exit(exit_directory, pid);
+                return observed_exit
+                    .or(reported)
+                    .ok_or_else(|| "Gum target exited without an observable exit status".into());
             }
             return Err(error.to_string());
         }
@@ -760,6 +797,22 @@ fn wait_for_process(pid: u32, expected_start_time: Option<u64>) -> Result<i32, S
     }
 }
 
+fn read_reported_exit(directory: &Path, pid: u32) -> Option<i32> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join(format!("{pid}.exit")))
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut value = String::new();
+    file.take(4).read_to_string(&mut value).ok()?;
+    value.parse::<u8>().ok().map(i32::from)
+}
+
 fn wait_pidfd_status(pid: u32) -> Option<i32> {
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32 };
     if pidfd < 0 {
@@ -771,7 +824,7 @@ fn wait_pidfd_status(pid: u32) -> Option<i32> {
             libc::P_PIDFD,
             pidfd as libc::id_t,
             &mut info,
-            libc::WEXITED | libc::WNOWAIT,
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
         )
     };
     unsafe { libc::close(pidfd) };
@@ -872,6 +925,22 @@ mod tests {
     fn process_state_reads_the_current_process_without_reaping_it() {
         let state = process_state(std::process::id()).unwrap();
         assert!(!matches!(state, 'Z' | 'X'));
+    }
+
+    #[test]
+    fn reported_exit_rejects_symlinks_and_invalid_statuses() {
+        use std::os::unix::fs::symlink;
+        let directory = GumExitDirectory::new().unwrap();
+        let path = directory.0.join("42.exit");
+        std::fs::write(&path, "7").unwrap();
+        assert_eq!(read_reported_exit(&directory.0, 42), Some(7));
+        std::fs::write(&path, "256").unwrap();
+        assert_eq!(read_reported_exit(&directory.0, 42), None);
+        std::fs::remove_file(&path).unwrap();
+        let other = directory.0.join("other");
+        std::fs::write(&other, "99").unwrap();
+        symlink(other, path).unwrap();
+        assert_eq!(read_reported_exit(&directory.0, 42), None);
     }
 
     #[test]

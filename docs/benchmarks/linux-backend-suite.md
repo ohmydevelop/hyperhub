@@ -55,12 +55,13 @@ target/benchmarks/linux-fixtures/<architecture>/
 | 分组 | Fixture/对象 | 必须验证的行为 |
 | --- | --- | --- |
 | 动态 ptrace 基线 | `linux-dynamic-probe`、`linux_http_credential_probe.py`、`linux_ptrace_hot_update_probe.c` | 动态 ELF 默认不依赖 Agent；覆盖 fork/exec、spawn、HTTP 凭证、既有会话文件/子进程沙盒热更新，以及自签名 TLS/SSH 的首次记录、复用和轮换拒绝 |
-| 动态 Gum 优化 | `linux-dynamic-probe` | 单文件 CLI 的内嵌 Agent 在显式 `--backend gum` 时无需 sidecar runtime，且 25 个动态 Hook descriptor 全部安装并命中 |
+| 动态 Gum 优化 | `linux-dynamic-probe` | 单文件 CLI 的内嵌 Agent 在显式 `--backend gum` 时无需 sidecar runtime，且动态 Hook manifest 全部安装，必测语义组全部命中 |
 | 后端边界 | 复制到构建树外的单文件 CLI | 动态/静态 ELF 默认继续进入 ptrace；动态 ELF 显式选择 Gum 时使用内嵌 Agent |
 | 静态 C | raw-syscall stripped static ELF | DNS 三种 I/O、TCP、descriptor、文件变体、clone/fork/exec/wait 和完整 manifest |
 | 静态 Go | `CGO_ENABLED=0` stripped binary | runtime 线程、raw syscall、根进程和 exec 后代 TCP |
 | 静态 Rust | musl stripped binary | 内联汇编 syscall、根进程和 exec 后代 TCP |
 | DNS | 本地 UDP DNS fixture | A/AAAA 响应恢复 `localhost`，连接审计保留域名 |
+| Hook 语义回归 | `hook_regressions.py` 与五个 C 源码 fixture | DNS vectored/batch I/O、多事务域名身份、Fast Open 明确拒绝、CLONE_FILES fd 复用、ptrace/Gum 文件映射权限及退出码；使用独立隔离 Serve |
 | Sandbox | C intent modes | read/write/create/delete/rename、fork、根 exec、后代 exec 全部 deny 并审计 |
 | 性能 | C/Go/Rust | native 与 HyperHub 中位数、增加时间和倍率 |
 
