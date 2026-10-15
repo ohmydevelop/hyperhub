@@ -5,7 +5,7 @@ fn main() {}
 mod probe {
     use std::mem::{size_of, zeroed};
     use std::ptr::{null, null_mut};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows_sys::Win32::Networking::WinSock::*;
     use windows_sys::Win32::System::Threading::{CreateEventW, SleepEx, WaitForSingleObject};
@@ -13,8 +13,10 @@ mod probe {
 
     static COMPLETED: AtomicBool = AtomicBool::new(false);
     static COMPLETION_STATUS: AtomicU32 = AtomicU32::new(u32::MAX);
+    static COMPLETION_IDENTITY: AtomicUsize = AtomicUsize::new(0);
 
-    unsafe extern "system" fn completed(error: u32, _: u32, _: *const OVERLAPPED) {
+    unsafe extern "system" fn completed(error: u32, _: u32, overlapped: *const OVERLAPPED) {
+        COMPLETION_IDENTITY.store(overlapped as usize, Ordering::Release);
         COMPLETION_STATUS.store(error, Ordering::Release);
         COMPLETED.store(true, Ordering::Release);
     }
@@ -89,6 +91,10 @@ mod probe {
                     "completion callback missing"
                 );
                 assert_eq!(COMPLETION_STATUS.load(Ordering::Acquire), 0);
+                assert_eq!(
+                    COMPLETION_IDENTITY.load(Ordering::Acquire),
+                    &overlapped as *const OVERLAPPED as usize
+                );
             } else {
                 assert_eq!(
                     WaitForSingleObject(event, 10000),
@@ -97,7 +103,14 @@ mod probe {
                 );
             }
         }
-        let terminal = GetAddrInfoExOverlappedResult(&overlapped);
+        if !callback {
+            assert_eq!(overlapped.hEvent, event, "caller event identity changed");
+        }
+        let terminal = if mode == "dns-poll" {
+            overlapped.Internal as i32
+        } else {
+            GetAddrInfoExOverlappedResult(&overlapped)
+        };
         if mode == "dns-cancel" {
             assert!(
                 terminal == 0 || terminal == WSA_E_CANCELLED || terminal == WSA_OPERATION_ABORTED,

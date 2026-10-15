@@ -85,7 +85,7 @@ rules = []
                     thread.start()
                     try:
                         for managed in (False, True):
-                            for mode in ("dns-event", "dns-callback", "dns-cancel", "connectex-empty", "connectex-data"):
+                            for mode in ("dns-event", "dns-poll", "dns-callback", "dns-cancel", "connectex-empty", "connectex-data"):
                                 command = [str(probe), mode, str(server.server_address[1])]
                                 if managed:
                                     command = [str(hyperhub), "run", "--password-file", str(work / "home/runtime/api-key"), "--", *command]

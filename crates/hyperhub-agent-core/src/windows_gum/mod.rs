@@ -75,7 +75,6 @@ pub(in crate::windows_gum) const DNSQUERY_A: u32 = 44;
 pub(in crate::windows_gum) const DNSQUERY_UTF8: u32 = 45;
 pub(in crate::windows_gum) const DNSQUERY_W: u32 = 46;
 pub(in crate::windows_gum) const DNSQUERY_EX: u32 = 47;
-pub(in crate::windows_gum) const GETADDRINFOEX_RESULT: u32 = 48;
 
 static AGENT_STARTED: AtomicBool = AtomicBool::new(false);
 static AGENT_OWNER_PID: AtomicU32 = AtomicU32::new(0);
@@ -426,10 +425,10 @@ mod tests {
 
     #[test]
     fn exposes_only_known_native_replacements() {
-        for hook_id in GETADDRINFO..=GETADDRINFOEX_RESULT {
+        for hook_id in GETADDRINFO..=DNSQUERY_EX {
             assert!(!hh_gum_replacement(hook_id).is_null());
         }
         assert!(hh_gum_replacement(0).is_null());
-        assert!(hh_gum_replacement(GETADDRINFOEX_RESULT + 1).is_null());
+        assert!(hh_gum_replacement(DNSQUERY_EX + 1).is_null());
     }
 }

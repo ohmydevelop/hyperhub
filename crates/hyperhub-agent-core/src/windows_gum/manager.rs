@@ -8,7 +8,7 @@ use windows_sys::Win32::Security::Authentication::Identity::{
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 
-use super::adapters::{async_dns::*, file::*, network::*, process::*, trust::*};
+use super::adapters::{file::*, network::*, process::*, trust::*};
 use super::gum::{
     find_connect_ex, find_export, find_msys_runtime_export, gum_interceptor_begin_transaction,
     gum_interceptor_end_transaction, gum_interceptor_replace, gum_interceptor_replace_fast,
@@ -19,11 +19,11 @@ use super::{
     CERT_OPEN_SYSTEM_STORE_W, CERT_VERIFY_POLICY, CLOSESOCKET, CONNECT, CONNECTEX,
     CREATE_PROCESS_A, CREATE_PROCESS_INTERNAL_A, CREATE_PROCESS_INTERNAL_W, CREATE_PROCESS_W,
     DNSQUERY_A, DNSQUERY_EX, DNSQUERY_UTF8, DNSQUERY_W, GETADDRINFO, GETADDRINFOEXA,
-    GETADDRINFOEXW, GETADDRINFOEX_RESULT, GETADDRINFOW, INITIALIZE_SECURITY_CONTEXT_A,
-    INITIALIZE_SECURITY_CONTEXT_W, IOCTLSOCKET, LDR_LOAD_DLL, MSYS_FORK, MSYS_VFORK, NT_CLOSE,
-    NT_CREATE_FILE, NT_CREATE_SECTION, NT_CREATE_USER_PROCESS, NT_DELETE_FILE, NT_DUPLICATE_OBJECT,
-    NT_MAP_VIEW_OF_SECTION, NT_OPEN_FILE, NT_READ_FILE, NT_SET_INFORMATION_FILE, NT_WRITE_FILE,
-    RECV, RECVFROM, SEND, SENDTO, WSACONNECT, WSARECV, WSARECVFROM, WSASEND, WSASENDTO,
+    GETADDRINFOEXW, GETADDRINFOW, INITIALIZE_SECURITY_CONTEXT_A, INITIALIZE_SECURITY_CONTEXT_W,
+    IOCTLSOCKET, LDR_LOAD_DLL, MSYS_FORK, MSYS_VFORK, NT_CLOSE, NT_CREATE_FILE, NT_CREATE_SECTION,
+    NT_CREATE_USER_PROCESS, NT_DELETE_FILE, NT_DUPLICATE_OBJECT, NT_MAP_VIEW_OF_SECTION,
+    NT_OPEN_FILE, NT_READ_FILE, NT_SET_INFORMATION_FILE, NT_WRITE_FILE, RECV, RECVFROM, SEND,
+    SENDTO, WSACONNECT, WSARECV, WSARECVFROM, WSASEND, WSASENDTO,
 };
 
 #[derive(Clone, Copy)]
@@ -579,15 +579,6 @@ pub(super) static BUILTIN_HOOKS: &[HookDescriptor] = &[
         hook_dns_query_ex,
         ORIGINAL_DNSQUERY_EX
     ),
-    export_hook!(
-        GETADDRINFOEX_RESULT,
-        "GetAddrInfoExOverlappedResult",
-        "dns.complete",
-        "ws2_32.dll",
-        "GetAddrInfoExOverlappedResult",
-        hook_getaddrinfo_ex_result,
-        ORIGINAL_GETADDRINFOEX_RESULT
-    ),
 ];
 
 const MSYS_HOOK_WAITING: u32 = 0;
@@ -1042,14 +1033,14 @@ mod tests {
                 Some(descriptor.name)
             );
         }
-        assert_eq!(BUILTIN_HOOKS.len(), GETADDRINFOEX_RESULT as usize);
+        assert_eq!(BUILTIN_HOOKS.len(), DNSQUERY_EX as usize);
         assert!(
             !descriptor(CONNECTEX)
                 .expect("ConnectEx descriptor")
                 .required
         );
         assert!(descriptor(0).is_none());
-        assert!(descriptor(GETADDRINFOEX_RESULT + 1).is_none());
+        assert!(descriptor(DNSQUERY_EX + 1).is_none());
     }
 
     #[test]

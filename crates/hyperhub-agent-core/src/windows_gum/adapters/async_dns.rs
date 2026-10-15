@@ -1,19 +1,52 @@
 //! Keep the native overlapped request and completion mechanisms intact. Record
 //! actual addresses before handing callback/results back to the application.
 use super::network::{socket_target_from_sockaddr, wide_string, GetAddrInfoExWFn};
-use crate::windows_gum::gum::{original, HookGuard, INSIDE_HOOK};
+use crate::windows_gum::gum::{HookGuard, INSIDE_HOOK};
 use crate::windows_gum::shared::*;
-use windows_sys::Win32::Networking::WinSock::{WSAENOBUFS, WSA_IO_INCOMPLETE, WSA_IO_PENDING};
+use std::cell::UnsafeCell;
+use std::sync::Arc;
+use windows_sys::Win32::Networking::WinSock::{WSAEINVAL, WSAENOBUFS, WSA_IO_PENDING};
+use windows_sys::Win32::System::Threading::SetEvent;
 
-#[derive(Clone)]
 struct Pending {
     hostname: String,
     result: usize,
     callback: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    caller: usize,
+    event: usize,
+    shadow: Option<UnsafeCell<OVERLAPPED>>,
 }
 
-fn pending() -> &'static Mutex<HashMap<usize, Pending>> {
-    static REQUESTS: OnceLock<Mutex<HashMap<usize, Pending>>> = OnceLock::new();
+// Native code owns writes to shadow until completion. The callback (or immediate
+// return path) reads it only after native completion, before notifying the caller.
+unsafe impl Send for Pending {}
+unsafe impl Sync for Pending {}
+
+impl Pending {
+    fn native_overlapped(&self) -> *const OVERLAPPED {
+        self.shadow
+            .as_ref()
+            .map_or(self.caller as *const OVERLAPPED, |value| value.get())
+    }
+
+    unsafe fn publish_event(&self, status: Option<i32>, notify: bool) {
+        if let Some(shadow) = &self.shadow {
+            let mut value = std::ptr::read(shadow.get());
+            if let Some(status) = status {
+                value.Internal = status as usize;
+            }
+            value.hEvent = self.event as HANDLE;
+            std::ptr::write(self.caller as *mut OVERLAPPED, value);
+            // Publish addresses and status before releasing an event waiter.
+            if notify {
+                SetEvent(self.event as HANDLE);
+            }
+        }
+    }
+}
+
+fn pending() -> &'static Mutex<HashMap<usize, Arc<Pending>>> {
+    static REQUESTS: OnceLock<Mutex<HashMap<usize, Arc<Pending>>>> = OnceLock::new();
     REQUESTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -46,11 +79,12 @@ unsafe extern "system" fn completion(status: u32, bytes: u32, overlapped: *const
         .and_then(|mut requests| requests.remove(&(overlapped as usize)));
     if let Some(request) = request {
         record(&request, status as i32);
+        request.publish_event(Some(status as i32), true);
         if let Some(callback) = request.callback {
             // A synchronous native completion may run inside the original Hook.
             // User code must still receive the ordinary instrumented environment.
             let inside = INSIDE_HOOK.with(|value| value.replace(false));
-            callback(status, bytes, overlapped);
+            callback(status, bytes, request.caller as *const OVERLAPPED);
             INSIDE_HOOK.with(|value| value.set(inside));
         }
     }
@@ -98,11 +132,27 @@ pub(super) unsafe fn resolve(
             handle,
         );
     };
-    let request = Pending {
+    // Windows requires either a callback with hEvent=NULL or a manual-reset
+    // event without a callback. Reject invalid combinations without a query.
+    let event = (*overlapped).hEvent;
+    if callback.is_some() == !event.is_null() {
+        return WSAEINVAL;
+    }
+    let shadow = if callback.is_none() {
+        let mut value = std::ptr::read(overlapped);
+        value.hEvent = null_mut();
+        Some(UnsafeCell::new(value))
+    } else {
+        None
+    };
+    let request = Arc::new(Pending {
         hostname: wide_string(node),
         result: result as usize,
         callback,
-    };
+        caller: overlapped as usize,
+        event: event as usize,
+        shadow,
+    });
     if request.hostname.parse::<IpAddr>().is_ok() {
         return original(
             node,
@@ -134,15 +184,24 @@ pub(super) unsafe fn resolve(
     if context.replacement.is_none() {
         return WSATRY_AGAIN;
     }
+    let key = request.native_overlapped() as usize;
     {
         let Ok(mut requests) = pending().lock() else {
             return WSAENOBUFS;
         };
         // Never overwrite a still-owned completion identity or grow without bound.
-        if requests.len() >= 4096 || requests.contains_key(&(overlapped as usize)) {
+        if requests.len() >= 4096
+            || requests
+                .values()
+                .any(|value| value.caller == request.caller)
+        {
             return WSAENOBUFS;
         }
-        requests.insert(overlapped as usize, request.clone());
+        requests.insert(key, Arc::clone(&request));
+    }
+    if request.shadow.is_some() {
+        // A caller can poll Internal directly instead of using the accessor.
+        (*(request.caller as *mut OVERLAPPED)).Internal = WSA_IO_PENDING as usize;
     }
     let status = original(
         node,
@@ -152,54 +211,117 @@ pub(super) unsafe fn resolve(
         hints,
         result,
         timeout,
-        overlapped,
-        callback.map(|_| completion as unsafe extern "system" fn(_, _, _)),
+        request.native_overlapped(),
+        Some(completion),
         handle,
     );
     if let Ok(mut requests) = pending().lock() {
         // An inline callback can already have handed the result to user code,
         // including freeing it. Only inspect a result we still own, under the
         // same lock used to transfer ownership to the completion trampoline.
-        if status == 0 {
-            if let Some(request) = requests.get(&(overlapped as usize)) {
-                record(request, status);
-            }
-        }
         // Native contract: completion is delivered only for WSA_IO_PENDING.
         // Immediate success/failure remains the caller's synchronous result.
-        if status != WSA_IO_PENDING {
-            requests.remove(&(overlapped as usize));
+        if status != WSA_IO_PENDING
+            && requests
+                .get(&key)
+                .is_some_and(|value| Arc::ptr_eq(value, &request))
+        {
+            record(&request, status);
+            request.publish_event((status == 0).then_some(status), status == 0);
+            requests.remove(&key);
         }
     }
     status
 }
 
-type ResultFn = unsafe extern "system" fn(*const OVERLAPPED) -> i32;
-pub(in crate::windows_gum) static ORIGINAL_GETADDRINFOEX_RESULT: AtomicPtr<c_void> =
-    AtomicPtr::new(null_mut());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::Networking::WinSock::{GetAddrInfoExOverlappedResult, WSA_E_CANCELLED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_result(
-    overlapped: *const OVERLAPPED,
-) -> i32 {
-    let Some(original) = original!(ORIGINAL_GETADDRINFOEX_RESULT, ResultFn) else {
-        return WSATRY_AGAIN;
-    };
-    let status = original(overlapped);
-    if status != WSA_IO_PENDING && status != WSA_IO_INCOMPLETE {
-        let request = pending().lock().ok().and_then(|mut requests| {
-            // Callback requests are released by their native callback, including cancellation.
-            if requests
-                .get(&(overlapped as usize))
-                .is_some_and(|value| value.callback.is_none())
-            {
-                requests.remove(&(overlapped as usize))
-            } else {
-                None
+    #[test]
+    fn event_completion_publishes_native_status_and_preserves_event() {
+        unsafe {
+            for status in [0, WSA_E_CANCELLED] {
+                let event = CreateEventW(null(), 1, 0, null());
+                assert!(!event.is_null());
+                let mut caller: OVERLAPPED = std::mem::zeroed();
+                caller.hEvent = event;
+                caller.Internal = WSA_IO_PENDING as usize;
+                let request = Arc::new(Pending {
+                    hostname: "localhost".into(),
+                    result: 0,
+                    callback: None,
+                    caller: (&mut caller as *mut OVERLAPPED) as usize,
+                    event: event as usize,
+                    shadow: Some(UnsafeCell::new(std::mem::zeroed())),
+                });
+                let native = request.native_overlapped();
+                pending().lock().unwrap().insert(native as usize, request);
+                completion(status as u32, 0, native);
+                assert_eq!(WaitForSingleObject(event, 0), WAIT_OBJECT_0);
+                assert_eq!(caller.hEvent, event);
+                assert_eq!(GetAddrInfoExOverlappedResult(&caller), status);
+                assert!(!pending().lock().unwrap().contains_key(&(native as usize)));
+                CloseHandle(event);
             }
-        });
-        if let Some(request) = request {
-            record(&request, status);
         }
     }
-    status
+
+    unsafe extern "system" fn user_callback(_: u32, bytes: u32, caller: *const OVERLAPPED) {
+        if !INSIDE_HOOK.with(Cell::get) {
+            (*(caller as *mut OVERLAPPED)).Internal = bytes as usize;
+        }
+    }
+
+    #[test]
+    fn callback_receives_caller_identity_outside_hook_guard() {
+        unsafe {
+            let mut caller: OVERLAPPED = std::mem::zeroed();
+            let address = (&mut caller as *mut OVERLAPPED) as usize;
+            pending().lock().unwrap().insert(
+                address,
+                Arc::new(Pending {
+                    hostname: "localhost".into(),
+                    result: 0,
+                    callback: Some(user_callback),
+                    caller: address,
+                    event: 0,
+                    shadow: None,
+                }),
+            );
+            INSIDE_HOOK.with(|value| value.set(true));
+            completion(1, 123, address as *const OVERLAPPED);
+            let restored = INSIDE_HOOK.with(|value| value.replace(false));
+            assert!(restored);
+            assert_eq!(caller.Internal, 123);
+            assert!(!pending().lock().unwrap().contains_key(&address));
+        }
+    }
+
+    #[test]
+    fn immediate_error_restores_overlapped_without_notification() {
+        unsafe {
+            let event = CreateEventW(null(), 1, 0, null());
+            assert!(!event.is_null());
+            let mut caller: OVERLAPPED = std::mem::zeroed();
+            caller.Internal = 123;
+            caller.hEvent = event;
+            let request = Pending {
+                hostname: "localhost".into(),
+                result: 0,
+                callback: None,
+                caller: (&mut caller as *mut OVERLAPPED) as usize,
+                event: event as usize,
+                shadow: Some(UnsafeCell::new(std::ptr::read(&caller))),
+            };
+            caller.Internal = WSA_IO_PENDING as usize;
+            request.publish_event(None, false);
+            assert_eq!(caller.Internal, 123);
+            assert_eq!(WaitForSingleObject(event, 0), WAIT_TIMEOUT);
+            CloseHandle(event);
+        }
+    }
 }

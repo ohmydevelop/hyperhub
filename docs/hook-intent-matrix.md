@@ -40,7 +40,7 @@ DNS 查询按 socket 身份、resolver、transaction ID 和 question 关联，�
 
 ## Windows 异步解析与组合建连
 
-`GetAddrInfoExW` 保留调用者的 OVERLAPPED、事件/回调和取消句柄。异步解析在原生回调或 `GetAddrInfoExOverlappedResult` 交付结果时登记域名；立即完成遵循原生同步返回约定。`ConnectEx` 无首包的路径继续支持，非空首包当前明确返回 `WSAEOPNOTSUPP`，避免首包先于 SOCKS 握手发送。Windows 源码回归通过 `scripts/test-windows-hooks.ps1` 集中运行，并接入 CI。
+`GetAddrInfoExW` 保留调用者的 OVERLAPPED、事件/回调和取消句柄。异步解析在原生完成回调内登记域名，再通知应用；事件模式使用内部 OVERLAPPED 写回调用者状态后触发原事件，不依赖 Hook `GetAddrInfoExOverlappedResult`。立即完成遵循原生同步返回约定。`ConnectEx` 无首包的路径继续支持，非空首包当前明确返回 `WSAEOPNOTSUPP`，避免首包先于 SOCKS 握手发送。Windows 源码回归通过 `scripts/test-windows-hooks.ps1` 集中运行，并接入 CI。
 
 ## 进程意图
 
