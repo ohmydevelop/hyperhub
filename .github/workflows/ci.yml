@@ -74,6 +74,19 @@ jobs:
         shell: pwsh
         run: .\scripts\build.ps1 -SkipTests
 
+      - name: Test Windows Hook semantics
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\test-windows-hooks.ps1
+
+      - name: Upload Windows Hook evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-hook-regressions
+          path: target/benchmarks/windows-hooks/*
+          if-no-files-found: warn
+
   linux-targets:
     name: Check Linux targets
     runs-on: ubuntu-latest

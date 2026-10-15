@@ -291,9 +291,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
     hints: *const ADDRINFOEXA,
     result: *mut *mut ADDRINFOEXA,
     timeout: *const TIMEVAL,
-    _overlapped: *const OVERLAPPED,
-    _completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
-    _name_handle: *mut HANDLE,
+    overlapped: *const OVERLAPPED,
+    completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    name_handle: *mut HANDLE,
 ) -> i32 {
     let Some(original) = original!(ORIGINAL_GETADDRINFOEXA, GetAddrInfoExAFn) else {
         return WSATRY_AGAIN;
@@ -307,9 +307,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
             hints,
             result,
             timeout,
-            null(),
-            None,
-            null_mut(),
+            overlapped,
+            completion,
+            name_handle,
         );
     }
     hook_result(
@@ -323,9 +323,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
                 hints,
                 result,
                 timeout,
-                null(),
-                None,
-                null_mut(),
+                overlapped,
+                completion,
+                name_handle,
             )
         },
         || {
@@ -338,9 +338,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
                     hints,
                     result,
                     timeout,
-                    null(),
-                    None,
-                    null_mut(),
+                    overlapped,
+                    completion,
+                    name_handle,
                 );
             };
             let Ok(hostname) = CStr::from_ptr(node.cast()).to_str() else {
@@ -355,9 +355,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
                     hints,
                     result,
                     timeout,
-                    null(),
-                    None,
-                    null_mut(),
+                    overlapped,
+                    completion,
+                    name_handle,
                 );
             }
             let family = hints
@@ -391,9 +391,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
                 &numeric,
                 result,
                 timeout,
-                null(),
-                None,
-                null_mut(),
+                overlapped,
+                completion,
+                name_handle,
             )
         },
     )
@@ -407,13 +407,28 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
     hints: *const ADDRINFOEXW,
     result: *mut *mut ADDRINFOEXW,
     timeout: *const TIMEVAL,
-    _overlapped: *const OVERLAPPED,
-    _completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
-    _name_handle: *mut HANDLE,
+    overlapped: *const OVERLAPPED,
+    completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
+    name_handle: *mut HANDLE,
 ) -> i32 {
     let Some(original) = original!(ORIGINAL_GETADDRINFOEXW, GetAddrInfoExWFn) else {
         return WSATRY_AGAIN;
     };
+    if !overlapped.is_null() || completion.is_some() {
+        return super::async_dns::resolve(
+            original,
+            node,
+            service,
+            namespace,
+            namespace_id,
+            hints,
+            result,
+            timeout,
+            overlapped,
+            completion,
+            name_handle,
+        );
+    }
     if node.is_null() || result.is_null() || INSIDE_HOOK.with(Cell::get) {
         return original(
             node,
@@ -423,9 +438,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
             hints,
             result,
             timeout,
-            null(),
-            None,
-            null_mut(),
+            overlapped,
+            completion,
+            name_handle,
         );
     }
     hook_result(
@@ -439,9 +454,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
                 hints,
                 result,
                 timeout,
-                null(),
-                None,
-                null_mut(),
+                overlapped,
+                completion,
+                name_handle,
             )
         },
         || {
@@ -458,9 +473,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
                     hints,
                     result,
                     timeout,
-                    null(),
-                    None,
-                    null_mut(),
+                    overlapped,
+                    completion,
+                    name_handle,
                 );
             }
             let family = hints
@@ -493,9 +508,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
                 &numeric,
                 result,
                 timeout,
-                null(),
-                None,
-                null_mut(),
+                overlapped,
+                completion,
+                name_handle,
             )
         },
     )
@@ -771,6 +786,10 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_connect_ex(
     let Some(original) = original!(ORIGINAL_CONNECTEX, ConnectExFn) else {
         return 0;
     };
+    if !INSIDE_HOOK.with(Cell::get) && !send_buffer.is_null() && send_length != 0 {
+        WSASetLastError(windows_sys::Win32::Networking::WinSock::WSAEOPNOTSUPP);
+        return 0;
+    }
     if INSIDE_HOOK.with(Cell::get) {
         return original(
             socket,

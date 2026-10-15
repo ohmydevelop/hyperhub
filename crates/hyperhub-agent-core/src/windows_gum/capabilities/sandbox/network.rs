@@ -420,6 +420,7 @@ mod tests {
             default_action,
             error_action: default_action.unwrap_or(crate::FirewallAction::Pass),
             rules: vec![crate::FirewallSnapshotRule {
+                protection: None,
                 id: "deny-private".into(),
                 action: crate::FirewallAction::Deny,
                 endpoints: vec![crate::FirewallEndpoint {
@@ -457,6 +458,7 @@ mod tests {
             default_action: None,
             error_action: crate::FirewallAction::Pass,
             rules: vec![crate::FirewallSnapshotRule {
+                protection: None,
                 id: "domain-port".into(),
                 action: crate::FirewallAction::Deny,
                 endpoints: vec![crate::FirewallEndpoint {
@@ -492,6 +494,7 @@ mod tests {
             default_action: None,
             error_action: crate::FirewallAction::Pass,
             rules: vec![crate::FirewallSnapshotRule {
+                protection: None,
                 id: "bound-endpoints".into(),
                 action: crate::FirewallAction::Deny,
                 endpoints: vec![
@@ -548,6 +551,7 @@ mod tests {
             default_action: None,
             error_action: crate::FirewallAction::Pass,
             rules: vec![crate::FirewallSnapshotRule {
+                protection: None,
                 id: "domain".into(),
                 action: crate::FirewallAction::Deny,
                 endpoints: vec![crate::FirewallEndpoint {
@@ -574,6 +578,7 @@ mod tests {
             default_action: None,
             error_action: crate::FirewallAction::Pass,
             rules: vec![crate::FirewallSnapshotRule {
+                protection: None,
                 id: "domain".into(),
                 action: crate::FirewallAction::Deny,
                 endpoints: vec![crate::FirewallEndpoint {
@@ -605,6 +610,7 @@ mod tests {
             default_action: None,
             error_action: crate::FirewallAction::Pass,
             rules: vec![crate::FirewallSnapshotRule {
+                protection: None,
                 id: "legacy-domain".into(),
                 action: crate::FirewallAction::Deny,
                 endpoints: vec![crate::FirewallEndpoint { target, port: None }],

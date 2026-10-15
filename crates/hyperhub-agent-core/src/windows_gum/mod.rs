@@ -75,6 +75,7 @@ pub(in crate::windows_gum) const DNSQUERY_A: u32 = 44;
 pub(in crate::windows_gum) const DNSQUERY_UTF8: u32 = 45;
 pub(in crate::windows_gum) const DNSQUERY_W: u32 = 46;
 pub(in crate::windows_gum) const DNSQUERY_EX: u32 = 47;
+pub(in crate::windows_gum) const GETADDRINFOEX_RESULT: u32 = 48;
 
 static AGENT_STARTED: AtomicBool = AtomicBool::new(false);
 static AGENT_OWNER_PID: AtomicU32 = AtomicU32::new(0);

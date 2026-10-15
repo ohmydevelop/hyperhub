@@ -1,3 +1,4 @@
+pub(in crate::windows_gum) mod async_dns;
 pub(in crate::windows_gum) mod file;
 pub(in crate::windows_gum) mod network;
 pub(in crate::windows_gum) mod process;

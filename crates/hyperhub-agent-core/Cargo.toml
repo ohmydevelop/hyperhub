@@ -13,6 +13,10 @@ crate-type = ["rlib", "cdylib"]
 default = []
 gum-agent = []
 
+[[example]]
+name = "windows_hook_probe"
+path = "../../tests/fixtures/windows_hook_probe.rs"
+
 [dependencies]
 arc-swap = "1"
 base64 = "0.22"
