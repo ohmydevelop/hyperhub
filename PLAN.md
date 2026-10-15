@@ -5,10 +5,10 @@ User authorization: repair the seven findings from the Fake-IP/coverage investig
 ## Milestones
 
 1. Confirm release version/process and executable verification environments. DONE: next release v0.2.10; origin/main is current; GitHub authentication works. Existing tag workflow builds Linux x86_64/aarch64 and Windows x64. Windows GNU cross-check is available; native Windows runs via CI.
-2. Linux implementation and local self-review DONE: full unified Suite passes with 46 independent semantic cases; CLI 137, Agent core 21, core 189 and Gum Agent 28 tests pass. Linux corrections are committed and pushed; Linux CI jobs passed.
+2. Linux implementation and local self-review DONE: full unified Suite passes with 46 independent semantic cases; CLI 137, Agent core 22, core 189 and Gum Agent 29 tests pass. Linux corrections are committed and pushed; Linux CI jobs passed.
 3. Windows implementation DONE: native CI passes Gum unit tests and 12 executable cases, including event/callback/cancel, raw status reads, empty/nonempty ConnectEx and exact gateway/domain audit assertions. All implementation commits were immediately pushed.
 4. Verification DONE: formatting, workspace all-target tests, Linux unified Suite and every cross-platform job in CI 38729792711 passed. Reviewed the final implementation and updated issue/bugfix records.
-5. Version 0.2.10 metadata and final records prepared. Commit and immediately push, require that exact commit's complete CI, then push v0.2.10 and verify all release assets. The tag and release are deliberately created only after the recorded implementation and final metadata pass CI.
+5. Release DONE: v0.2.10 at e8959f9 passed CI 38730652435, and release workflow 38731520406 published Linux x86_64/aarch64 and Windows x64. Downloaded all assets, verified archive SHA-256 and every inner manifest, confirmed installers match source, and passed published Linux x86_64 --help/doctor with embedded Agent verification. ARM64 was cross-built, not run on native hardware; macOS was not tested.
 
 ## Decisions and constraints
 
@@ -57,3 +57,7 @@ Commit grouping adjustment: commit Windows corrections and native Suite registra
 
 - Windows job 116404455847 in CI 38729792711 succeeded after the shared-key fix. Downloaded artifact confirms 12/12 zero exits and exactly four gateway connections, with localhost on all three DNS-positive cases. Linux unit/integration job passed; Linux cross-target Suite is finishing. Prepare final version metadata/docs commit, require its complete CI before pushing the release tag.
 - CI 38729792711 completed successfully across all three jobs. Final version update changes only workspace/lockfile versions, release default and verification records; no dependency upgrades or runtime behavior changes. Preserve the unrelated image and publish only after the final commit's CI succeeds.
+
+- Final version CI 38730652435 passed at e8959f9. Annotated tag v0.2.10 was pushed; release workflow 38731520406 succeeded, publishing all three platform archives, checksums and installers. Release notes were updated. Downloaded-artifact integrity and smoke verification are running before final handoff.
+
+- Release handoff evidence is complete: https://github.com/ohmydevelop/hyperhub/releases/tag/v0.2.10 is the latest non-draft, non-prerelease version. All three archive hashes and inner manifests match; downloaded x86_64 smoke tests pass. Evidence: target/diagnostics/release-fixes/release-assets/{verification.json,smoke.json}. Final documentation-only commit records completion; the release tag remains on the validated source commit.
