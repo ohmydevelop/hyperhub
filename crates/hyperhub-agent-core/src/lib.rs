@@ -229,9 +229,8 @@ mod tests {
     #[test]
     fn builds_domain_socks_handshake() {
         let mut core = configured_core();
-        core.gateway
-            .dns
-            .insert((2, vec![192, 0, 2, 1]), "github.com".into());
+        core.record_dns("github.com".into(), &[192, 0, 2, 1])
+            .unwrap();
         let plan = core.prepare_connect(42, 2, &[192, 0, 2, 1], 22).unwrap();
         assert_eq!(plan.connection_id, 7);
         assert_eq!(core.handshake(42, 0).unwrap(), [5, 1, 2]);
@@ -250,6 +249,26 @@ mod tests {
         let plan = core.prepare_connect(42, 2, &[127, 0, 0, 1], 18444).unwrap();
         assert_eq!(plan.should_intercept, 0);
         assert!(core.gateway.sockets.is_empty());
+    }
+
+    #[test]
+    fn dns_identity_survives_protocol_and_native_family_values() {
+        let mut core = configured_core();
+        let ipv4 = [192, 0, 2, 1];
+        let ipv6 = "2001:db8::1"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets();
+        for (address, families) in [(&ipv4[..], &[4, 2][..]), (&ipv6[..], &[6, 10, 23][..])] {
+            core.record_dns("example.test".into(), address).unwrap();
+            for family in families {
+                core.prepare_connect(42, *family, address, 443).unwrap();
+                assert!(matches!(
+                    &core.gateway.sockets[&42].target,
+                    TargetAddress::Domain(hostname) if hostname == "example.test"
+                ));
+            }
+        }
     }
 
     #[test]

@@ -135,13 +135,13 @@ pub(crate) fn firewall_snapshot() -> Option<Arc<FirewallSnapshot>> {
 
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn firewall_connect_target(
-    family: i32,
+    _family: i32,
     address: &[u8],
     port: u16,
 ) -> Option<FirewallConnectTarget> {
     let ip = parse_ip(address).ok()?;
     let core = state().lock().ok()?;
-    let hostname = core.gateway.dns.get(&(family, address.to_vec())).cloned();
+    let hostname = core.gateway.dns.get(&ip).cloned();
     let bypass = core.gateway.proxy == Some(SocketAddr::new(ip, port));
     Some(FirewallConnectTarget {
         hostname,

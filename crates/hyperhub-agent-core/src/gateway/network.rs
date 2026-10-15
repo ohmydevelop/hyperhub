@@ -23,7 +23,7 @@ pub(crate) struct SocketState {
 pub(crate) struct GatewayState {
     pub(crate) proxy: Option<SocketAddr>,
     pub(crate) next_connection_id: u64,
-    pub(crate) dns: HashMap<(i32, Vec<u8>), String>,
+    pub(crate) dns: HashMap<IpAddr, String>,
     pub(crate) sockets: HashMap<u64, SocketState>,
     pub(crate) nonblocking_sockets: HashSet<u64>,
 }

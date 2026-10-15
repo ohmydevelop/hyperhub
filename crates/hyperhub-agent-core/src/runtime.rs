@@ -179,10 +179,19 @@ impl AgentRuntime {
         Ok(())
     }
 
+    pub(crate) fn record_dns(&mut self, hostname: String, address: &[u8]) -> Result<(), i32> {
+        let ip = parse_ip(address)?;
+        if !self.session.initialized {
+            return Err(HH_ERR_NOT_INITIALIZED);
+        }
+        self.gateway.dns.insert(ip, hostname);
+        Ok(())
+    }
+
     pub(crate) fn prepare_connect(
         &mut self,
         socket: u64,
-        family: i32,
+        _family: i32,
         address: &[u8],
         port: u16,
     ) -> Result<HhConnectPlan, i32> {
@@ -197,7 +206,7 @@ impl AgentRuntime {
         let target = self
             .gateway
             .dns
-            .get(&(family, address.to_vec()))
+            .get(&target_ip)
             .cloned()
             .map(TargetAddress::Domain)
             .unwrap_or(TargetAddress::Ip(target_ip));

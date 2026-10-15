@@ -104,9 +104,13 @@ rules = []
                 audit = []
                 for path in (work / "home/audit").rglob("security-alerts.jsonl"):
                     audit.extend(json.loads(line) for line in path.read_text().splitlines())
+                (output / "audit.json").write_text(json.dumps(audit, indent=2) + "\n")
                 dns = [entry for entry in audit if entry.get("event") == "connect"
                        and entry.get("destination_hostname") == "localhost"]
-                assert len(dns) >= 2, "async DNS connections lost hostname attribution"
+                assert len(dns) == 3, f"async DNS connections lost hostname attribution: {audit}"
+                assert len({entry["session_id"] for entry in dns}) == 3, "DNS modes did not each reach the gateway"
+                connections = [entry for entry in audit if entry.get("event") == "connect"]
+                assert len(connections) == 4, f"unexpected managed connection side effects: {connections}"
             finally:
                 serve.terminate()
                 try:

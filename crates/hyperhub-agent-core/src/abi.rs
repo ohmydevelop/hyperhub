@@ -38,7 +38,7 @@ use std::net::IpAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 
-use crate::{parse_ip, resolve_fake_control, state};
+use crate::{resolve_fake_control, state};
 
 fn ffi_result<F>(f: F) -> i32
 where
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn hh_agent_resolve_name(
 #[no_mangle]
 pub unsafe extern "C" fn hh_agent_record_dns(
     hostname: *const c_char,
-    family: i32,
+    _family: i32,
     address: *const u8,
     address_length: usize,
 ) -> i32 {
@@ -204,14 +204,10 @@ pub unsafe extern "C" fn hh_agent_record_dns(
             return Err(HH_ERR_INVALID);
         }
         let address = unsafe { bytes(address, address_length)? };
-        parse_ip(address)?;
         let mut core = state().lock().map_err(|_| HH_ERR_INVALID)?;
-        if !core.session.initialized {
-            return Err(HH_ERR_NOT_INITIALIZED);
-        }
-        core.gateway
-            .dns
-            .insert((family, address.to_vec()), hostname);
+        // Keep the ABI argument, but derive identity from the address itself:
+        // adapters use both protocol versions (4/6) and native AF_* values.
+        core.record_dns(hostname, address)?;
         Ok(HH_OK)
     })
 }
