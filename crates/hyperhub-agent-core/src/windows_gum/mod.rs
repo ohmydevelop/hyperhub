@@ -399,10 +399,10 @@ mod tests {
 
     #[test]
     fn exposes_only_known_native_replacements() {
-        for hook_id in GETADDRINFO..=LDR_LOAD_DLL {
+        for hook_id in GETADDRINFO..=GETADDRINFOEX_RESULT {
             assert!(!hh_gum_replacement(hook_id).is_null());
         }
         assert!(hh_gum_replacement(0).is_null());
-        assert!(hh_gum_replacement(LDR_LOAD_DLL + 1).is_null());
+        assert!(hh_gum_replacement(GETADDRINFOEX_RESULT + 1).is_null());
     }
 }
