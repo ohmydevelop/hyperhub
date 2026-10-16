@@ -1,4 +1,18 @@
-# Hook correctness fixes and release
+# Runtime key persistence correction (2026-10-16)
+
+User request: change the unreasonable offline-save key rotation and fix the resulting stale runtime envelope. Preserve the user's real encrypted configuration, API key, runtime envelope, and unrelated image. Diagnose/verify with isolated temporary homes and dummy credentials; administrator entry remains a human terminal action.
+
+1. Persistence paths reviewed. DONE: TUI offline saves rotated descriptors; runtime wrapping was delayed to normal exit; refresh could persist an unauthenticated key, and discarding a password edit returned the unsaved password.
+2. DONE: ordinary TUI saves preserve the descriptor; explicit password changes rotate it. Save-time wrapping supports custom API keys, discards retain the last persisted password, and refresh validates the administrator password before writing.
+3. DONE: startup preflight checks generation and decryptability, and authenticated approval persistence repairs existing envelopes. Existing container/ABI formats are unchanged.
+4. DONE locally: the old implementation failed the new offline-save regression; CLI 145, Agent core 22, core 189, isolated CLI lifecycle, formatting, Skill contract and Windows GNU all-target checks passed. Eight module regressions cover persistence and authentication transitions. Native Windows and concentrated Linux checks run in CI on the exact pushed commit. No external target-program Benchmark is needed for this persistence/CLI bug.
+5. Self-review and daily records are complete. Commit under the repository skill, immediately push and follow the exact commit's CI; the GitHub run is the durable final CI record. This request changes the implementation; do not infer authorization to replace the user's installed binary, input their password, or publish an additional release.
+
+Decisions: do not replace encryption formats, delete/recreate user configuration, or silently regenerate an API key. Ordinary saves use a fresh AEAD nonce under the existing key, without unnecessary KDF rotation. Keep password rotation prohibited while Serve is running, including a runtime recheck at save time. Multi-file write failures must be reported, not presented as a successful save.
+
+Progress: the offline-save regression was run against the old implementation and failed with a descriptor change (target/diagnostics/runtime-key-fix/before.log). The same test now passes. CLI module suite passed 145 tests, including eight new persistence/authentication regressions. Workspace all-target tests, isolated CLI lifecycle and Windows GNU all-target checks passed. Implementation keeps existing container formats and makes envelope failures retryable; it does not introduce a multi-file transaction or claim crash-atomic password rotation. All local evidence is under target/diagnostics/runtime-key-fix/.
+
+# Completed prior task: Hook correctness fixes and release
 
 User authorization: repair the seven findings from the Fake-IP/coverage investigation, verify the fixes, and publish a new release. Preserve the unrelated `Pasted image.png`. The issue note from this investigation is task-owned.
 

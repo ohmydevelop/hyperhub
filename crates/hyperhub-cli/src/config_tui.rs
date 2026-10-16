@@ -368,6 +368,7 @@ struct App {
     config: Config,
     password: Zeroizing<String>,
     previous_password: Option<Zeroizing<String>>,
+    runtime_keys: Option<crate::password::RuntimeKeyPaths>,
     path: PathBuf,
     root_certificate_cache: Option<Vec<RootCertificateView>>,
     category: NavNode,
@@ -427,6 +428,7 @@ pub fn run(
     config: Config,
     live: bool,
     newly_initialized: bool,
+    api_key_file: Option<&Path>,
 ) -> Result<TuiResult, String> {
     enable_raw_mode().map_err(|error| error.to_string())?;
     let _guard = TerminalGuard;
@@ -447,6 +449,7 @@ pub fn run(
         config,
         password,
         previous_password: None,
+        runtime_keys: Some(crate::password::RuntimeKeyPaths::current(api_key_file)?),
         path: path.to_owned(),
         root_certificate_cache: None,
         category: CATEGORY_GATEWAY,
@@ -536,11 +539,16 @@ pub fn run(
             .map_err(|error| error.to_string())?;
     }
     terminal.show_cursor().map_err(|error| error.to_string())?;
+    finish(app)
+}
+
+fn finish(app: App) -> Result<TuiResult, String> {
     if !app.saved && app.dirty && !app.discarded {
         return Err("configuration changes were not saved".into());
     }
     Ok(TuiResult {
-        password: app.password,
+        // An unsaved password edit must not replace the working runtime key on exit.
+        password: app.previous_password.unwrap_or(app.password),
     })
 }
 
@@ -4437,32 +4445,64 @@ fn next_id<'a>(prefix: &str, existing: impl Iterator<Item = &'a str>) -> String 
 }
 
 fn save(app: &mut App) -> Result<(), String> {
-    app.config.validate().map_err(|error| error.to_string())?;
     // 保存时重新探测 Serve，避免 TUI 早于 Serve 启动导致热更新被跳过。
     let live = app.live || crate::serve_is_running();
-    // Serve 运行时复用现有 KDF descriptor，保证派生出的 session_auth_key 不变，
-    // 热更新证明才能通过 serve 校验；非运行时每次保存轮换 descriptor。
-    let descriptor = if live {
-        config_store::read_descriptor(&app.path).unwrap_or_else(|_| config_store::new_descriptor())
+    save_with_liveness(app, live)
+}
+
+fn save_with_liveness(app: &mut App, live: bool) -> Result<(), String> {
+    app.config.validate().map_err(|error| error.to_string())?;
+    let password_changed = app
+        .previous_password
+        .as_ref()
+        .is_some_and(|previous| previous.as_bytes() != app.password.as_bytes());
+    if live && password_changed {
+        return Err("Serve 正在运行：请停止 Serve 后再保存新密码".into());
+    }
+    let persisted = if app.path.is_file() {
+        let descriptor =
+            config_store::read_descriptor(&app.path).map_err(|error| error.to_string())?;
+        let password = app.previous_password.as_ref().unwrap_or(&app.password);
+        let keyring = config_store::ConfigKeyring::derive(password.as_bytes(), descriptor)
+            .map_err(|error| error.to_string())?;
+        config_store::load_encrypted_with_keyring(&app.path, &keyring)
+            .map_err(|error| error.to_string())?;
+        Some(keyring)
     } else {
-        config_store::new_descriptor()
+        None
     };
-    if let Some(previous) = app.previous_password.take() {
+    // Ordinary saves retain the current key generation, including offline saves.
+    // AEAD encryption still creates a fresh nonce for every write.
+    let keyring = match persisted {
+        Some(keyring) if !password_changed => keyring,
+        _ => config_store::ConfigKeyring::derive(
+            app.password.as_bytes(),
+            config_store::new_descriptor(),
+        )
+        .map_err(|error| error.to_string())?,
+    };
+    let api_key = app
+        .runtime_keys
+        .as_ref()
+        .map(|paths| crate::password::ensure_api_key(Some(&paths.api_key)).map(|(_, key)| key))
+        .transpose()?;
+    if let Some(previous) = app.previous_password.as_ref().filter(|_| password_changed) {
         config_store::reencrypt_root_certificates(
             &app.path,
             previous.as_bytes(),
             app.password.as_bytes(),
-            &descriptor,
+            keyring.descriptor(),
         )
         .map_err(|error| error.to_string())?;
     }
-    config_store::save_encrypted_with_descriptor(
-        &app.path,
-        &app.config,
-        app.password.as_bytes(),
-        &descriptor,
-    )
-    .map_err(|error| error.to_string())?;
+    config_store::save_encrypted_with_keyring(&app.path, &app.config, &keyring)
+        .map_err(|error| error.to_string())?;
+    // The new password is now persisted even if the subsequent envelope write fails.
+    app.previous_password = None;
+    if let (Some(paths), Some(api_key)) = (&app.runtime_keys, api_key) {
+        paths.save_with_api_key(&keyring, api_key.as_bytes())
+            .map_err(|error| format!("configuration saved, but {error}; retry saving or repair the runtime key with `hyperhub config`"))?;
+    }
     let _ = config_store::reconcile_root_certificates(
         &app.path,
         app.config
@@ -6697,6 +6737,197 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn offline_save_retains_existing_runtime_unlock() {
+        let directory = std::env::temp_dir().join(format!(
+            "hyperhub-offline-save-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut app = test_app();
+        app.path = directory.join("config.bin");
+        let mut descriptor = config_store::new_descriptor();
+        descriptor.memory_kib = 8192;
+        descriptor.iterations = 1;
+        let keyring =
+            config_store::ConfigKeyring::derive(app.password.as_bytes(), descriptor.clone())
+                .unwrap();
+        config_store::save_encrypted_with_keyring(&app.path, &app.config, &keyring).unwrap();
+        let runtime_path = directory.join("runtime").join("config-key.bin");
+        config_store::save_runtime_key(&runtime_path, &keyring, b"test-api-key").unwrap();
+        let previous_bytes = std::fs::read(&app.path).unwrap();
+        app.config.debug = true;
+        app.dirty = true;
+        save_with_liveness(&mut app, false).unwrap();
+        assert_eq!(
+            config_store::read_descriptor(&app.path).unwrap(),
+            descriptor
+        );
+        assert_ne!(std::fs::read(&app.path).unwrap(), previous_bytes);
+        let runtime = config_store::load_runtime_key(&runtime_path, b"test-api-key").unwrap();
+        assert!(
+            config_store::load_encrypted_with_keyring(&app.path, &runtime)
+                .unwrap()
+                .config
+                .debug
+        );
+        assert_eq!(
+            runtime.session_auth_key().unwrap().as_slice(),
+            keyring.session_auth_key().unwrap().as_slice()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn persistence_fixture() -> (App, PathBuf) {
+        let directory = std::env::temp_dir().join(format!(
+            "hyperhub-tui-persistence-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut app = test_app();
+        app.path = directory.join("config.bin");
+        let mut descriptor = config_store::new_descriptor();
+        descriptor.memory_kib = 8192;
+        descriptor.iterations = 1;
+        let keyring =
+            config_store::ConfigKeyring::derive(app.password.as_bytes(), descriptor).unwrap();
+        config_store::save_encrypted_with_keyring(&app.path, &app.config, &keyring).unwrap();
+        let paths = crate::password::RuntimeKeyPaths {
+            api_key: directory.join("private").join("custom-api-key"),
+            envelope: directory.join("runtime").join("config-key.bin"),
+        };
+        paths.save(&keyring).unwrap();
+        app.runtime_keys = Some(paths);
+        (app, directory)
+    }
+
+    #[test]
+    fn save_repairs_stale_envelope_before_editor_exit_with_custom_api_key() {
+        let (mut app, directory) = persistence_fixture();
+        let paths = app.runtime_keys.as_ref().unwrap();
+        let api_key = std::fs::read(&paths.api_key).unwrap();
+        let descriptor = config_store::read_descriptor(&app.path).unwrap();
+        let mut stale = descriptor.clone();
+        stale.config_id[0] ^= 1;
+        let stale = config_store::ConfigKeyring::derive(b"password", stale).unwrap();
+        paths.save(&stale).unwrap();
+        app.config.debug = true;
+        save_with_liveness(&mut app, false).unwrap();
+        let paths = app.runtime_keys.as_ref().unwrap();
+        let runtime = paths.load_for_config(&app.path).unwrap();
+        assert_eq!(runtime.descriptor(), &descriptor);
+        assert!(
+            config_store::load_encrypted_with_keyring(&app.path, &runtime)
+                .unwrap()
+                .config
+                .debug
+        );
+        assert_eq!(std::fs::read(&paths.api_key).unwrap(), api_key);
+        assert!(!directory.join("runtime").join("api-key").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn password_save_rotates_key_and_updates_envelope_before_editor_exit() {
+        let (mut app, directory) = persistence_fixture();
+        let descriptor = config_store::read_descriptor(&app.path).unwrap();
+        app.previous_password = Some(app.password.clone());
+        app.password = Zeroizing::new("new test password".into());
+        app.dirty = true;
+        save_with_liveness(&mut app, false).unwrap();
+        let runtime = app
+            .runtime_keys
+            .as_ref()
+            .unwrap()
+            .load_for_config(&app.path)
+            .unwrap();
+        assert_ne!(runtime.descriptor(), &descriptor);
+        assert!(config_store::load_encrypted(&app.path, b"password").is_err());
+        assert!(config_store::load_encrypted(&app.path, b"new test password").is_ok());
+        assert!(app.previous_password.is_none());
+        let rotated = runtime.descriptor().clone();
+        save_with_liveness(&mut app, false).unwrap();
+        assert_eq!(config_store::read_descriptor(&app.path).unwrap(), rotated);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn discarded_password_edit_returns_last_persisted_password() {
+        let mut app = test_app();
+        app.previous_password = Some(app.password.clone());
+        app.password = Zeroizing::new("unsaved password".into());
+        app.dirty = true;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE),
+        )
+        .unwrap();
+        assert_eq!(finish(app).unwrap().password.as_str(), "password");
+    }
+
+    #[test]
+    fn password_save_rechecks_live_serve_before_any_write() {
+        let (mut app, directory) = persistence_fixture();
+        let config = std::fs::read(&app.path).unwrap();
+        let envelope = std::fs::read(&app.runtime_keys.as_ref().unwrap().envelope).unwrap();
+        app.previous_password = Some(app.password.clone());
+        app.password = Zeroizing::new("new test password".into());
+        assert!(save_with_liveness(&mut app, true)
+            .unwrap_err()
+            .contains("Serve 正在运行"));
+        assert_eq!(std::fs::read(&app.path).unwrap(), config);
+        assert_eq!(
+            std::fs::read(&app.runtime_keys.as_ref().unwrap().envelope).unwrap(),
+            envelope
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_api_key_prevents_configuration_commit() {
+        let (mut app, directory) = persistence_fixture();
+        let paths = app.runtime_keys.as_ref().unwrap();
+        let config = std::fs::read(&app.path).unwrap();
+        let envelope = std::fs::read(&paths.envelope).unwrap();
+        std::fs::write(&paths.api_key, b"invalid-api-key").unwrap();
+        app.config.debug = true;
+        assert!(save_with_liveness(&mut app, false).is_err());
+        assert_eq!(std::fs::read(&app.path).unwrap(), config);
+        assert_eq!(
+            std::fs::read(&app.runtime_keys.as_ref().unwrap().envelope).unwrap(),
+            envelope
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_envelope_write_reports_partial_save_and_allows_password_save_retry() {
+        let (mut app, directory) = persistence_fixture();
+        let envelope = app.runtime_keys.as_ref().unwrap().envelope.clone();
+        let blocked = directory.join("directory-not-envelope");
+        std::fs::create_dir(&blocked).unwrap();
+        app.runtime_keys.as_mut().unwrap().envelope = blocked;
+        app.previous_password = Some(app.password.clone());
+        app.password = Zeroizing::new("new test password".into());
+        app.dirty = true;
+        assert!(save_with_liveness(&mut app, false)
+            .unwrap_err()
+            .contains("configuration saved, but"));
+        assert!(!app.saved);
+        assert!(app.dirty);
+        let descriptor = config_store::read_descriptor(&app.path).unwrap();
+        app.runtime_keys.as_mut().unwrap().envelope = envelope;
+        save_with_liveness(&mut app, false).unwrap();
+        let runtime = app
+            .runtime_keys
+            .as_ref()
+            .unwrap()
+            .load_for_config(&app.path)
+            .unwrap();
+        assert_eq!(runtime.descriptor(), &descriptor);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn renders_at_supported_terminal_sizes() {
         for (width, height) in [(80, 24), (120, 40), (200, 60)] {
             let backend = TestBackend::new(width, height);
@@ -6705,6 +6936,7 @@ mod tests {
                 config: Config::default(),
                 password: Zeroizing::new("password".into()),
                 previous_password: None,
+                runtime_keys: None,
                 path: "config.bin".into(),
                 root_certificate_cache: None,
                 category: CATEGORY_GATEWAY,
@@ -6740,6 +6972,7 @@ mod tests {
             config: Config::default(),
             password: Zeroizing::new("password".into()),
             previous_password: None,
+            runtime_keys: None,
             path: "config.bin".into(),
             root_certificate_cache: None,
             category: CATEGORY_GATEWAY,
@@ -8626,6 +8859,7 @@ mod tests {
             config: Config::default(),
             password: Zeroizing::new("password".into()),
             previous_password: None,
+            runtime_keys: None,
             path: "config.bin".into(),
             root_certificate_cache: None,
             category: CATEGORY_GATEWAY,

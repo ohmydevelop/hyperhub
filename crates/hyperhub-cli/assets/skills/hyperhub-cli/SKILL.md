@@ -279,6 +279,7 @@ hyperhub run --password-file /path/to/api-key -- program args...
 - 只有用户明确要求 start/stop/restart 时执行；配置热更新不自动重启。
 - Serve 首次初始化会生成权限受限的 `runtime/api-key` 和 API Key 加密的 `runtime/config-key.bin`；运行封套只用于解锁已审批配置，不取代配置修改时的管理员确认。
 - 常规 `start`/`restart` 不需要管理员密码。只有首次创建配置、旧配置迁移、API Key 轮换或封套修复时才给 `start` 传 `--admin-password-file`。
+- 普通配置保存保持现有密钥代次，并在保存时刷新运行封套，无需等编辑器退出；只有明确修改管理员密码才轮换配置密钥。遇到 `runtime configuration key is out of date` 时，请用户在真实终端运行 `hyperhub config`，验证管理员密码后不作修改、正常退出，或使用上述管理员密码文件修复路径；不要删除或重建原配置。
 - Linux 默认使用 ptrace；只有用户明确要求 Gum 时才加 `--backend gum`。
 - 目标测试使用 `--` 分隔 HyperHub 参数和目标程序参数。
 

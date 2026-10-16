@@ -454,9 +454,7 @@ fn persist_prepared(
 ) -> Result<ApplyOutcome, String> {
     save_encrypted_with_keyring(path, &prepared.config, &active.keyring)
         .map_err(|error| error.to_string())?;
-    if !crate::password::runtime_key_exists()? {
-        crate::password::save_runtime_keyring(&active.keyring, None)?;
-    }
+    crate::password::save_runtime_keyring(&active.keyring, None)?;
     let _ = config_store::reconcile_root_certificates(
         path,
         prepared

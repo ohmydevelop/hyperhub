@@ -106,33 +106,92 @@ pub fn runtime_key_exists() -> Result<bool, String> {
     Ok(default_runtime_key_path()?.is_file())
 }
 
+pub struct RuntimeKeyPaths {
+    pub api_key: PathBuf,
+    pub envelope: PathBuf,
+}
+
+impl RuntimeKeyPaths {
+    pub fn current(api_key_file: Option<&Path>) -> Result<Self, String> {
+        Ok(Self {
+            api_key: api_key_file
+                .map(Path::to_owned)
+                .map(Ok)
+                .unwrap_or_else(default_api_key_path)?,
+            envelope: default_runtime_key_path()?,
+        })
+    }
+
+    pub fn save(
+        &self,
+        keyring: &hyperhub_core::config_store::ConfigKeyring,
+    ) -> Result<PathBuf, String> {
+        let (_, api_key) = ensure_api_key(Some(&self.api_key))?;
+        self.save_with_api_key(keyring, api_key.as_bytes())?;
+        Ok(self.api_key.clone())
+    }
+
+    pub fn save_with_api_key(
+        &self,
+        keyring: &hyperhub_core::config_store::ConfigKeyring,
+        api_key: &[u8],
+    ) -> Result<(), String> {
+        hyperhub_core::config_store::save_runtime_key(&self.envelope, keyring, api_key)
+            .map_err(|error| format!("cannot save runtime configuration key: {error}"))
+    }
+
+    pub fn load_for_config(
+        &self,
+        config_path: &Path,
+    ) -> Result<hyperhub_core::config_store::ConfigKeyring, String> {
+        use hyperhub_core::config_store;
+        let api_key = acquire_api_key(Some(&self.api_key))?;
+        let keyring = config_store::load_runtime_key(&self.envelope, api_key.as_bytes())
+            .map_err(|error| format!(
+                "cannot unlock runtime configuration with the API key: {error}; run `hyperhub config` or `hyperhub start --admin-password-file <file>` to repair the runtime key"
+            ))?;
+        let descriptor =
+            config_store::read_descriptor(config_path).map_err(|error| error.to_string())?;
+        if keyring.descriptor() != &descriptor {
+            return Err("runtime configuration key is out of date for the current configuration; run `hyperhub config` or `hyperhub start --admin-password-file <file>` to repair it".into());
+        }
+        config_store::load_encrypted_with_keyring(config_path, &keyring).map_err(|error| format!(
+            "runtime key cannot unlock the current configuration: {error}; run `hyperhub config` or `hyperhub start --admin-password-file <file>` to repair it"
+        ))?;
+        Ok(keyring)
+    }
+}
+
+pub fn refresh_runtime_key_for_config(
+    config_path: &Path,
+    admin_password: &[u8],
+    paths: &RuntimeKeyPaths,
+) -> Result<hyperhub_core::config_store::ConfigKeyring, String> {
+    use hyperhub_core::config_store;
+    let descriptor =
+        config_store::read_descriptor(config_path).map_err(|error| error.to_string())?;
+    let keyring = config_store::ConfigKeyring::derive(admin_password, descriptor)
+        .map_err(|error| error.to_string())?;
+    // Authenticate before replacing an existing working envelope.
+    config_store::load_encrypted_with_keyring(config_path, &keyring)
+        .map_err(|error| error.to_string())?;
+    paths.save(&keyring)?;
+    Ok(keyring)
+}
+
 pub fn load_runtime_keyring(
     api_key_file: Option<&Path>,
 ) -> Result<hyperhub_core::config_store::ConfigKeyring, String> {
-    let api_key = acquire_api_key(api_key_file)?;
-    hyperhub_core::config_store::load_runtime_key(
-        &default_runtime_key_path()?,
-        api_key.as_bytes(),
+    RuntimeKeyPaths::current(api_key_file)?.load_for_config(
+        &hyperhub_core::config_store::default_config_path().map_err(|error| error.to_string())?,
     )
-    .map_err(|error| {
-        format!(
-            "cannot unlock runtime configuration with the API key: {error}; run `hyperhub start --admin-password-file <file>` once to migrate or repair the runtime key"
-        )
-    })
 }
 
 pub fn save_runtime_keyring(
     keyring: &hyperhub_core::config_store::ConfigKeyring,
     api_key_file: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let (api_key_path, api_key) = ensure_api_key(api_key_file)?;
-    hyperhub_core::config_store::save_runtime_key(
-        &default_runtime_key_path()?,
-        keyring,
-        api_key.as_bytes(),
-    )
-    .map_err(|error| format!("cannot save runtime configuration key: {error}"))?;
-    Ok(api_key_path)
+    RuntimeKeyPaths::current(api_key_file)?.save(keyring)
 }
 
 pub fn acquire_api_key(path: Option<&Path>) -> Result<Zeroizing<String>, String> {
@@ -302,6 +361,62 @@ fn validate(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_unlock_distinguishes_stale_generation_and_preserves_key_on_wrong_password() {
+        use hyperhub_core::config_store;
+        let directory = std::env::temp_dir().join(format!(
+            "hyperhub-runtime-unlock-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = directory.join("config.bin");
+        let paths = RuntimeKeyPaths {
+            api_key: directory.join("api-key"),
+            envelope: directory.join("runtime-key.bin"),
+        };
+        let mut descriptor = config_store::new_descriptor();
+        descriptor.memory_kib = 8192;
+        descriptor.iterations = 1;
+        let keyring =
+            config_store::ConfigKeyring::derive(b"administrator password", descriptor.clone())
+                .unwrap();
+        config_store::save_encrypted_with_keyring(
+            &config,
+            &hyperhub_core::config::Config::default(),
+            &keyring,
+        )
+        .unwrap();
+        paths.save(&keyring).unwrap();
+        let envelope = std::fs::read(&paths.envelope).unwrap();
+        assert!(refresh_runtime_key_for_config(&config, b"wrong password", &paths).is_err());
+        assert_eq!(std::fs::read(&paths.envelope).unwrap(), envelope);
+        paths.load_for_config(&config).unwrap();
+        descriptor.config_id[0] ^= 1;
+        let current =
+            config_store::ConfigKeyring::derive(b"administrator password", descriptor).unwrap();
+        config_store::save_encrypted_with_keyring(
+            &config,
+            &hyperhub_core::config::Config::default(),
+            &current,
+        )
+        .unwrap();
+        let error = paths.load_for_config(&config).err().unwrap();
+        assert!(error.contains("out of date"), "{error}");
+        assert!(error.contains("hyperhub config"));
+        refresh_runtime_key_for_config(&config, b"administrator password", &paths).unwrap();
+        paths.load_for_config(&config).unwrap();
+        let wrong_api = directory.join("wrong-api-key");
+        ensure_api_key(Some(&wrong_api)).unwrap();
+        let wrong = RuntimeKeyPaths {
+            api_key: wrong_api,
+            envelope: paths.envelope.clone(),
+        };
+        let error = wrong.load_for_config(&config).err().unwrap();
+        assert!(error.contains("with the API key"), "{error}");
+        assert!(!error.contains("out of date"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn api_key_round_trip_uses_a_distinct_format() {

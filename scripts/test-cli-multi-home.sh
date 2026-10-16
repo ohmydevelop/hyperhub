@@ -77,6 +77,56 @@ HOME="$agent_home" HYPERHUB_HOME="$home_b" \
   "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/migrate-b.out"
 [[ -f $home_b/runtime/config-key.bin ]]
 
+# A wrong administrator password must not replace a valid runtime envelope.
+wrong_password_file="$temporary/wrong-password"
+printf '%s\n' 'incorrect-test-password' > "$wrong_password_file"
+chmod 0600 "$wrong_password_file"
+cp "$home_a/runtime/config-key.bin" "$temporary/key-before-wrong-password.bin"
+if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" serve --admin-password-file "$wrong_password_file" > "$temporary/wrong-password.out" 2>&1; then
+  echo 'Serve accepted an incorrect administrator password' >&2
+  exit 1
+fi
+cmp "$home_a/runtime/config-key.bin" "$temporary/key-before-wrong-password.bin"
+HOME="$agent_home" HYPERHUB_HOME="$home_a" "$hyperhub" validate >/dev/null
+
+# Use a valid but unrelated API key to distinguish authentication from stale generation.
+python3 - "$temporary/wrong-api-key" <<'PY'
+import base64
+import os
+import sys
+with os.fdopen(os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
+    file.write("hhk_" + base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))
+PY
+if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" validate --password-file "$temporary/wrong-api-key" > "$temporary/wrong-api-key.out" 2>&1; then
+  echo 'Validation accepted an unrelated API key' >&2
+  exit 1
+fi
+grep -qF 'with the API key' "$temporary/wrong-api-key.out"
+
+# Build a stale-generation envelope encrypted by the same API key, without
+# corrupting either encrypted file. Start must reject it before spawning Serve.
+stop_instance "$home_b"
+cp "$home_a/runtime/api-key" "$home_b/runtime/api-key"
+HOME="$agent_home" HYPERHUB_HOME="$home_b" \
+  "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/rewrap-b.out"
+stop_instance "$home_a"
+cp "$home_a/config.bin" "$temporary/config-before-repair.bin"
+cp "$home_b/runtime/config-key.bin" "$home_a/runtime/config-key.bin"
+log_bytes=$(wc -c < "$home_a/serve.log")
+if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" start > "$temporary/stale-key.out" 2>&1; then
+  echo 'Start accepted a stale-generation runtime key' >&2
+  exit 1
+fi
+grep -qF 'out of date' "$temporary/stale-key.out"
+[[ $(wc -c < "$home_a/serve.log") -eq $log_bytes ]]
+HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/repair-a.out"
+cmp "$home_a/config.bin" "$temporary/config-before-repair.bin"
+HOME="$agent_home" HYPERHUB_HOME="$home_a" "$hyperhub" validate >/dev/null
+
 printf 'HyperHub multi-home isolation passed; a=%s b=%s\n' \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["socks_address"])' "$temporary/status-a.json")" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["socks_address"])' "$temporary/status-b.json")"

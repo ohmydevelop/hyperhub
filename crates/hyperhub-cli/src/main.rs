@@ -252,7 +252,14 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
                 .map_err(|error| error.to_string())?
                 .config
         };
-        let result = config_tui::run(&path, password, initial, live, first_run)?;
+        let result = config_tui::run(
+            &path,
+            password,
+            initial,
+            live,
+            first_run,
+            run.api_key_file.as_deref(),
+        )?;
         refresh_runtime_key(
             &path,
             result.password.as_bytes(),
@@ -408,12 +415,11 @@ fn refresh_runtime_key(
     admin_password: &[u8],
     api_key_file: Option<&Path>,
 ) -> Result<ConfigKeyring, String> {
-    let descriptor =
-        config_store::read_descriptor(config_path).map_err(|error| error.to_string())?;
-    let keyring =
-        ConfigKeyring::derive(admin_password, descriptor).map_err(|error| error.to_string())?;
-    password::save_runtime_keyring(&keyring, api_key_file)?;
-    Ok(keyring)
+    password::refresh_runtime_key_for_config(
+        config_path,
+        admin_password,
+        &password::RuntimeKeyPaths::current(api_key_file)?,
+    )
 }
 
 fn default_environment() -> Vec<EnvironmentVariable> {

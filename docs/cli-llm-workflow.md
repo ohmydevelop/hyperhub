@@ -125,7 +125,9 @@ hyperhub start --password-file "$HOME/.hyperhub/runtime/api-key"
 hyperhub validate --password-file "$HOME/.hyperhub/runtime/api-key"
 ```
 
-如果 API Key 轮换、封套缺失或损坏，使用一次 `start --admin-password-file ...` 重新生成封套。
+普通配置保存复用现有加密参数，不因 Serve 停止而轮换密钥；每次保存都会刷新运行封套，无需等编辑器退出。只有明确修改管理员密码时才轮换配置密钥。
+
+如果启动提示 `runtime configuration key is out of date`，由用户在真实终端运行 `hyperhub config`，验证管理员密码后不作修改、正常退出，即可刷新封套；也可使用一次 `start --admin-password-file ...` 修复。API Key 轮换或封套缺失、损坏时同样需要管理员验证。错误的管理员密码不会覆盖原有运行封套。
 
 ## 5. 自动测试
 
