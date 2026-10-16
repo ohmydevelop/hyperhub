@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "hyperhub"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "base64",
  "crossterm",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "hyperhub-agent-core"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "arc-swap",
  "base64",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "hyperhub-core"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "argon2 0.5.3",
  "base64",

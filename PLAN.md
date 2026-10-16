@@ -6,7 +6,16 @@ User request: change the unreasonable offline-save key rotation and fix the resu
 2. DONE: ordinary TUI saves preserve the descriptor; explicit password changes rotate it. Save-time wrapping supports custom API keys, discards retain the last persisted password, and refresh validates the administrator password before writing.
 3. DONE: startup preflight checks generation and decryptability, and authenticated approval persistence repairs existing envelopes. Existing container/ABI formats are unchanged.
 4. DONE locally: the old implementation failed the new offline-save regression; CLI 145, Agent core 22, core 189, isolated CLI lifecycle, formatting, Skill contract and Windows GNU all-target checks passed. Eight module regressions cover persistence and authentication transitions. Native Windows and concentrated Linux checks run in CI on the exact pushed commit. No external target-program Benchmark is needed for this persistence/CLI bug.
-5. Self-review and daily records are complete. Commit under the repository skill, immediately push and follow the exact commit's CI; the GitHub run is the durable final CI record. This request changes the implementation; do not infer authorization to replace the user's installed binary, input their password, or publish an additional release.
+5. DONE: implementation commit 9c3d764 was immediately pushed; CI 38843994114 passed all Linux and native Windows jobs. Self-review and daily records are complete.
+
+## Release v0.2.11 (explicitly requested)
+
+User now requests publication. Publish the persistence fix as the next patch release; do not replace the user's installed binary or input their password. Tag v0.2.11 is absent on origin, and the latest public release is v0.2.10.
+
+1. DONE locally: workspace/local lockfile versions and release default are 0.2.11; dependency versions are unchanged. Formatting, locked metadata and complete diff checks passed. Commit under the repository skill and immediately push.
+2. Follow the exact version commit's Linux and Windows CI to success before pushing the annotated v0.2.11 tag.
+3. Follow the three-platform release workflow, publish clear notes, download every asset, verify archive and inner manifest hashes, compare installers with source, and smoke-test the published Linux x86_64 binary in an isolated home. ARM64 receives cross-build checks; macOS is outside the release matrix.
+4. Record publication and verification results, commit/push task-owned documentation, and follow its CI. Preserve the unrelated image throughout.
 
 Decisions: do not replace encryption formats, delete/recreate user configuration, or silently regenerate an API key. Ordinary saves use a fresh AEAD nonce under the existing key, without unnecessary KDF rotation. Keep password rotation prohibited while Serve is running, including a runtime recheck at save time. Multi-file write failures must be reported, not presented as a successful save.
 
