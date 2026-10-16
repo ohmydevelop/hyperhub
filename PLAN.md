@@ -10,12 +10,12 @@ User request: change the unreasonable offline-save key rotation and fix the resu
 
 ## Release v0.2.11 (explicitly requested)
 
-User now requests publication. Publish the persistence fix as the next patch release; do not replace the user's installed binary or input their password. Tag v0.2.11 is absent on origin, and the latest public release is v0.2.10.
+User explicitly requested publication. The persistence fix is released as v0.2.11; do not replace the user's installed binary or input their password. Preflight confirmed that tag v0.2.11 was absent and the prior public release was v0.2.10.
 
-1. DONE locally: workspace/local lockfile versions and release default are 0.2.11; dependency versions are unchanged. Formatting, locked metadata and complete diff checks passed. Commit under the repository skill and immediately push.
-2. Follow the exact version commit's Linux and Windows CI to success before pushing the annotated v0.2.11 tag.
-3. Follow the three-platform release workflow, publish clear notes, download every asset, verify archive and inner manifest hashes, compare installers with source, and smoke-test the published Linux x86_64 binary in an isolated home. ARM64 receives cross-build checks; macOS is outside the release matrix.
-4. Record publication and verification results, commit/push task-owned documentation, and follow its CI. Preserve the unrelated image throughout.
+1. DONE: workspace/local lockfile versions and release default are 0.2.11; dependency versions are unchanged. Formatting, locked metadata and complete diff checks passed. Version commit 5fb1248 was immediately pushed.
+2. DONE: version commit 5fb1248 passed all three jobs in CI 38845354365 (Linux targets, Linux tests and native Windows tests). The annotated v0.2.11 tag was pushed on this validated commit.
+3. DONE: release workflow 38846014324 passed all three builds and publication. https://github.com/ohmydevelop/hyperhub/releases/tag/v0.2.11 is the latest non-draft, non-prerelease release with all six assets. Downloaded all assets, verified all archive and inner manifest hashes, and confirmed installers match source. Published Linux x86_64 --help/doctor passed with embedded Agent verification. The same published binary passed the isolated multi-home lifecycle, wrong-password protection, stale-envelope rejection and administrator repair regression. Evidence: target/diagnostics/release-0.2.11/{source-ci.json,release-ci.json,release.json,multi-home.log,release-assets/verification.json,release-assets/smoke.json}. ARM64 was cross-built, not run on native hardware; macOS is outside the release matrix.
+4. Publication and verification records are complete. Self-review, commit/push task-owned documentation and follow its CI; the exact commit's GitHub run remains the durable final CI record. The release tag stays on validated source commit 5fb1248. The unrelated image and real user configuration/key files remain untouched.
 
 Decisions: do not replace encryption formats, delete/recreate user configuration, or silently regenerate an API key. Ordinary saves use a fresh AEAD nonce under the existing key, without unnecessary KDF rotation. Keep password rotation prohibited while Serve is running, including a runtime recheck at save time. Multi-file write failures must be reported, not presented as a successful save.
 
