@@ -85,3 +85,32 @@ installation, bounded retention, transaction retries, concurrent dispatch, and
 reentrant module destruction. Workspace tests register these automatically on
 Linux and native Windows CI. These tests do not establish live Hook coverage,
 forwarding continuity, performance budgets, or native macOS support.
+
+## Accepted socket handoff primitive
+
+`handoff` provides platform-specific accepted TCP socket transfer without closing
+or reconnecting the client stream. Unix uses a private connected datagram channel
+and `SCM_RIGHTS`; descriptor and correlation payload stay in one datagram.
+Receivers reject missing/multiple descriptors and truncated payload/control data,
+close all rejected descriptors, validate a connected stream, and set close-on-exec.
+Windows exports `WSAPROTOCOL_INFOW` for one specified worker PID and imports it
+with overlapped IO and handle inheritance disabled. A fresh worker initializes
+Winsock independently. Serialized protocol storage is initialized and aligned;
+no Rust structure padding is exposed. Offers require matching architecture.
+
+This primitive deliberately does not choose a worker, authenticate a public
+endpoint, or grant connection ownership. The ingress must retain the actual
+worker process identity/handle and a private authenticated control channel. The
+required protocol is offer, readiness acknowledgement, then explicit ownership
+grant. A worker must not perform stream IO before the grant. Keep the original
+socket until acknowledgement/grant; never retry delivery after granting ownership
+because the first worker might have already performed business IO.
+
+The `socket_handoff` integration suite starts separate local worker processes.
+It hands accepted streams to old/new workers under the same listener, closes the
+ingress copies, interleaves messages on both streams, drains the new worker, and
+continues IO on the old stream before its natural close. Unix rejection tests
+check actual peer EOF to prove rejected descriptors were closed. Windows CI runs
+the native cross-process duplication path. This tests the transport primitive;
+Serve worker processes, authoritative sessions/Fake-IP lookup, cancellation,
+audit forwarding and upgrade orchestration still need integration.

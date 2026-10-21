@@ -5,6 +5,7 @@
 pub mod abi;
 pub mod artifact;
 pub mod generation;
+pub mod handoff;
 pub mod native;
 
 pub use generation::{Engine, Error, Lease, Runtime, Settings, Snapshot, Stage};
