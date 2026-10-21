@@ -112,12 +112,9 @@ pub struct RuntimeKeyPaths {
 }
 
 impl RuntimeKeyPaths {
-    pub fn current(api_key_file: Option<&Path>) -> Result<Self, String> {
+    pub fn current() -> Result<Self, String> {
         Ok(Self {
-            api_key: api_key_file
-                .map(Path::to_owned)
-                .map(Ok)
-                .unwrap_or_else(default_api_key_path)?,
+            api_key: default_api_key_path()?,
             envelope: default_runtime_key_path()?,
         })
     }
@@ -126,7 +123,7 @@ impl RuntimeKeyPaths {
         &self,
         keyring: &hyperhub_core::config_store::ConfigKeyring,
     ) -> Result<PathBuf, String> {
-        let (_, api_key) = ensure_api_key(Some(&self.api_key))?;
+        let (_, api_key) = ensure_api_key(&self.api_key)?;
         self.save_with_api_key(keyring, api_key.as_bytes())?;
         Ok(self.api_key.clone())
     }
@@ -145,7 +142,7 @@ impl RuntimeKeyPaths {
         config_path: &Path,
     ) -> Result<hyperhub_core::config_store::ConfigKeyring, String> {
         use hyperhub_core::config_store;
-        let api_key = acquire_api_key(Some(&self.api_key))?;
+        let api_key = read_api_key(&self.api_key)?;
         let keyring = config_store::load_runtime_key(&self.envelope, api_key.as_bytes())
             .map_err(|error| format!(
                 "cannot unlock runtime configuration with the API key: {error}; run `hyperhub config` or `hyperhub start --admin-password-file <file>` to repair the runtime key"
@@ -179,36 +176,25 @@ pub fn refresh_runtime_key_for_config(
     Ok(keyring)
 }
 
-pub fn load_runtime_keyring(
-    api_key_file: Option<&Path>,
-) -> Result<hyperhub_core::config_store::ConfigKeyring, String> {
-    RuntimeKeyPaths::current(api_key_file)?.load_for_config(
+pub fn load_runtime_keyring() -> Result<hyperhub_core::config_store::ConfigKeyring, String> {
+    RuntimeKeyPaths::current()?.load_for_config(
         &hyperhub_core::config_store::default_config_path().map_err(|error| error.to_string())?,
     )
 }
 
 pub fn save_runtime_keyring(
     keyring: &hyperhub_core::config_store::ConfigKeyring,
-    api_key_file: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    RuntimeKeyPaths::current(api_key_file)?.save(keyring)
+    RuntimeKeyPaths::current()?.save(keyring)
 }
 
-pub fn acquire_api_key(path: Option<&Path>) -> Result<Zeroizing<String>, String> {
-    let path = match path {
-        Some(path) => path.to_owned(),
-        None => default_api_key_path()?,
-    };
-    read_api_key(&path)
+pub fn acquire_api_key() -> Result<Zeroizing<String>, String> {
+    read_api_key(&default_api_key_path()?)
 }
 
-pub fn ensure_api_key(path: Option<&Path>) -> Result<(PathBuf, Zeroizing<String>), String> {
-    let path = match path {
-        Some(path) => path.to_owned(),
-        None => default_api_key_path()?,
-    };
+pub fn ensure_api_key(path: &Path) -> Result<(PathBuf, Zeroizing<String>), String> {
     if path.is_file() {
-        return Ok((path.clone(), read_api_key(&path)?));
+        return Ok((path.to_owned(), read_api_key(path)?));
     }
     let mut bytes = [0u8; API_KEY_BYTES];
     rand::fill(&mut bytes);
@@ -216,9 +202,9 @@ pub fn ensure_api_key(path: Option<&Path>) -> Result<(PathBuf, Zeroizing<String>
         "{API_KEY_PREFIX}{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     );
-    hyperhub_core::config_store::save_private_bytes(&path, value.as_bytes())
+    hyperhub_core::config_store::save_private_bytes(path, value.as_bytes())
         .map_err(|error| format!("cannot create API key file {}: {error}", path.display()))?;
-    Ok((path, Zeroizing::new(value)))
+    Ok((path.to_owned(), Zeroizing::new(value)))
 }
 
 fn read_api_key(path: &Path) -> Result<Zeroizing<String>, String> {
@@ -407,7 +393,7 @@ mod tests {
         refresh_runtime_key_for_config(&config, b"administrator password", &paths).unwrap();
         paths.load_for_config(&config).unwrap();
         let wrong_api = directory.join("wrong-api-key");
-        ensure_api_key(Some(&wrong_api)).unwrap();
+        ensure_api_key(&wrong_api).unwrap();
         let wrong = RuntimeKeyPaths {
             api_key: wrong_api,
             envelope: paths.envelope.clone(),
@@ -425,7 +411,7 @@ mod tests {
             std::process::id(),
             rand::random::<u64>()
         ));
-        let (created, key) = ensure_api_key(Some(&path)).unwrap();
+        let (created, key) = ensure_api_key(&path).unwrap();
         assert_eq!(created, path);
         assert!(key.starts_with(API_KEY_PREFIX));
         assert_eq!(read_api_key(&path).unwrap().as_str(), key.as_str());

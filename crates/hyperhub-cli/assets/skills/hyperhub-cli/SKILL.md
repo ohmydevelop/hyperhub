@@ -170,7 +170,7 @@ Agent **不得代替用户运行** `hyperhub approve`、输入主密码、填写
 用户明确表示已完成审批后，才执行：
 
 ```sh
-hyperhub validate --password-file /path/to/api-key
+hyperhub validate
 hyperhub show
 hyperhub status --json
 ```
@@ -191,6 +191,7 @@ hyperhub doctor
 - 不向用户索取真实 Token、API Key、密码或私钥。
 - 管理员密码只用于创建或修改配置：`config`、`chat`、`approve`、`import`，以及旧配置首次生成运行封套时的一次性迁移。使用交互式输入或权限受限的 `--admin-password-file`，不要交给 Agent 或目标程序。
 - `start`、`restart`、`serve`、`run`、`validate` 和 `export` 使用运行时 API Key。Serve 首次初始化会在当前 Home 的 `runtime/api-key` 生成 API Key，并创建 `runtime/config-key.bin` 运行解锁封套。
+- CLI 自动读取当前 Home 的 API Key，不接受 API Key 文件参数。多实例通过 `HYPERHUB_HOME` 选择，所有命令保持同一 Home；Key 缺失、无效或运行封套过期时按错误提示处理，不绕过认证。
 - 已有旧配置没有运行封套时，执行一次 `hyperhub start --admin-password-file /path/to/admin-password` 完成迁移；之后常规启动只用 API Key。
 - 不把 Secret 写入回复、命令参数、日志或普通临时文件。
 - 新 Secret 使用 `{"value":"${APPROVE:meaningful-name}"}`，由人工在 `approve` 中填写。
@@ -235,20 +236,20 @@ JSON patch does not change the configuration
 POSIX Shell：
 
 ```sh
-hyperhub run --password-file /path/to/api-key -- \
+hyperhub run -- \
   ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
 ```
 
 PowerShell：
 
 ```powershell
-hyperhub run --password-file C:\path\api-key.txt -- ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
+hyperhub run -- ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
 ```
 
 规则：
 
 - 必须使用 `hyperhub run ... -- ssh ...`；直接运行 `ssh` 不经过 HyperHub，不能作为验证。
-- `--password-file` 必须指向 HyperHub API Key，而不是管理员密码；沿用同一 `HYPERHUB_HOME`，默认 API Key 位于其 `runtime/api-key`。
+- CLI 自动读取当前 `HYPERHUB_HOME` 下的 `runtime/api-key` 完成认证；各命令沿用同一 Home，不接受 API Key 文件参数。
 - 不添加 `StrictHostKeyChecking=no`、真实密码、私钥内容或用户未要求的危险选项。
 - 测试失败后先报告 SSH 退出码，再查看 `status --json`、`logs --lines 100` 和 `doctor --target ssh`；不要立即改配置或重启。
 - 审计验证只检查本次连接产生的脱敏事件，不输出认证材料或转录正文。
@@ -269,11 +270,11 @@ hyperhub run --password-file C:\path\api-key.txt -- ssh -o BatchMode=yes -o Conn
 ## Serve 与目标程序
 
 ```sh
-hyperhub start --password-file /path/to/api-key
+hyperhub start
 hyperhub stop
-hyperhub restart --password-file /path/to/api-key
+hyperhub restart
 hyperhub status --json
-hyperhub run --password-file /path/to/api-key -- program args...
+hyperhub run -- program args...
 ```
 
 - 只有用户明确要求 start/stop/restart 时执行；配置热更新不自动重启。

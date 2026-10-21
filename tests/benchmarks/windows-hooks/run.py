@@ -88,7 +88,7 @@ rules = []
                             for mode in ("dns-event", "dns-poll", "dns-callback", "dns-cancel", "connectex-empty", "connectex-data"):
                                 command = [str(probe), mode, str(server.server_address[1])]
                                 if managed:
-                                    command = [str(hyperhub), "run", "--password-file", str(work / "home/runtime/api-key"), "--", *command]
+                                    command = [str(hyperhub), "run", "--", *command]
                                 result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
                                 item = {"mode": mode, "managed": managed, "exit_code": result.returncode,
                                         "stdout": result.stdout, "stderr": result.stderr}

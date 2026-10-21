@@ -6,7 +6,6 @@ iterations=5
 output="$root/target/benchmarks/linux-static"
 hyperhub=
 runtime=
-password_file=
 fixtures=
 include_large=1
 rebuild_fixtures=0
@@ -26,7 +25,6 @@ options:
   --output DIR         output directory (default: target/benchmarks/linux-static)
   --hyperhub PATH      HyperHub CLI used for native-vs-HyperHub comparison
   --runtime PATH       deprecated compatibility option; ignored for static targets
-  --password-file PATH API Key file passed to HyperHub run
   --fixtures DIR       reusable fixture cache (default: target/benchmarks/linux-fixtures/<arch>)
   --rebuild-fixtures   rebuild cached fixture binaries
   --skip-large         only run the C, Go, and Rust probes
@@ -55,11 +53,6 @@ while (($#)); do
     --runtime)
       [[ $# -ge 2 ]] || { echo 'missing value for --runtime' >&2; exit 2; }
       runtime=$2
-      shift 2
-      ;;
-    --password-file)
-      [[ $# -ge 2 ]] || { echo 'missing value for --password-file' >&2; exit 2; }
-      password_file=$2
       shift 2
       ;;
     --fixtures)
@@ -97,7 +90,6 @@ done
 if [[ -n $runtime ]]; then
   echo 'benchmark-linux-static: --runtime is ignored because all workloads use the static ptrace backend' >&2
 fi
-[[ -z $password_file || -n $hyperhub ]] || { echo '--password-file requires --hyperhub' >&2; exit 2; }
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -389,9 +381,6 @@ if [[ -n $hyperhub ]]; then
     exit 1
   fi
 fi
-if [[ -n $password_file ]]; then
-  password_file=$(realpath "$password_file")
-fi
 
 run_native() {
   local workload=$1 binary=${binaries[$1]}
@@ -416,7 +405,6 @@ for workload in "${workloads[@]}"; do
   for mode in "${modes[@]}"; do
     if [[ $mode == hyperhub ]]; then
       hyperhub_command=("$hyperhub" run)
-      [[ -z $password_file ]] || hyperhub_command+=(--password-file "$password_file")
       hyperhub_command+=(-- "${binaries[$workload]}")
       case "$workload" in
         c) hyperhub_command+=(127.0.0.1 "$port" "$dns_port") ;;

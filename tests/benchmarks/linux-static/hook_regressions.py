@@ -106,8 +106,7 @@ patterns = [{{enabled = true, pattern = {pattern}}}]
 
                 def execute(name, arguments, expected=0, backend="ptrace", extra=None):
                     env = dict(environment, **(extra or {}))
-                    command = [str(hyperhub), "run", "--backend", backend, "--password-file",
-                               str(work / "home/runtime/api-key"), "--", str(binaries[name]), *arguments]
+                    command = [str(hyperhub), "run", "--backend", backend, "--", str(binaries[name]), *arguments]
                     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
                     item = {"case": name + ":" + ":".join(arguments[::2]), "backend": backend,
                             "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}

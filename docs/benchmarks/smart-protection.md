@@ -44,7 +44,6 @@ python3 scripts/benchmark-smart-protection.py \
   --backend jev \
   --transport hyperhub \
   --hyperhub-bin ./target/release/hyperhub \
-  --password-file /tmp/hyperhub-api-key \
   --timeout-ms 10000 \
   --output target/benchmarks/smart-protection-hyperhub-jev
 ```

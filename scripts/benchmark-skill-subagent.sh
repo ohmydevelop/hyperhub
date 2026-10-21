@@ -135,8 +135,13 @@ require(skill, "不删除并重建凭证", "credential recreation prohibition")
 require(skill, "ssh_transcript: false", "SSH transcript-off semantics")
 require(skill, "结构化 SSH 事件仍会记录", "structured SSH event semantics")
 require(skill, "未绑定 SSH 凭证", "SSH credential requirement")
-require(skill, "hyperhub run --password-file", "SSH test through HyperHub")
+require(skill, "hyperhub run -- ssh", "SSH test through HyperHub")
 require(skill, "API Key", "runtime API key guidance")
+require(skill, "自动读取当前 Home", "automatic runtime API key discovery")
+for label, text in (("skill", skill), ("reference", reference)):
+    for option in ("--password-file", "--api-key-file"):
+        if option in text:
+            errors.append(f"removed runtime API Key option in {label}: {option}")
 require(skill, "--admin-password-file", "administrator password option")
 require(skill, "runtime/api-key", "runtime API key path")
 require(skill, "runtime/config-key.bin", "runtime key envelope path")

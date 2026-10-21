@@ -239,11 +239,11 @@ SSH 审计语义：
 SSH 登录测试必须在审批验证完成、Serve 运行且用户明确提供目标后执行。测试命令必须由 HyperHub 启动：
 
 ```sh
-hyperhub run --password-file /path/to/api-key -- \
+hyperhub run -- \
   ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 deploy@example.test true
 ```
 
-直接运行 `ssh` 不经过 HyperHub，不能证明路由、凭证注入、主机信任或审计生效。`--password-file` 必须是当前 Home 的 API Key 文件，不是管理员密码；测试沿用相同 `HYPERHUB_HOME`，不自动添加 `StrictHostKeyChecking=no`。失败时报告退出码，再查看 `status --json`、`logs --lines 100` 和 `doctor --target ssh`；不要自动改凭证、关闭校验或重启。
+直接运行 `ssh` 不经过 HyperHub，不能证明路由、凭证注入、主机信任或审计生效。CLI 自动读取当前 Home 的 API Key 文件 `runtime/api-key`；测试沿用相同 `HYPERHUB_HOME`，不自动添加 `StrictHostKeyChecking=no`。失败时报告退出码，再查看 `status --json`、`logs --lines 100` 和 `doctor --target ssh`；不要自动改凭证、关闭校验或重启。
 
 ## 沙盒与智能防护
 
@@ -321,7 +321,7 @@ TLS `scope` 为 `{"type":"global"}` 或 `{"type":"host","authority":"host:port"}
 用户完成 `approve` 后再执行：
 
 ```sh
-hyperhub validate --password-file /path/to/api-key
+hyperhub validate
 hyperhub show
 hyperhub status --json
 hyperhub logs --lines 100

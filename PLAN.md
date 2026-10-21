@@ -1,4 +1,15 @@
-# Runtime key persistence correction (2026-10-16)
+# Remove runtime API Key CLI parameters (2026-10-21)
+
+User request: remove explicit runtime API Key parameters. Commands must read the current HyperHub Home's runtime/api-key internally and retain all authentication and envelope checks. Preserve administrator/backup password options, real user state and the unrelated image. This task does not request another release or local installation.
+
+1. DONE: traced all CLI parsers, Serve spawning, configuration saves, bundled guidance and unified regression runners. The new removed-option regression failed against the old parser because start accepted --password-file (target/diagnostics/remove-api-key-options/before.log).
+2. DONE: removed --api-key-file and runtime --password-file from all commands, option structs and help. Use instance paths consistently for runtime key operations and child Serve startup; preserve target arguments after the run boundary. Reject removed options with an actionable message.
+3. DONE: updated affected scripts, suites and active documentation, preserving historical release records. Isolated CLI checks cover automatic authentication, missing/wrong keys, instance isolation and removed-option rejection. Local fixtures seed upgrade-check timestamps to avoid external GitHub requests. CLI-only changes use module/integration regressions, not a new target-program Benchmark.
+4. DONE locally: formatting, workspace all-target tests (CLI 147, Agent core 22, core 189), final CLI tests, isolated multi-home and sequential approval integration, Skill contract, Bash/Python checks, 17-case mock smart-protection runner and Windows GNU all-target cross-check passed. The approval live-update subcase was skipped because the real user Serve is running; CI uses isolated runners for that subcase and native Windows execution. Main agent reviewed the complete diff and compatibility record. Commit via the repository skill, immediately push and follow exact-commit CI to completion; GitHub records the final CI result. Evidence: target/diagnostics/remove-api-key-options/. No changes to the user Serve, real credentials or installed binary.
+
+Decision: instance selection remains HYPERHUB_HOME; no credential values move to argv or a new environment variable. The custom API Key path CLI override is intentionally removed together with its alias. The encrypted configuration format and per-session authentication remain unchanged.
+
+# Completed: Runtime key persistence correction (2026-10-16)
 
 User request: change the unreasonable offline-save key rotation and fix the resulting stale runtime envelope. Preserve the user's real encrypted configuration, API key, runtime envelope, and unrelated image. Diagnose/verify with isolated temporary homes and dummy credentials; administrator entry remains a human terminal action.
 

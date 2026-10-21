@@ -14,7 +14,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct StartConfig {
     pub debug: bool,
     pub admin_password_file: Option<PathBuf>,
-    pub api_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,28 +55,22 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
             .map_err(|error| error.to_string())?;
         let keyring = ConfigKeyring::derive(password.as_bytes(), descriptor)
             .map_err(|error| error.to_string())?;
-        let api_key_path =
-            password::save_runtime_keyring(&keyring, config.api_key_file.as_deref())?;
+        let api_key_path = password::save_runtime_keyring(&keyring)?;
         println!(
             "HyperHub configuration initialized: {}",
             config_path.display()
         );
         api_key_path
     } else if password::runtime_key_exists()? && config.admin_password_file.is_none() {
-        password::load_runtime_keyring(config.api_key_file.as_deref())?;
-        config
-            .api_key_file
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(password::default_api_key_path)?
+        password::load_runtime_keyring()?;
+        password::default_api_key_path()?
     } else {
         let password = password::acquire(config.admin_password_file.as_deref(), false)?;
         let unlocked =
             load_encrypted(&config_path, password.as_bytes()).map_err(|error| error.to_string())?;
         let keyring = ConfigKeyring::derive(password.as_bytes(), unlocked.descriptor)
             .map_err(|error| error.to_string())?;
-        let api_key_path =
-            password::save_runtime_keyring(&keyring, config.api_key_file.as_deref())?;
+        let api_key_path = password::save_runtime_keyring(&keyring)?;
         println!(
             "HyperHub runtime key initialized: {}",
             password::default_runtime_key_path()?.display()
@@ -110,10 +103,7 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("cannot resolve HyperHub executable: {error}"))?;
     let mut command = Command::new(executable);
-    command
-        .arg("serve")
-        .arg("--api-key-file")
-        .arg(&api_key_path);
+    command.arg("serve");
     if config.debug {
         command.arg("--debug");
     }

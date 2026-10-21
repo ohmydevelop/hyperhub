@@ -12,6 +12,17 @@ home_b="$temporary/instance-b"
 agent_home="$temporary/agent-home"
 admin_password_file="$temporary/admin-password"
 mkdir -p "$home_a" "$home_b" "$agent_home"
+# Keep isolated CLI regressions independent of GitHub upgrade checks.
+python3 - "$home_a" "$home_b" <<'PY'
+import json
+import pathlib
+import sys
+import time
+for directory in sys.argv[1:]:
+    (pathlib.Path(directory) / "upgrade-check.json").write_text(
+        json.dumps({"last_check_ms": int(time.time() * 1000)}), encoding="utf-8"
+    )
+PY
 printf '%s\n' 'multi-home-test-password' > "$admin_password_file"
 chmod 0600 "$admin_password_file"
 
@@ -67,9 +78,35 @@ PY
 
 HOME="$agent_home" HYPERHUB_HOME="$home_a" "$hyperhub" stop >/dev/null
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
-  "$hyperhub" start --password-file "$home_a/runtime/api-key" > "$temporary/restart-a.out"
+  "$hyperhub" start > "$temporary/restart-a.out"
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
-  "$hyperhub" validate --password-file "$home_a/runtime/api-key" >/dev/null
+  "$hyperhub" validate >/dev/null
+
+# Run authenticates with this instance's API key without an explicit argument.
+test_target=$(command -v true)
+HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" run --dry-run -- "$test_target" > "$temporary/run-a.out"
+HOME="$agent_home" HYPERHUB_HOME="$home_b" \
+  "$hyperhub" run --dry-run -- "$test_target" > "$temporary/run-b.out"
+for option in --password-file --api-key-file; do
+  if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+    "$hyperhub" run "$option" "$home_a/runtime/api-key" -- "$test_target" > "$temporary/removed-option.out" 2>&1; then
+    echo "Run accepted removed option $option" >&2
+    exit 1
+  fi
+  grep -qF 'loaded automatically' "$temporary/removed-option.out"
+done
+
+# Missing keys must fail without recreating credentials or granting a session.
+mv "$home_a/runtime/api-key" "$temporary/saved-api-key"
+if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" run --dry-run -- "$test_target" > "$temporary/missing-api-key.out" 2>&1; then
+  echo 'Run accepted a missing API key' >&2
+  exit 1
+fi
+grep -qF 'API key file' "$temporary/missing-api-key.out"
+[[ ! -e $home_a/runtime/api-key ]]
+mv "$temporary/saved-api-key" "$home_a/runtime/api-key"
 
 HOME="$agent_home" HYPERHUB_HOME="$home_b" "$hyperhub" stop >/dev/null
 rm "$home_b/runtime/config-key.bin"
@@ -98,12 +135,21 @@ import sys
 with os.fdopen(os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
     file.write("hhk_" + base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))
 PY
+cp "$home_a/runtime/api-key" "$temporary/saved-api-key"
+cp "$temporary/wrong-api-key" "$home_a/runtime/api-key"
 if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
-  "$hyperhub" validate --password-file "$temporary/wrong-api-key" > "$temporary/wrong-api-key.out" 2>&1; then
+  "$hyperhub" validate > "$temporary/wrong-api-key.out" 2>&1; then
   echo 'Validation accepted an unrelated API key' >&2
   exit 1
 fi
 grep -qF 'with the API key' "$temporary/wrong-api-key.out"
+if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
+  "$hyperhub" run --dry-run -- "$test_target" > "$temporary/wrong-run-key.out" 2>&1; then
+  echo 'Run accepted an unrelated API key' >&2
+  exit 1
+fi
+grep -qF 'rejected session registration' "$temporary/wrong-run-key.out"
+cp "$temporary/saved-api-key" "$home_a/runtime/api-key"
 
 # Build a stale-generation envelope encrypted by the same API key, without
 # corrupting either encrypted file. Start must reject it before spawning Serve.

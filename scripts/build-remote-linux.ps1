@@ -157,16 +157,15 @@ try {
   Invoke-Checked 'git' @('archive', '--format=tar', "--output=$archive", $commit)
 
   Write-Host 'Ensuring the local HyperHub Serve is running...'
-  $apiKeyPath = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.hyperhub\runtime\api-key'
+  $instanceHome = if ($env:HYPERHUB_HOME) { $env:HYPERHUB_HOME } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.hyperhub' }
+  $apiKeyPath = Join-Path (Join-Path $instanceHome 'runtime') 'api-key'
   if (Test-Path -LiteralPath $apiKeyPath -PathType Leaf) {
-    $apiKeyFile = Resolve-ExistingFile $apiKeyPath 'HyperHub API key file'
-    Invoke-Checked $HyperHub @('start', '--password-file', $apiKeyFile)
+    Invoke-Checked $HyperHub @('start')
   } else {
     Invoke-Checked $HyperHub @('start', '--admin-password-file', $PasswordFile)
-    $apiKeyFile = Resolve-ExistingFile $apiKeyPath 'HyperHub API key file'
   }
 
-  $hyperhubRun = @('run', '--password-file', $apiKeyFile, '--')
+  $hyperhubRun = @('run', '--')
   $scpOptions = @('-P', $Port.ToString())
   $sshOptions = @('-p', $Port.ToString())
   if ($IdentityFile) {

@@ -403,7 +403,6 @@ def read_appended_events(path: Path, offset: int) -> Tuple[List[Dict[str, Any]],
 def run_hyperhub_case(
     case: Dict[str, Any],
     binary: str,
-    password_file: Path,
     audit_path: Path,
     audit_offset: int,
     wrapper: Path,
@@ -429,8 +428,6 @@ def run_hyperhub_case(
         command = [
             binary,
             "run",
-            "--password-file",
-            str(password_file),
             "--",
             "/bin/sh",
             "-c",
@@ -443,8 +440,6 @@ def run_hyperhub_case(
         command = [
             binary,
             "run",
-            "--password-file",
-            str(password_file),
             "--",
             str(actual_wrapper),
             *argv,
@@ -629,7 +624,6 @@ def main() -> int:
     parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--hyperhub-bin", default=os.getenv("HYPERHUB_BIN", "hyperhub"))
-    parser.add_argument("--password-file", type=Path, help="HyperHub runtime API Key file")
     args = parser.parse_args()
     if args.timeout_ms < 1:
         parser.error("--timeout-ms must be positive")
@@ -666,10 +660,6 @@ def main() -> int:
         if args.transport == "hyperhub":
             if args.backend != "jev":
                 parser.error("--transport hyperhub currently requires --backend jev")
-            if args.password_file is None:
-                parser.error("--transport hyperhub requires the runtime API Key --password-file")
-            if not args.password_file.is_file():
-                parser.error("--password-file does not exist")
             binary = shutil.which(args.hyperhub_bin) or (
                 args.hyperhub_bin if Path(args.hyperhub_bin).is_file() else None
             )
@@ -684,7 +674,6 @@ def main() -> int:
                     record, audit_offset = run_hyperhub_case(
                         case,
                         str(binary),
-                        args.password_file,
                         audit_path,
                         audit_offset,
                         wrapper,

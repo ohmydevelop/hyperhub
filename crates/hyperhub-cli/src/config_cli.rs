@@ -138,7 +138,7 @@ pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
             "--admin-password-file" => password_file = Some(value.into()),
             "--editor" => editor = Some(value.into()),
             "--password-file" => return Err(
-                "--password-file is a runtime API Key file; use --admin-password-file for approve"
+                "approve uses --admin-password-file for administrator confirmation; runtime API keys are loaded automatically"
                     .into(),
             ),
             _ => return Err(format!("unknown approve option '{option}'")),
@@ -186,7 +186,7 @@ fn show() -> Result<i32, String> {
     let bytes = if path.is_file() {
         read_redacted_json(&path).map_err(|error| match error {
             StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
-                "redacted configuration view is not initialized; run `hyperhub validate --password-file <api-key-file>` to refresh it".into()
+                "redacted configuration view is not initialized; run `hyperhub validate` to refresh it".into()
             }
             other => other.to_string(),
         })?
@@ -454,7 +454,7 @@ fn persist_prepared(
 ) -> Result<ApplyOutcome, String> {
     save_encrypted_with_keyring(path, &prepared.config, &active.keyring)
         .map_err(|error| error.to_string())?;
-    crate::password::save_runtime_keyring(&active.keyring, None)?;
+    crate::password::save_runtime_keyring(&active.keyring)?;
     let _ = config_store::reconcile_root_certificates(
         path,
         prepared
@@ -543,7 +543,7 @@ fn load_planning_config(path: &Path) -> Result<Config, String> {
     if path.is_file() {
         let bytes = read_redacted_json(path).map_err(|error| match error {
             StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
-                "redacted configuration view is not initialized; run `hyperhub validate --password-file <api-key-file>` before submitting configuration requests".into()
+                "redacted configuration view is not initialized; run `hyperhub validate` before submitting configuration requests".into()
             }
             other => other.to_string(),
         })?;

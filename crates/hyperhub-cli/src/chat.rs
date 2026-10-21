@@ -38,12 +38,10 @@ const EMBEDDED_RUNNER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/needle3
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatConfig {
     pub(crate) admin_password_file: Option<PathBuf>,
-    pub(crate) api_key_file: Option<PathBuf>,
 }
 
 pub(crate) fn parse(args: &[OsString]) -> Result<ChatConfig, String> {
     let mut admin_password_file = None;
-    let mut api_key_file = None;
     let mut index = 0;
     while index < args.len() {
         let option = args[index].to_string_lossy();
@@ -58,14 +56,8 @@ pub(crate) fn parse(args: &[OsString]) -> Result<ChatConfig, String> {
                 );
                 index += 1;
             }
-            "--password-file" | "--api-key-file" => {
-                api_key_file = Some(
-                    args.get(index)
-                        .ok_or("--password-file requires a value")?
-                        .clone()
-                        .into(),
-                );
-                index += 1;
+            option @ ("--password-file" | "--api-key-file") => {
+                return Err(crate::removed_runtime_key_option(option));
             }
             _ => {
                 return Err(format!(
@@ -76,7 +68,6 @@ pub(crate) fn parse(args: &[OsString]) -> Result<ChatConfig, String> {
     }
     Ok(ChatConfig {
         admin_password_file,
-        api_key_file,
     })
 }
 
@@ -104,7 +95,7 @@ pub(crate) fn run(options: ChatConfig) -> Result<i32, String> {
     let keyring =
         hyperhub_core::config_store::ConfigKeyring::derive(password.as_bytes(), descriptor)
             .map_err(|error| error.to_string())?;
-    crate::password::save_runtime_keyring(&keyring, options.api_key_file.as_deref())?;
+    crate::password::save_runtime_keyring(&keyring)?;
     Ok(0)
 }
 
@@ -1706,22 +1697,13 @@ mod tests {
             .unwrap(),
             ChatConfig {
                 admin_password_file: Some("secret".into()),
-                api_key_file: None,
             }
         );
-        assert_eq!(
-            parse(&[
-                OsString::from("--admin-password-file"),
-                OsString::from("secret"),
-                OsString::from("--password-file"),
-                OsString::from("api-key"),
-            ])
-            .unwrap(),
-            ChatConfig {
-                admin_password_file: Some("secret".into()),
-                api_key_file: Some("api-key".into()),
-            }
-        );
+        for option in ["--password-file", "--api-key-file"] {
+            assert!(parse(&[OsString::from(option), OsString::from("api-key")])
+                .unwrap_err()
+                .contains("automatically"));
+        }
         assert!(parse(&[OsString::from("--unknown")]).is_err());
     }
 

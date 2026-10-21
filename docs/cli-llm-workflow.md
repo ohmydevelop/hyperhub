@@ -118,11 +118,12 @@ chmod 0600 admin-password
 
 密码文件只用于 CLI，不得提交。`show`、计划结果、逐条审批显示和应用结果均不得泄漏 inline secret。
 
-首次创建配置或升级旧配置时，HyperHub 会生成 `runtime/api-key`，并把配置主密钥封装到 API Key 加密的 `runtime/config-key.bin`。完成一次迁移后，常规冷启动不再要求管理员密码：
+首次创建配置或升级旧配置时，HyperHub 会生成 `runtime/api-key`，并把配置主密钥封装到 API Key 加密的 `runtime/config-key.bin`。CLI 自动从当前 Home 读取 API Key，不接受 API Key 文件参数；多实例使用 `HYPERHUB_HOME` 选择，并在启停、运行与验证时保持同一 Home。完成一次迁移后，常规冷启动不再要求管理员密码：
 
 ```sh
-hyperhub start --password-file "$HOME/.hyperhub/runtime/api-key"
-hyperhub validate --password-file "$HOME/.hyperhub/runtime/api-key"
+hyperhub start
+hyperhub validate
+hyperhub run -- program args...
 ```
 
 普通配置保存复用现有加密参数，不因 Serve 停止而轮换密钥；每次保存都会刷新运行封套，无需等编辑器退出。只有明确修改管理员密码时才轮换配置密钥。

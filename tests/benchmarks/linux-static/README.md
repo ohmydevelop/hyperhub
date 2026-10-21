@@ -60,12 +60,11 @@ rustup target add "$rust_target"
 先启动 Serve，再指定 HyperHub CLI。脚本会依次运行 native 和 HyperHub 两种模式：
 
 ```sh
-hyperhub start --password-file ~/.hyperhub/password
+hyperhub start
 
 ./scripts/benchmark-linux-static.sh \
   --iterations 5 \
-  --hyperhub ./target/release/hyperhub \
-  --password-file ~/.hyperhub/password
+  --hyperhub ./target/release/hyperhub
 ```
 
 所有 workload 都是静态 ELF，因此不会加载 Gum Agent；`--runtime` 仅作为旧调用兼容参数保留并会被忽略。

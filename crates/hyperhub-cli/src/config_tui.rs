@@ -428,7 +428,6 @@ pub fn run(
     config: Config,
     live: bool,
     newly_initialized: bool,
-    api_key_file: Option<&Path>,
 ) -> Result<TuiResult, String> {
     enable_raw_mode().map_err(|error| error.to_string())?;
     let _guard = TerminalGuard;
@@ -449,7 +448,7 @@ pub fn run(
         config,
         password,
         previous_password: None,
-        runtime_keys: Some(crate::password::RuntimeKeyPaths::current(api_key_file)?),
+        runtime_keys: Some(crate::password::RuntimeKeyPaths::current()?),
         path: path.to_owned(),
         root_certificate_cache: None,
         category: CATEGORY_GATEWAY,
@@ -4484,7 +4483,7 @@ fn save_with_liveness(app: &mut App, live: bool) -> Result<(), String> {
     let api_key = app
         .runtime_keys
         .as_ref()
-        .map(|paths| crate::password::ensure_api_key(Some(&paths.api_key)).map(|(_, key)| key))
+        .map(|paths| crate::password::ensure_api_key(&paths.api_key).map(|(_, key)| key))
         .transpose()?;
     if let Some(previous) = app.previous_password.as_ref().filter(|_| password_changed) {
         config_store::reencrypt_root_certificates(
