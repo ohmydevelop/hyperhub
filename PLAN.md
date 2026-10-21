@@ -11,12 +11,12 @@ Decision: instance selection remains HYPERHUB_HOME; no credential values move to
 
 ## Release v0.2.12
 
-Preflight: implementation a2de33e passed CI 39573901055 on Linux and native Windows, including the live approval subcase and 46 Linux semantic regressions. Latest release is v0.2.11; origin has no v0.2.12 tag.
+Preflight: implementation a2de33e passed CI 39573901055 on Linux and native Windows, including the live approval subcase and 46 Linux semantic regressions. Preflight confirmed that the prior latest release was v0.2.11 and origin had no v0.2.12 tag.
 
-1. DONE locally: workspace/local lockfile versions and release default are 0.2.12; dependency versions are unchanged. Formatting, locked metadata and complete diff checks passed. Commit using the repository skill and immediately push.
-2. Require the exact version commit's full CI to pass before pushing an annotated v0.2.12 tag. Follow the three-platform release workflow to publication; make the removed-parameter migration prominent in release notes.
-3. Download all six public release assets. Verify archive SHA-256, every inner manifest, architecture headers and installer/source equality. Smoke-test the published Linux x86_64 CLI and run the isolated multi-home/automatic-authentication regression. ARM64 receives cross-build verification; macOS is outside the release matrix.
-4. Record final publication evidence, self-review and commit/push documentation, then follow its CI. Preserve the unrelated image and real user configuration/key files throughout.
+1. DONE: workspace/local lockfile versions and release default are 0.2.12; dependency versions are unchanged. Formatting, locked metadata and complete diff checks passed. Version commit 624a864 was immediately pushed.
+2. DONE: version commit 624a864 passed all three jobs in CI 39575366681. The annotated v0.2.12 tag was pushed on that validated commit. Release workflow 39576424981 passed all three builds and publication. v0.2.12 is public with six assets; removed-parameter migration is prominent in its release notes.
+3. DONE: https://github.com/ohmydevelop/hyperhub/releases/tag/v0.2.12 is the latest non-draft, non-prerelease release. Downloaded all six assets; all archive SHA-256 and inner manifests match, Linux ELF/Windows PE headers identify the correct architectures, and installers match source. Published Linux x86_64 --help/doctor and embedded Agent verification passed. All nine CLI entries reject both removed options with a migration message; the published binary also passed isolated multi-home/automatic-authentication, missing/wrong key rejection and envelope repair regressions. Evidence: target/diagnostics/release-0.2.12/{source-ci.json,release-ci.json,release.json,multi-home.log,release-assets/verification.json,release-assets/smoke.json,release-assets/architectures.json}. ARM64 was cross-built, not run on native hardware; macOS is outside the release matrix.
+4. Publication and verification records are complete. Self-review and commit/push documentation, then follow its exact-commit CI; the GitHub run is the durable final CI record. The release tag remains on validated source commit 624a864. The unrelated image, real user configuration/key files, installed binary and running Serve remain untouched.
 
 # Completed: Runtime key persistence correction (2026-10-16)
 
