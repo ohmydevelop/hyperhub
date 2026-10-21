@@ -1,6 +1,6 @@
 # Remove runtime API Key CLI parameters (2026-10-21)
 
-User request: remove explicit runtime API Key parameters. Commands must read the current HyperHub Home's runtime/api-key internally and retain all authentication and envelope checks. Preserve administrator/backup password options, real user state and the unrelated image. This task does not request another release or local installation.
+User request: remove explicit runtime API Key parameters. Commands must read the current HyperHub Home's runtime/api-key internally and retain all authentication and envelope checks. Preserve administrator/backup password options, real user state and the unrelated image. User now explicitly requests publication; do not change the user's installed binary or running Serve.
 
 1. DONE: traced all CLI parsers, Serve spawning, configuration saves, bundled guidance and unified regression runners. The new removed-option regression failed against the old parser because start accepted --password-file (target/diagnostics/remove-api-key-options/before.log).
 2. DONE: removed --api-key-file and runtime --password-file from all commands, option structs and help. Use instance paths consistently for runtime key operations and child Serve startup; preserve target arguments after the run boundary. Reject removed options with an actionable message.
@@ -8,6 +8,15 @@ User request: remove explicit runtime API Key parameters. Commands must read the
 4. DONE locally: formatting, workspace all-target tests (CLI 147, Agent core 22, core 189), final CLI tests, isolated multi-home and sequential approval integration, Skill contract, Bash/Python checks, 17-case mock smart-protection runner and Windows GNU all-target cross-check passed. The approval live-update subcase was skipped because the real user Serve is running; CI uses isolated runners for that subcase and native Windows execution. Main agent reviewed the complete diff and compatibility record. Commit via the repository skill, immediately push and follow exact-commit CI to completion; GitHub records the final CI result. Evidence: target/diagnostics/remove-api-key-options/. No changes to the user Serve, real credentials or installed binary.
 
 Decision: instance selection remains HYPERHUB_HOME; no credential values move to argv or a new environment variable. The custom API Key path CLI override is intentionally removed together with its alias. The encrypted configuration format and per-session authentication remain unchanged.
+
+## Release v0.2.12
+
+Preflight: implementation a2de33e passed CI 39573901055 on Linux and native Windows, including the live approval subcase and 46 Linux semantic regressions. Latest release is v0.2.11; origin has no v0.2.12 tag.
+
+1. DONE locally: workspace/local lockfile versions and release default are 0.2.12; dependency versions are unchanged. Formatting, locked metadata and complete diff checks passed. Commit using the repository skill and immediately push.
+2. Require the exact version commit's full CI to pass before pushing an annotated v0.2.12 tag. Follow the three-platform release workflow to publication; make the removed-parameter migration prominent in release notes.
+3. Download all six public release assets. Verify archive SHA-256, every inner manifest, architecture headers and installer/source equality. Smoke-test the published Linux x86_64 CLI and run the isolated multi-home/automatic-authentication regression. ARM64 receives cross-build verification; macOS is outside the release matrix.
+4. Record final publication evidence, self-review and commit/push documentation, then follow its CI. Preserve the unrelated image and real user configuration/key files throughout.
 
 # Completed: Runtime key persistence correction (2026-10-16)
 
