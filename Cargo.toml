@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/hyperhub-runtime",
   "crates/hyperhub-agent-core",
   "crates/hyperhub-core",
   "crates/hyperhub-cli",

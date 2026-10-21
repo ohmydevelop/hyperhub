@@ -1395,6 +1395,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperhub-runtime"
+version = "0.2.12"
+dependencies = [
+ "arc-swap",
+ "libc",
+ "libloading",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,4 +1,25 @@
-# Remove runtime API Key CLI parameters (2026-10-21)
+# Smooth upgrades and versioned Hook engines (2026-10-21)
+
+Accepted contract: one initial target restart may install the new base. Later compatible updates keep target PIDs and existing connections alive, with a bounded switching barrier. Existing connections drain on their original forwarding implementation; new calls/connections use the new generation. V1 updates existing Hook implementations only. Base ABI, unknown native Hook points and incompatible state changes require an explicit maintenance restart; never restart targets automatically.
+
+## Implementation milestones
+
+1. DONE locally, native CI pending: shared version/capability contract, C ABI engine boundary, verified content-addressed module loader, generation leases, prepare/commit/abort/query/rollback lifecycle. Thirteen lifetime/state regressions and six native/cache integration regressions pass locally; two fixture modules execute different native code while old leases stay valid. Module destruction occurs outside the transaction mutex. Full workspace all-target tests (CLI 147, Agent 22, core 189, runtime 19), formatting, new-crate strict Clippy and Windows GNU all-target check pass; native Windows CI is pending. Evidence: target/diagnostics/live-upgrade-workspace.log. This crate is not yet integrated into existing Hosts or Serve.
+2. Separate resident Hook/ptrace Hosts from replaceable processing engines. Keep ptrace ownership and EXITKILL semantics; preserve pending syscall entry/exit generation, async DNS completion, fork/exec and all socket/fd/Fake-IP state. Integrate Linux ptrace, Linux Gum and Windows Gum with real versioned implementations rather than merely changing a reported version.
+3. Separate stable Serve ingress/control/session authority from versioned forwarding workers. Pass accepted sockets through platform abstractions, keep existing streams on old workers, route new connections to the active worker and preserve session/Fake-IP/audit identity. Implement authenticated worker bootstrap and cleanup without API Key argv/environment parameters.
+4. Add the authenticated upgrade coordinator, durable transaction journal, helper installation acknowledgements and safe rollback. Upgrade must not call stop/restart on the resident base. Expose preparing/switching/draining/complete/rolled_back/requires_restart in status with per-process generations and outstanding references. Preserve Windows self-replacement constraints and survive initiating CLI exit.
+5. Register source-based upgrade fixtures in existing Linux/Windows unified suites: persistent TCP/TLS/WebSocket/SSH, concurrent Hook activity, syscall boundaries, async completions/cancellation, child creation, rejection and rollback, interrupted helpers/coordinators, retained generation limits and performance measurements. Run local/cross-target checks and native CI; self-review and commit/push each verified milestone using the repository skill.
+
+## Defaults and constraints
+
+- Switch barrier budget 100 ms, preparation timeout 30 s, health observation 30 s. These are cancellation budgets, not hard real-time OS guarantees.
+- At most four retained old generations per Host/worker group. Reject additional upgrades when references prevent collection; never close a connection merely to drain an upgrade.
+- A failed compatibility/load/handshake transaction preserves the old active implementation. Do not claim rollback can reverse completed business I/O or recover arbitrary native-code crashes.
+- Use versioned C structures, opaque handles and explicit allocator ownership; no Rust collections, locks or references across library ABI boundaries. Modules must be immutable and validated before use.
+- Preserve the user's real Serve, targets, credentials and installed CLI. All runtime exercises use isolated Homes/local services/dummy credentials. Preserve untracked `Pasted image.png`.
+- This request authorizes implementation and repository commits/pushes, not deployment to the user's real processes or publication of a new release. Native Windows CI is required; macOS has no implemented managed backend and must not be claimed verified.
+
+# Completed: Remove runtime API Key CLI parameters (2026-10-21)
 
 User request: remove explicit runtime API Key parameters. Commands must read the current HyperHub Home's runtime/api-key internally and retain all authentication and envelope checks. Preserve administrator/backup password options, real user state and the unrelated image. User now explicitly requests publication; do not change the user's installed binary or running Serve.
 
