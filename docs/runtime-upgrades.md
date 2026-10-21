@@ -44,7 +44,10 @@ explicit unsafe boundary.
 ## Module lifetime
 
 The cache uses digest-based names and installs without replacing existing files.
-Files are validated again on opening, and must be regular, read-only objects.
+Writers are closed before publication. Files are validated again on opening,
+and must be regular, read-only objects. Concurrent Windows publication uses
+the existing verified object even when a held reader makes the move return a
+sharing violation; it never replaces that object.
 On Linux the loader uses the verified descriptor through `/proc/self/fd`; Windows
 keeps a handle that denies write/delete sharing. The cache must be a private
 Host-owned directory (mode 0700 on Unix; the coordinator must create an equivalent

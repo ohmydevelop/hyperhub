@@ -78,11 +78,14 @@ impl Artifact {
             #[cfg(not(unix))]
             permissions.set_readonly(true);
             file.set_permissions(permissions).map_err(io_error)?;
-            // Never replace a mapped file. Concurrent writers may install the
-            // same digest; validate their object rather than overwriting it.
-            install_link(&temporary, &path)
+            Ok(())
         })();
+        // Close the writer before publishing. A Windows verifier deliberately
+        // denies write sharing; publishing a still-open writer races that lock.
         drop(file);
+        // Never replace a mapped file. Concurrent writers may install the same
+        // digest; validate their object rather than overwriting it.
+        let result = result.and_then(|()| install_link(&temporary, &path));
         remove_temporary(&temporary);
         result?;
         #[cfg(unix)]
@@ -230,9 +233,48 @@ fn install_link(temporary: &Path, path: &Path) -> Result<(), Error> {
         return Ok(());
     }
     let error = std::io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(80 | 183)) {
+    // An existing destination held by a verifier can produce SHARING_VIOLATION
+    // or ACCESS_DENIED before Windows reports ALREADY_EXISTS. Accept only its
+    // presence here; Artifact::open still verifies type, permissions and digest.
+    if path.try_exists().unwrap_or(false) {
         Ok(())
     } else {
         Err(io_error(error))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_does_not_replace_a_destination_held_by_a_verifier() {
+        let root =
+            std::env::temp_dir().join(format!("hyperhub-held-reader-{}", std::process::id()));
+        let bytes = b"published module";
+        let manifest = Manifest {
+            version: "1".into(),
+            target: "test-target".into(),
+            abi: crate::abi::ABI_V1,
+            state_schema: 1,
+            hooks: 1,
+            sha256: hex(&Sha256::digest(bytes)),
+            size: bytes.len() as u64,
+        };
+        let held = Artifact::install(&root, &manifest, &bytes[..]).unwrap();
+        let published = held.path().to_owned();
+        let candidate = root.join("candidate");
+        fs::write(&candidate, b"must not replace the published module").unwrap();
+        // Keep the verifier's deny-write/delete handle open during publication.
+        install_link(&candidate, &published).unwrap();
+        let checked = Artifact::open(published.clone(), &manifest).unwrap();
+        assert_eq!(fs::read(&published).unwrap(), bytes);
+        assert!(candidate.is_file());
+        drop(checked);
+        drop(held);
+        let mut permissions = fs::metadata(&published).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(published, permissions).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -226,7 +226,10 @@ fn concurrent_cache_installs_validate_existing_objects_without_overwriting() {
             std::thread::spawn(move || Artifact::install(&cache, &manifest, &bytes[..]).unwrap())
         })
         .collect();
-    let objects: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    // Join every installer before asserting, so a failing writer cannot race
+    // cleanup or another test after the first panic.
+    let results: Vec<_> = threads.into_iter().map(|t| t.join()).collect();
+    let objects: Vec<_> = results.into_iter().map(Result::unwrap).collect();
     for artifact in &objects {
         assert_eq!(fs::read(artifact.path()).unwrap(), bytes);
     }
