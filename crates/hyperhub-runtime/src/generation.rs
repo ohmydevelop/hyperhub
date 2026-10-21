@@ -33,7 +33,13 @@ impl std::error::Error for Error {}
 pub trait Engine: Send + Sync {
     fn manifest(&self) -> &Manifest;
     fn health(&self) -> bool;
-    fn invoke(&self, operation: u32, input: &[u8], output: &mut [u8]) -> Result<usize, i32>;
+    fn invoke(
+        &self,
+        calling: &Lease,
+        operation: u32,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, i32>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,7 +116,13 @@ impl Lease {
         &self.0.engine.manifest().version
     }
     pub fn invoke(&self, operation: u32, input: &[u8], output: &mut [u8]) -> Result<usize, i32> {
-        self.0.engine.invoke(operation, input, output)
+        self.0.engine.invoke(self, operation, input, output)
+    }
+    pub(crate) fn belongs_to(&self, engine: &dyn Engine) -> bool {
+        std::ptr::eq(
+            self.0.engine.as_ref() as *const dyn Engine as *const (),
+            engine as *const dyn Engine as *const (),
+        )
     }
 }
 

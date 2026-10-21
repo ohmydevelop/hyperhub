@@ -31,7 +31,13 @@ impl Engine for TestEngine {
     fn health(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
     }
-    fn invoke(&self, _: u32, _: &[u8], output: &mut [u8]) -> Result<usize, i32> {
+    fn invoke(
+        &self,
+        _: &hyperhub_runtime::Lease,
+        _: u32,
+        _: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, i32> {
         if output.is_empty() {
             return Err(abi::BUFFER_TOO_SMALL);
         }
@@ -416,7 +422,13 @@ impl Engine for ReentrantEngine {
     fn health(&self) -> bool {
         true
     }
-    fn invoke(&self, _: u32, _: &[u8], _: &mut [u8]) -> Result<usize, i32> {
+    fn invoke(
+        &self,
+        _: &hyperhub_runtime::Lease,
+        _: u32,
+        _: &[u8],
+        _: &mut [u8],
+    ) -> Result<usize, i32> {
         Ok(0)
     }
 }

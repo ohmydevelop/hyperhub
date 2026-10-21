@@ -87,7 +87,13 @@ fn build(root: &Root, version: &str, cfg: Option<&str>) -> (Manifest, Vec<u8>) {
 }
 struct Echo;
 impl Host for Echo {
-    fn call(&self, operation: u32, input: &[u8], output: &mut [u8]) -> Result<usize, i32> {
+    fn call(
+        &self,
+        _: &hyperhub_runtime::Lease,
+        operation: u32,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, i32> {
         assert_eq!(operation, 7);
         if output.len() < input.len() {
             return Err(abi::BUFFER_TOO_SMALL);
@@ -120,6 +126,12 @@ fn real_native_code_switches_while_old_leases_keep_their_implementation() {
     )
     .unwrap();
     let pending = runtime.acquire();
+    let foreign = load(&root, &v2, &two);
+    assert_eq!(
+        foreign.invoke(&pending, 0, &[], &mut [0; 8]),
+        Err(abi::INVALID)
+    );
+    drop(foreign);
     assert_eq!(answer(&pending), 106);
     runtime
         .prepare("real-swap", &v2, || Ok(load(&root, &v2, &two)))
@@ -238,4 +250,67 @@ fn symlink_or_writable_cache_is_rejected() {
     assert!(Artifact::install(&root.cache(), &manifest, &bytes[..]).is_err());
     fs::set_permissions(root.cache(), fs::Permissions::from_mode(0o755)).unwrap();
     assert!(Artifact::install(&root.cache(), &manifest, &bytes[..]).is_err());
+}
+
+#[derive(Default)]
+struct AsyncHost {
+    pending: std::sync::Mutex<Vec<hyperhub_runtime::Lease>>,
+}
+impl Host for AsyncHost {
+    fn call(
+        &self,
+        calling: &hyperhub_runtime::Lease,
+        operation: u32,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, i32> {
+        assert_eq!(operation, 7);
+        if output.len() < input.len() {
+            return Err(abi::BUFFER_TOO_SMALL);
+        }
+        self.pending.lock().unwrap().push(calling.clone());
+        output[..input.len()].copy_from_slice(input);
+        Ok(input.len())
+    }
+}
+#[test]
+fn host_async_work_pins_the_calling_generation_after_a_concurrent_switch() {
+    let root = Root::new();
+    let (v1, one) = build(&root, "async-1", None);
+    let (v2, two) = build(&root, "async-2", Some("engine_v2"));
+    let host = Arc::new(AsyncHost::default());
+    let first = Artifact::install(&root.cache(), &v1, &one[..]).unwrap();
+    let runtime = Runtime::new(
+        Arc::new(unsafe { NativeEngine::load(first, Some(host.clone())).unwrap() }),
+        Settings {
+            health_window: Duration::ZERO,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    let entered = runtime.acquire();
+    runtime
+        .prepare("async-swap", &v2, || {
+            let artifact = Artifact::install(&root.cache(), &v2, &two[..]).unwrap();
+            Ok(Arc::new(unsafe {
+                NativeEngine::load(artifact, Some(host.clone())).unwrap()
+            }))
+        })
+        .unwrap();
+    runtime.commit("async-swap").unwrap();
+    runtime.observe().unwrap();
+    // The old invocation enters Host services AFTER the active pointer changed.
+    // Capturing active here would pin the wrong library for its completion.
+    assert_eq!(entered.invoke(1, b"old", &mut [0; 3]), Ok(3));
+    drop(entered);
+    assert_eq!(runtime.acquire().invoke(1, b"new", &mut [0; 3]), Ok(3));
+    let status = runtime.snapshot().unwrap();
+    assert_eq!(status.retired[0].references, 1);
+    let pending = std::mem::take(&mut *host.pending.lock().unwrap());
+    assert_eq!(pending[0].generation(), 0);
+    assert_eq!(pending[1].generation(), 1);
+    assert_eq!(answer(&pending[0]), 106);
+    assert_eq!(answer(&pending[1]), 206);
+    drop(pending);
+    assert!(runtime.snapshot().unwrap().retired.is_empty());
 }

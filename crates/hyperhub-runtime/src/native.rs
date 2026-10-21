@@ -1,15 +1,27 @@
-use crate::{abi, artifact::Artifact, Engine, Error, Manifest};
+use crate::{abi, artifact::Artifact, Engine, Error, Lease, Manifest};
 use sha2::{Digest, Sha256};
 use std::ffi::c_void;
 use std::sync::Arc;
 
 /// Services execute in the resident Host; modules receive only this C trampoline.
-/// Engines must not retain the temporary input/output buffers.
+/// Engines must not retain the temporary input/output buffers. Clone `calling`
+/// before starting asynchronous work; acquiring the current generation would
+/// be incorrect when a switch has already overtaken this invocation.
 pub trait Host: Send + Sync {
-    fn call(&self, operation: u32, input: &[u8], output: &mut [u8]) -> Result<usize, i32>;
+    fn call(
+        &self,
+        calling: &Lease,
+        operation: u32,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, i32>;
 }
 struct Bridge {
     host: Arc<dyn Host>,
+}
+struct CallContext<'a> {
+    bridge: &'a Bridge,
+    calling: &'a Lease,
 }
 
 pub struct NativeEngine {
@@ -70,11 +82,24 @@ impl Engine for NativeEngine {
     fn health(&self) -> bool {
         unsafe { (self.api.health.unwrap())() == abi::OK }
     }
-    fn invoke(&self, operation: u32, input: &[u8], output: &mut [u8]) -> Result<usize, i32> {
-        let services = self.bridge.as_ref().map(|bridge| abi::HostServices {
+    fn invoke(
+        &self,
+        calling: &Lease,
+        operation: u32,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, i32> {
+        if !calling.belongs_to(self) {
+            return Err(abi::INVALID);
+        }
+        let context = self
+            .bridge
+            .as_ref()
+            .map(|bridge| CallContext { bridge, calling });
+        let services = context.as_ref().map(|context| abi::HostServices {
             struct_size: std::mem::size_of::<abi::HostServices>() as u32,
             abi: abi::ABI_V1,
-            context: (&**bridge as *const Bridge).cast_mut().cast(),
+            context: (context as *const CallContext<'_>).cast_mut().cast(),
             call: Some(host_call),
         });
         let mut written = 0;
@@ -108,8 +133,13 @@ unsafe extern "C" fn host_call(
     capacity: usize,
     written: *mut usize,
 ) -> i32 {
+    if written.is_null() {
+        return abi::INVALID;
+    }
+    unsafe {
+        written.write(0);
+    }
     if context.is_null()
-        || written.is_null()
         || (input.is_null() && input_len != 0)
         || (output.is_null() && capacity != 0)
         || input_len > isize::MAX as usize
@@ -117,13 +147,10 @@ unsafe extern "C" fn host_call(
     {
         return abi::INVALID;
     }
-    unsafe {
-        written.write(0);
-    }
     // Valid, non-overlapping buffers and the context are guaranteed by the
     // trusted module contract; no pointer escapes this call.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let bridge = unsafe { &*context.cast::<Bridge>() };
+        let context = unsafe { &*context.cast::<CallContext<'_>>() };
         let input = if input_len == 0 {
             &[]
         } else {
@@ -134,7 +161,10 @@ unsafe extern "C" fn host_call(
         } else {
             unsafe { std::slice::from_raw_parts_mut(output, capacity) }
         };
-        bridge.host.call(operation, input, output)
+        context
+            .bridge
+            .host
+            .call(context.calling, operation, input, output)
     }));
     match result {
         Ok(Ok(count)) if count <= capacity => {
@@ -143,7 +173,30 @@ unsafe extern "C" fn host_call(
             }
             abi::OK
         }
-        Ok(Err(code)) => code,
+        Ok(Err(code)) if code != abi::OK => code,
         _ => abi::FAILED,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_host_call_still_initializes_the_output_length() {
+        let mut written = usize::MAX;
+        let result = unsafe {
+            host_call(
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut written,
+            )
+        };
+        assert_eq!(result, abi::INVALID);
+        assert_eq!(written, 0);
     }
 }

@@ -45,7 +45,11 @@ with the same owner's authority deliberately changing permissions or memory.
 `Runtime::acquire` returns a generation lease without taking the transaction
 mutex. A call invokes only that lease's implementation. Syscall entry/exit pairs,
 asynchronous completion/cancellation, and forwarding connections must retain the
-lease across their complete lifetime. Dropping the current-generation pointer
+lease across their complete lifetime. Host services receive the exact calling
+lease through a per-call opaque C context. They must clone that lease before
+starting asynchronous work, even if the active generation has already changed;
+acquiring the current generation there would pin the wrong implementation.
+Dropping the current-generation pointer
 cannot unload code still referenced by a lease. Module reclamation and abort
 cleanup run after releasing the transaction mutex because destructors can invoke
 Host services.
