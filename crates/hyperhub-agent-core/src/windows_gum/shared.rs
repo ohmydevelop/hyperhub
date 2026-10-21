@@ -57,6 +57,6 @@ pub(in crate::windows_gum) use super::{
 pub(in crate::windows_gum) use crate::{
     hh_agent_build_handshake, hh_agent_close_socket, hh_agent_handshake_complete,
     hh_agent_note_nonblocking, hh_agent_record_dns, hh_agent_set_handshake_complete,
-    hh_agent_socket_nonblocking, hh_agent_tls_ca_der, hh_agent_validate_handshake_reply,
+    hh_agent_socket_nonblocking, hh_agent_tls_ca_der, hh_agent_validate_socket_handshake_reply,
     HH_ERR_BUFFER_TOO_SMALL, HH_OK,
 };

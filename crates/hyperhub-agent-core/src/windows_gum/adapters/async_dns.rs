@@ -9,6 +9,7 @@ use windows_sys::Win32::Networking::WinSock::{WSAEINVAL, WSAENOBUFS, WSA_IO_PEND
 use windows_sys::Win32::System::Threading::SetEvent;
 
 struct Pending {
+    engine: hyperhub_runtime::Lease,
     hostname: String,
     result: usize,
     callback: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
@@ -54,6 +55,8 @@ unsafe fn record(request: &Pending, status: i32) {
     if status != 0 || request.result == 0 {
         return;
     }
+    let _guard = HookGuard::enter();
+    let _engine = crate::engine_call::EngineCallGuard::with_lease(request.engine.clone());
     let Ok(hostname) = CString::new(request.hostname.as_str()) else {
         return;
     };
@@ -145,7 +148,15 @@ pub(super) unsafe fn resolve(
     } else {
         None
     };
+    let Some(engine) = crate::state()
+        .lock()
+        .ok()
+        .and_then(|core| crate::engine_call::calling(&core.engine).ok())
+    else {
+        return WSAENOBUFS;
+    };
     let request = Arc::new(Pending {
+        engine,
         hostname: wide_string(node),
         result: result as usize,
         callback,
@@ -251,6 +262,7 @@ mod tests {
                 caller.hEvent = event;
                 caller.Internal = WSA_IO_PENDING as usize;
                 let request = Arc::new(Pending {
+                    engine: hyperhub_engine::resident().acquire(),
                     hostname: "localhost".into(),
                     result: 0,
                     callback: None,
@@ -284,6 +296,7 @@ mod tests {
             pending().lock().unwrap().insert(
                 address,
                 Arc::new(Pending {
+                    engine: hyperhub_engine::resident().acquire(),
                     hostname: "localhost".into(),
                     result: 0,
                     callback: Some(user_callback),
@@ -310,6 +323,7 @@ mod tests {
             caller.Internal = 123;
             caller.hEvent = event;
             let request = Pending {
+                engine: hyperhub_engine::resident().acquire(),
                 hostname: "localhost".into(),
                 result: 0,
                 callback: None,

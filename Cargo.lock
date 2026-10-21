@@ -1325,6 +1325,8 @@ dependencies = [
  "flate2",
  "frida-sys",
  "hyperhub-core",
+ "hyperhub-engine",
+ "hyperhub-runtime",
  "ipnet",
  "libc",
  "rand",
@@ -1349,6 +1351,8 @@ version = "0.2.12"
 dependencies = [
  "arc-swap",
  "base64",
+ "hyperhub-engine",
+ "hyperhub-runtime",
  "ipnet",
  "libc",
  "regex",
@@ -1392,6 +1396,16 @@ dependencies = [
  "windows-sys 0.61.2",
  "x509-parser",
  "zeroize",
+]
+
+[[package]]
+name = "hyperhub-engine"
+version = "0.2.12"
+dependencies = [
+ "hyperhub-runtime",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

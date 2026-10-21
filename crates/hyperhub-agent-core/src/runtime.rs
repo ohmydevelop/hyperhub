@@ -1,5 +1,5 @@
 use std::env;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, Once};
@@ -11,8 +11,8 @@ use crate::control::{bootstrap_child_control, install_inherited_environment};
 use crate::control::{fetch_trust_control, SessionState};
 use crate::{
     decode_first_pem_certificate, install_ca_environment, materialize_root_ca, parse_ip,
-    GatewayState, HhConnectPlan, SandboxState, SocketState, TargetAddress, TrustState,
-    HH_ERR_INVALID, HH_ERR_NOT_INITIALIZED, HH_ERR_PROTOCOL,
+    GatewayState, HhConnectPlan, SandboxState, SocketState, TrustState, HH_ERR_INVALID,
+    HH_ERR_NOT_INITIALIZED, HH_ERR_PROTOCOL,
 };
 
 static RUNTIME_STATE: AtomicPtr<Mutex<AgentRuntime>> = AtomicPtr::new(null_mut());
@@ -34,6 +34,7 @@ pub(crate) fn state() -> &'static Mutex<AgentRuntime> {
 #[cfg(all(windows, feature = "gum-agent"))]
 pub(crate) fn replace_state_after_fork(runtime: AgentRuntime) {
     let _ = state();
+    crate::engine_call::reset_after_fork();
     let _ = RUNTIME_STATE.swap(
         Box::into_raw(Box::new(Mutex::new(runtime))),
         Ordering::AcqRel,
@@ -41,6 +42,7 @@ pub(crate) fn replace_state_after_fork(runtime: AgentRuntime) {
 }
 
 pub(crate) struct AgentRuntime {
+    pub(crate) engine: Arc<hyperhub_runtime::Runtime>,
     pub(crate) session: SessionState,
     pub(crate) gateway: GatewayState,
     pub(crate) trust: TrustState,
@@ -50,6 +52,7 @@ pub(crate) struct AgentRuntime {
 impl Default for AgentRuntime {
     fn default() -> Self {
         Self {
+            engine: hyperhub_engine::resident(),
             session: SessionState::default(),
             gateway: GatewayState::default(),
             trust: TrustState::default(),
@@ -184,6 +187,9 @@ impl AgentRuntime {
         if !self.session.initialized {
             return Err(HH_ERR_NOT_INITIALIZED);
         }
+        let hostname =
+            hyperhub_engine::normalize(&crate::engine_call::calling(&self.engine)?, &hostname)
+                .map_err(engine_error)?;
         self.gateway.dns.insert(ip, hostname);
         Ok(())
     }
@@ -200,21 +206,27 @@ impl AgentRuntime {
         }
         let proxy = self.gateway.proxy.ok_or(HH_ERR_NOT_INITIALIZED)?;
         let target_ip = parse_ip(address)?;
-        if SocketAddr::new(target_ip, port) == proxy {
+        let engine = crate::engine_call::calling(&self.engine)?;
+        let decision = hyperhub_engine::connect(
+            &engine,
+            &hyperhub_engine::contract::ConnectInput {
+                proxy,
+                ip: target_ip,
+                port,
+                hostname: self.gateway.dns.get(&target_ip).cloned(),
+            },
+        )
+        .map_err(engine_error)?;
+        if !decision.intercept {
             return Ok(HhConnectPlan::default());
         }
-        let target = self
-            .gateway
-            .dns
-            .get(&target_ip)
-            .cloned()
-            .map(TargetAddress::Domain)
-            .unwrap_or(TargetAddress::Ip(target_ip));
+        let target = decision.target;
         let connection_id = self.gateway.next_connection_id;
         self.gateway.next_connection_id = self.gateway.next_connection_id.saturating_add(1);
         self.gateway.sockets.insert(
             socket,
             SocketState {
+                engine,
                 connection_id,
                 target,
                 port,
@@ -225,73 +237,41 @@ impl AgentRuntime {
             },
         );
 
-        let mut plan = HhConnectPlan {
+        Ok(HhConnectPlan {
             should_intercept: 1,
-            proxy_port: proxy.port(),
+            proxy_port: decision.port,
             connection_id,
+            proxy_family: decision.family,
+            proxy_address: decision.address,
             ..HhConnectPlan::default()
-        };
-        match proxy.ip() {
-            IpAddr::V4(ip) => {
-                plan.proxy_family = 2;
-                plan.proxy_address[..4].copy_from_slice(&ip.octets());
-            }
-            IpAddr::V6(ip) => {
-                // Keep the portable AF_INET6 value used by the Windows hook.
-                plan.proxy_family = 10;
-                plan.proxy_address.copy_from_slice(&ip.octets());
-            }
-        }
-        Ok(plan)
+        })
     }
 
     pub(crate) fn handshake(&self, socket: u64, phase: u32) -> Result<Vec<u8>, i32> {
         let state = self.gateway.sockets.get(&socket).ok_or(HH_ERR_INVALID)?;
-        match phase {
-            0 => Ok(vec![5, 1, 2]),
-            1 => {
-                let username = format!(
+        hyperhub_engine::handshake(
+            &state.engine,
+            &hyperhub_engine::contract::HandshakeInput {
+                phase,
+                username: format!(
                     "hh2:{}:{}:{}",
                     self.session.session_id,
                     std::process::id(),
                     state.connection_id
-                );
-                if username.len() > u8::MAX as usize || self.session.token.len() > u8::MAX as usize
-                {
-                    return Err(HH_ERR_PROTOCOL);
-                }
-                let mut out = Vec::with_capacity(username.len() + self.session.token.len() + 3);
-                out.push(1);
-                out.push(username.len() as u8);
-                out.extend_from_slice(username.as_bytes());
-                out.push(self.session.token.len() as u8);
-                out.extend_from_slice(self.session.token.as_bytes());
-                Ok(out)
-            }
-            2 => {
-                let mut out = vec![5, 1, 0];
-                match &state.target {
-                    TargetAddress::Domain(host) => {
-                        if host.len() > u8::MAX as usize {
-                            return Err(HH_ERR_PROTOCOL);
-                        }
-                        out.push(3);
-                        out.push(host.len() as u8);
-                        out.extend_from_slice(host.as_bytes());
-                    }
-                    TargetAddress::Ip(IpAddr::V4(ip)) => {
-                        out.push(1);
-                        out.extend_from_slice(&ip.octets());
-                    }
-                    TargetAddress::Ip(IpAddr::V6(ip)) => {
-                        out.push(4);
-                        out.extend_from_slice(&ip.octets());
-                    }
-                }
-                out.extend_from_slice(&state.port.to_be_bytes());
-                Ok(out)
-            }
-            _ => Err(HH_ERR_INVALID),
-        }
+                ),
+                password: self.session.token.as_bytes().to_vec(),
+                target: state.target.clone(),
+                port: state.port,
+            },
+        )
+        .map_err(engine_error)
+    }
+}
+
+pub(crate) fn engine_error(error: i32) -> i32 {
+    match error {
+        hyperhub_engine::contract::INVALID => HH_ERR_INVALID,
+        hyperhub_engine::contract::CAPACITY => crate::HH_ERR_BUFFER_TOO_SMALL,
+        _ => HH_ERR_PROTOCOL,
     }
 }

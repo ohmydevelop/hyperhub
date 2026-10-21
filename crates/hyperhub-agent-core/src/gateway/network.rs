@@ -3,14 +3,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::HH_ERR_INVALID;
 
-#[derive(Clone, Debug)]
-pub(crate) enum TargetAddress {
-    Domain(String),
-    Ip(IpAddr),
-}
+pub(crate) use hyperhub_engine::TargetAddress;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SocketState {
+    pub(crate) engine: hyperhub_runtime::Lease,
     pub(crate) connection_id: u64,
     pub(crate) target: TargetAddress,
     pub(crate) port: u16,

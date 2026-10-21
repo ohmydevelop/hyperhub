@@ -2,11 +2,20 @@
 
 ## Implementation status
 
-The `hyperhub-runtime` crate provides the module and generation primitives.
-It is not yet wired to the CLI, the ptrace supervisor, Gum adapters, or Serve.
-`hyperhub upgrade` still uses the previous binary replacement workflow. Installing
-this source revision alone does not enable live Hook or forwarding upgrades.
-The remaining integration milestones are tracked in `PLAN.md`.
+The `hyperhub-runtime` crate supplies module, generation and socket-transfer
+primitives. The first production processing group now uses `hyperhub-engine`:
+DNS normalization, connection planning, SOCKS packet encoding and reply validation.
+Linux ptrace and Linux/Windows Gum route those operations through generation
+leases. Agent sockets retain their original Engine through all handshake phases,
+including `dup`; ptrace retains its tracer, descriptor state and syscall leases.
+
+The Agent exposes trusted in-process prepare/commit/abort/query/observe/rollback
+through `hh_agent_engine_control`. This is not an authenticated remote endpoint.
+External callers still need the planned coordinator and authenticated transport.
+`hyperhub upgrade` still uses the previous binary replacement workflow. This
+revision does not enable automatic live upgrades from the CLI. The remaining
+Hook capability groups, Serve workers, durable coordination, release packaging
+and end-to-end upgrade suites remain tracked in `PLAN.md`.
 
 ## Ownership and compatibility
 
@@ -118,3 +127,40 @@ check actual peer EOF to prove rejected descriptors were closed. Windows CI runs
 the native cross-process duplication path. This tests the transport primitive;
 Serve worker processes, authoritative sessions/Fake-IP lookup, cancellation,
 audit forwarding and upgrade orchestration still need integration.
+
+## Network Host integration
+
+Build the independent native network module with
+`cargo build -p hyperhub-engine --release --locked`. It exports `hh_engine_v1`.
+The initial Host fallback uses the same processing implementation, with the
+same JSON byte schema, and does not require a downloaded module. Its manifest
+identity is logical; native candidates use the actual file size and digest.
+The network operation mask describes this processing group, not complete native
+Hook coverage. Changes to the native bridges or other Host capabilities are not
+made hot-reloadable by this group alone.
+
+The Host supplies snapshots of the data required by a processing call and owns
+all mutations: session/token, DNS/Fake-IP identity, socket IDs, nonblocking/IO
+state, and descriptor sharing. No Rust value crosses the native boundary. Agent
+Hook guards pin one generation across synchronous calls; Windows asynchronous
+DNS records pin it until completion/cancellation and restore it when publishing
+results. User callbacks can enter new calls on the current generation. Windows
+fork rebuilding clears copied thread-local context; copied parent guards cannot
+restore it into the rebuilt child. This is not a claim that all fork/exec upgrade
+histories have been verified.
+
+Management loading, health checks and reclamation run without the Agent-state
+mutex. Trusted internal module IO bypasses target Hook enforcement, as other
+Host control work does. Public network transports must not invoke these commands
+before authentication. The C entry requires reply capacity before performing a
+mutation, so a buffer-size probe cannot prepare or commit a generation.
+
+`tests/fixtures/network_upgrade_engine.rs` is independently compiled by the Agent
+Host suite. It changes DNS normalization, CONNECT domain encoding and reply
+validation. The suite uses the exported C ABI to switch real module code while
+checking stable process/state identity, old/new socket behavior, delayed DNS
+recording, descriptor duplication, reclamation and incompatible state rejection.
+Its minimal decoder accepts controlled ASCII test requests only. It is not a
+production module parser. Existing Linux ptrace/Gum and Windows Hook suites cover
+the initial Engine path; remote-coordinated live native-Hook switching and
+persistent TLS/SSH/WebSocket upgrades still require separate end-to-end tests.

@@ -179,14 +179,23 @@ extern "C" fn write_hook_report() {
         let _ = std::fs::write(path, bytes);
     }
 }
-struct HookGuard;
+pub(in crate::unix_gum) struct HookGuard {
+    _engine: Option<crate::engine_call::EngineCallGuard>,
+}
 impl HookGuard {
-    fn enter() -> Option<Self> {
+    pub(in crate::unix_gum) fn enter() -> Option<Self> {
         INSIDE_HOOK.with(|inside| {
             if inside.replace(true) {
                 None
             } else {
-                Some(Self)
+                if !crate::engine_call::EngineCallGuard::available() {
+                    inside.set(false);
+                    None
+                } else {
+                    Some(Self {
+                        _engine: crate::engine_call::EngineCallGuard::enter(),
+                    })
+                }
             }
         })
     }
@@ -422,8 +431,12 @@ unsafe fn exchange_handshake(fd: c_int) -> bool {
         if phase < 2 {
             let mut reply = [0u8; 2];
             if !recv_all(fd, &mut reply)
-                || crate::hh_agent_validate_handshake_reply(phase, reply.as_ptr(), reply.len())
-                    != crate::HH_OK
+                || crate::hh_agent_validate_socket_handshake_reply(
+                    fd as u64,
+                    phase,
+                    reply.as_ptr(),
+                    reply.len(),
+                ) != crate::HH_OK
             {
                 return false;
             }
@@ -450,8 +463,12 @@ unsafe fn exchange_handshake(fd: c_int) -> bool {
             return false;
         }
         let validation = [head[0], head[1], head[2], head[3], 0];
-        if crate::hh_agent_validate_handshake_reply(phase, validation.as_ptr(), validation.len())
-            != crate::HH_OK
+        if crate::hh_agent_validate_socket_handshake_reply(
+            fd as u64,
+            phase,
+            validation.as_ptr(),
+            validation.len(),
+        ) != crate::HH_OK
         {
             return false;
         }

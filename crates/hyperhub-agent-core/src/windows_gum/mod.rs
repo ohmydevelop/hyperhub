@@ -432,3 +432,8 @@ mod tests {
         assert!(hh_gum_replacement(DNSQUERY_EX + 1).is_null());
     }
 }
+
+pub(crate) fn with_host_io<T>(call: impl FnOnce() -> T) -> T {
+    let _guard = gum::HookGuard::enter();
+    call()
+}

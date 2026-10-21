@@ -137,7 +137,9 @@ thread_local! {
     pub(in crate::windows_gum) static INSIDE_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
-pub(in crate::windows_gum) struct HookGuard;
+pub(in crate::windows_gum) struct HookGuard {
+    _engine: Option<crate::engine_call::EngineCallGuard>,
+}
 
 impl HookGuard {
     pub(in crate::windows_gum) fn enter() -> Option<Self> {
@@ -145,7 +147,14 @@ impl HookGuard {
             if inside.replace(true) {
                 None
             } else {
-                Some(Self)
+                if !crate::engine_call::EngineCallGuard::available() {
+                    inside.set(false);
+                    None
+                } else {
+                    Some(Self {
+                        _engine: crate::engine_call::EngineCallGuard::enter(),
+                    })
+                }
             }
         })
     }

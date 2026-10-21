@@ -18,6 +18,8 @@ name = "windows_hook_probe"
 path = "../../tests/fixtures/windows_hook_probe.rs"
 
 [dependencies]
+hyperhub-engine = { path = "../hyperhub-engine" }
+hyperhub-runtime = { path = "../hyperhub-runtime" }
 arc-swap = "1"
 base64 = "0.22"
 ipnet = { version = "2", features = ["serde"] }

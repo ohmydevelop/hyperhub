@@ -152,6 +152,7 @@ enum PendingSyscall {
 struct ThreadState {
     entering: bool,
     pending: Option<PendingSyscall>,
+    engine: Option<hyperhub_runtime::Lease>,
 }
 
 impl Default for ThreadState {
@@ -159,11 +160,14 @@ impl Default for ThreadState {
         Self {
             entering: true,
             pending: None,
+            engine: None,
         }
     }
 }
 
 struct Supervisor {
+    engine: std::sync::Arc<hyperhub_runtime::Runtime>,
+    socket_engines: HashMap<u64, hyperhub_runtime::Lease>,
     root_pid: libc::pid_t,
     proxy: SocketAddr,
     endpoint: String,
@@ -261,6 +265,8 @@ where
     set_options(child).inspect_err(|_| terminate(child))?;
 
     let mut supervisor = Supervisor {
+        engine: hyperhub_engine::resident(),
+        socket_engines: HashMap::new(),
         root_pid: child,
         proxy,
         endpoint,
@@ -356,6 +362,7 @@ impl Supervisor {
             .values()
             .any(|candidate| candidate.id == descriptor.id)
         {
+            self.socket_engines.remove(&descriptor.id);
             self.logical_nonblocking.remove(&descriptor.id);
             self.dns_queries.forget(descriptor.id);
         }
@@ -636,17 +643,26 @@ impl Supervisor {
         }
         let mut registers = Registers::get(tid)?;
         if entering {
-            let pending = self.syscall_enter(tid, &mut registers)?;
+            let engine = self.engine.acquire();
+            let pending = self.syscall_enter(tid, &mut registers, &engine)?;
             if pending.is_some() {
                 registers.set(tid)?;
             }
             let state = self.threads.entry(tid).or_default();
             state.pending = pending;
+            state.engine = Some(engine);
             state.entering = false;
         } else {
             let pending = self.threads.entry(tid).or_default().pending.take();
             let modified = pending.is_some();
-            self.syscall_exit(tid, &mut registers, pending)?;
+            let engine = self
+                .threads
+                .entry(tid)
+                .or_default()
+                .engine
+                .take()
+                .unwrap_or_else(|| self.engine.acquire());
+            self.syscall_exit(tid, &mut registers, pending, &engine)?;
             if modified {
                 registers.set(tid)?;
             }
@@ -659,6 +675,7 @@ impl Supervisor {
         &mut self,
         tid: libc::pid_t,
         registers: &mut Registers,
+        engine: &hyperhub_runtime::Lease,
     ) -> Result<Option<PendingSyscall>, String> {
         let number = registers.syscall_number();
         self.clone_flags.insert(
@@ -798,10 +815,46 @@ impl Supervisor {
             .get(&(self.descriptor_table(tid), target.ip))
             .filter(|(_, expires)| *expires > Instant::now())
             .map(|(name, _)| name.clone());
-        if SocketAddr::new(target.ip, target.port) == self.proxy {
+        let decision = match hyperhub_engine::connect(
+            engine,
+            &hyperhub_engine::contract::ConnectInput {
+                proxy: self.proxy,
+                ip: target.ip,
+                port: target.port,
+                hostname: target.hostname.clone(),
+            },
+        ) {
+            Ok(decision) => decision,
+            Err(_) => return Ok(Some(deny_syscall(registers, libc::EPROTO))),
+        };
+        if !decision.intercept {
             return Ok(None);
         }
-        let proxy = encode_proxy_sockaddr(self.proxy, target.ip, original.len())?;
+        match decision.target {
+            hyperhub_engine::TargetAddress::Domain(name) => target.hostname = Some(name),
+            hyperhub_engine::TargetAddress::Ip(ip) => {
+                target.ip = ip;
+                target.hostname = None;
+            }
+        }
+        let proxy_ip = match decision.family {
+            2 => IpAddr::V4(Ipv4Addr::new(
+                decision.address[0],
+                decision.address[1],
+                decision.address[2],
+                decision.address[3],
+            )),
+            10 => IpAddr::V6(Ipv6Addr::from(decision.address)),
+            _ => return Ok(Some(deny_syscall(registers, libc::EPROTO))),
+        };
+        if let Some(socket) = self.sockets.get(&(self.descriptor_table(tid), fd)) {
+            self.socket_engines.insert(socket.id, engine.clone());
+        }
+        let proxy = encode_proxy_sockaddr(
+            SocketAddr::new(proxy_ip, decision.port),
+            target.ip,
+            original.len(),
+        )?;
         write_memory(tid, address, &proxy)?;
         registers.set_argument(2, proxy.len() as u64);
         Ok(Some(PendingSyscall::Connect {
@@ -817,6 +870,7 @@ impl Supervisor {
         tid: libc::pid_t,
         registers: &mut Registers,
         pending: Option<PendingSyscall>,
+        engine: &hyperhub_runtime::Lease,
     ) -> Result<(), String> {
         match pending {
             Some(PendingSyscall::OverrideResult { result }) => {
@@ -959,6 +1013,13 @@ impl Supervisor {
                         if let Some(hostname) =
                             self.dns_queries.received(socket_id, source, &response)
                         {
+                            let hostname = match hyperhub_engine::normalize(engine, &hostname) {
+                                Ok(hostname) => hostname,
+                                Err(_) => {
+                                    registers.set_result(-(libc::EPROTO as i64));
+                                    return Ok(());
+                                }
+                            };
                             let table = self.descriptor_table(tid);
                             for address in parse_dns_addresses(&response) {
                                 self.dns_addresses.insert(
@@ -982,7 +1043,7 @@ impl Supervisor {
                         .sockets
                         .get(&(self.descriptor_table(tid), fd))
                         .map(|descriptor| descriptor.id);
-                    let handshake = self.socks_handshake(tid, registers, fd, target);
+                    let handshake = self.socks_handshake(tid, registers, fd, target, engine);
                     if let Err(error) = handshake {
                         if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
                             eprintln!("hyperhub: static SOCKS handshake failed: {error}");
@@ -1785,6 +1846,7 @@ impl Supervisor {
         registers: &Registers,
         fd: i32,
         target: TargetAddress,
+        engine: &hyperhub_runtime::Lease,
     ) -> Result<(), String> {
         let saved = *registers;
         let scratch = saved.stack_pointer().saturating_sub(SCRATCH_SIZE) & !15usize;
@@ -1796,56 +1858,47 @@ impl Supervisor {
         let was_logical_nonblocking =
             socket_id.is_some_and(|socket_id| self.logical_nonblocking.contains(&socket_id));
         let result = (|| {
-            self.remote_send_all(tid, &saved, fd, scratch, &[5, 1, 2])?;
+            let mut input = hyperhub_engine::contract::HandshakeInput {
+                phase: 0,
+                username: String::new(),
+                password: Vec::new(),
+                target: target
+                    .hostname
+                    .clone()
+                    .map(hyperhub_engine::TargetAddress::Domain)
+                    .unwrap_or(hyperhub_engine::TargetAddress::Ip(target.ip)),
+                port: target.port,
+            };
+            let greeting_request = hyperhub_engine::handshake(engine, &input)
+                .map_err(|e| format!("network Engine greeting failed: {e}"))?;
+            self.remote_send_all(tid, &saved, fd, scratch, &greeting_request)?;
             let greeting = self.remote_recv_exact(tid, &saved, fd, scratch, 2)?;
-            if greeting != [5, 2] {
+            if hyperhub_engine::validate_reply(engine, 0, &greeting, false).is_err() {
                 return Err(format!("SOCKS method negotiation returned {greeting:?}"));
             }
 
             let process_pid = self.ensure_member(tid)?;
             let connection_id = self.next_connection_id;
             self.next_connection_id = self.next_connection_id.saturating_add(1);
-            let username = format!("hh2:{}:{}:{}", self.session_id, process_pid, connection_id);
-            if username.len() > u8::MAX as usize {
-                return Err("HyperHub SOCKS username exceeds RFC 1929 limits".into());
-            }
-            let mut authentication = Vec::with_capacity(username.len() + self.password.len() + 3);
-            authentication.extend_from_slice(&[1, username.len() as u8]);
-            authentication.extend_from_slice(username.as_bytes());
-            authentication.push(self.password.len() as u8);
-            authentication.extend_from_slice(&self.password);
+            input.phase = 1;
+            input.username = format!("hh2:{}:{}:{}", self.session_id, process_pid, connection_id);
+            input.password.clone_from(&self.password);
+            let authentication = hyperhub_engine::handshake(engine, &input)
+                .map_err(|e| format!("network Engine authentication failed: {e}"))?;
             self.remote_send_all(tid, &saved, fd, scratch, &authentication)?;
             let authentication_reply = self.remote_recv_exact(tid, &saved, fd, scratch, 2)?;
-            if authentication_reply != [1, 0] {
+            if hyperhub_engine::validate_reply(engine, 1, &authentication_reply, false).is_err() {
                 return Err(format!(
                     "SOCKS authentication returned {authentication_reply:?}"
                 ));
             }
 
-            let mut request = vec![5, 1, 0];
-            if let Some(hostname) = target.hostname.as_deref() {
-                if hostname.len() > u8::MAX as usize {
-                    return Err("SOCKS target hostname exceeds 255 bytes".into());
-                }
-                request.push(3);
-                request.push(hostname.len() as u8);
-                request.extend_from_slice(hostname.as_bytes());
-            } else {
-                match target.ip {
-                    IpAddr::V4(address) => {
-                        request.push(1);
-                        request.extend_from_slice(&address.octets());
-                    }
-                    IpAddr::V6(address) => {
-                        request.push(4);
-                        request.extend_from_slice(&address.octets());
-                    }
-                }
-            }
-            request.extend_from_slice(&target.port.to_be_bytes());
+            input.phase = 2;
+            let request = hyperhub_engine::handshake(engine, &input)
+                .map_err(|e| format!("network Engine CONNECT failed: {e}"))?;
             self.remote_send_all(tid, &saved, fd, scratch, &request)?;
             let reply = self.remote_recv_exact(tid, &saved, fd, scratch, 4)?;
-            if reply[0] != 5 || reply[1] != 0 {
+            if hyperhub_engine::validate_reply(engine, 2, &reply, true).is_err() {
                 return Err(format!("SOCKS CONNECT returned {reply:?}"));
             }
             match reply[3] {

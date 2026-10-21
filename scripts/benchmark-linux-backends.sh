@@ -113,6 +113,9 @@ trust_tls_pid=
 trust_ssh_pid=
 hot_update_pid=
 cleanup() {
+  if [[ -f "$temporary/dynamic-embedded-runtime.stderr.log" ]]; then
+    cp "$temporary/dynamic-embedded-runtime.stderr.log" "$result_dir/embedded-runtime.stderr.log" || true
+  fi
     [[ -z $hot_update_pid ]] || { kill "$hot_update_pid" 2>/dev/null || true; wait "$hot_update_pid" 2>/dev/null || true; }
   [[ -z $trust_ssh_pid ]] || { kill "$trust_ssh_pid" 2>/dev/null || true; wait "$trust_ssh_pid" 2>/dev/null || true; }
   [[ -z $trust_tls_pid ]] || { kill "$trust_tls_pid" 2>/dev/null || true; wait "$trust_tls_pid" 2>/dev/null || true; }
@@ -262,6 +265,11 @@ PY
 # Copy the single-file CLI away from the build tree. The default dynamic/static
 # backend must remain ptrace, while explicit Gum must use the embedded Agent
 # without relying on a sidecar runtime or discovery path.
+thread_exit_probe="$fixture_dir/linux-thread-exit-probe"
+thread_exit_source="$root/tests/fixtures/linux_thread_exit_probe.c"
+if ((rebuild_fixtures)) || [[ ! -x $thread_exit_probe || $thread_exit_source -nt $thread_exit_probe ]]; then
+  cc -O2 -Wall -Wextra -pthread "$thread_exit_source" -o "$thread_exit_probe"
+fi
 standalone_hyperhub="$temporary/hyperhub-embedded-agent"
 cp "$hyperhub" "$standalone_hyperhub"
 chmod 0755 "$standalone_hyperhub"
@@ -272,10 +280,13 @@ chmod 0755 "$standalone_hyperhub"
   "$standalone_hyperhub" run \
     --backend gum \
     -- /bin/true >/dev/null 2>"$temporary/dynamic-embedded-runtime.stderr.log"
+  "$standalone_hyperhub" run -- "$thread_exit_probe" "$temporary/ptrace-thread-exit.txt" >/dev/null
+  "$standalone_hyperhub" run --backend gum -- "$thread_exit_probe" "$temporary/gum-thread-exit.txt" >/dev/null
   "$standalone_hyperhub" run \
     -- "$fixture_dir/linux-static-c" --intent-read /etc/hosts >/dev/null
 )
 record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum uses embedded Agent"
+record_check backend.thread_exit "late pthread destructor completes IO under ptrace and explicit Gum"
 
 pass_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $pass_audit ]] || { echo 'static coverage audit was not created' >&2; exit 1; }
@@ -311,7 +322,7 @@ fi
 if ((rebuild_fixtures)) || [[ ! -x $hot_update_probe || $hot_update_source -nt $hot_update_probe ]]; then
   cc -O2 -Wall -Wextra "$hot_update_source" -o "$hot_update_probe"
 fi
-python3 - "$fixture_dir/manifest.json" "$dynamic_probe" "$hot_update_probe" <<'PYCODE'
+python3 - "$fixture_dir/manifest.json" "$dynamic_probe" "$hot_update_probe" "$thread_exit_probe" <<'PYCODE'
 import hashlib
 import json
 import pathlib
@@ -320,6 +331,7 @@ manifest_path = pathlib.Path(sys.argv[1])
 binaries = {
     "dynamic-c": ("dynamic-probe", pathlib.Path(sys.argv[2])),
     "ptrace-hot-update": ("dynamic-probe", pathlib.Path(sys.argv[3])),
+    "thread-exit": ("dynamic-probe", pathlib.Path(sys.argv[4])),
 }
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 manifest["fixtures"] = [

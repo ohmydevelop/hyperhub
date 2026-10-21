@@ -7,6 +7,7 @@ mod integrity;
 
 mod abi;
 mod control;
+mod engine_call;
 mod gateway;
 #[cfg(all(windows, feature = "gum-agent"))]
 mod lifecycle;
@@ -30,8 +31,9 @@ pub(crate) use sandbox::*;
 mod tests {
     use super::*;
 
-    fn configured_core() -> AgentRuntime {
+    pub(super) fn configured_core() -> AgentRuntime {
         AgentRuntime {
+            engine: hyperhub_engine::resident(),
             session: SessionState {
                 initialized: true,
                 session_id: "session".into(),
@@ -280,3 +282,6 @@ mod tests {
         assert!(core.gateway.sockets.contains_key(&42));
     }
 }
+
+#[cfg(test)]
+mod engine_tests;

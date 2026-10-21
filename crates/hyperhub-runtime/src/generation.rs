@@ -108,6 +108,15 @@ struct Generation {
 /// A lease pins code, not Host resources. Clone it for pending asynchronous work.
 #[derive(Clone)]
 pub struct Lease(Arc<Generation>);
+impl fmt::Debug for Lease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Lease")
+            .field("generation", &self.generation())
+            .field("version", &self.version())
+            .finish()
+    }
+}
 impl Lease {
     pub fn generation(&self) -> u64 {
         self.0.id

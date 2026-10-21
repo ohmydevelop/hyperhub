@@ -72,6 +72,54 @@ pub extern "C" fn hh_agent_initialize_from_env() -> i32 {
     })
 }
 
+/// In-process management for the resident Host. External transports must first
+/// authenticate the coordinator. Native target code already has process access.
+/// No configuration key or session credential is accepted or returned here.
+#[no_mangle]
+pub unsafe extern "C" fn hh_agent_engine_control(
+    input: *const u8,
+    length: usize,
+    output: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        if written.is_null() {
+            return Err(HH_ERR_INVALID);
+        }
+        unsafe {
+            written.write(0);
+        }
+        if output.is_null() || capacity < hyperhub_engine::management::MIN_REPLY {
+            unsafe {
+                written.write(hyperhub_engine::management::MIN_REPLY);
+            }
+            return Err(HH_ERR_BUFFER_TOO_SMALL);
+        }
+        if length > hyperhub_engine::management::MAX_COMMAND {
+            return Err(HH_ERR_INVALID);
+        }
+        let input = unsafe { bytes(input, length)? };
+        let command = serde_json::from_slice(input).map_err(|_| HH_ERR_INVALID)?;
+        // Release process-state locking before loading, health checks or GC.
+        let engine = state().lock().map_err(|_| HH_ERR_INVALID)?.engine.clone();
+        let reply = crate::engine_call::trusted_io(|| unsafe {
+            hyperhub_engine::management::execute(&engine, command)
+        });
+        let payload = serde_json::to_vec(&reply).map_err(|_| HH_ERR_PROTOCOL)?;
+        unsafe {
+            written.write(payload.len());
+        }
+        if payload.len() > capacity {
+            return Err(HH_ERR_BUFFER_TOO_SMALL);
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), output, payload.len());
+        }
+        Ok(HH_OK)
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn hh_agent_is_initialized() -> i32 {
     state()
@@ -198,8 +246,7 @@ pub unsafe extern "C" fn hh_agent_record_dns(
         let hostname = unsafe { CStr::from_ptr(hostname) }
             .to_str()
             .map_err(|_| HH_ERR_INVALID)?
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
+            .to_owned();
         if hostname.is_empty() {
             return Err(HH_ERR_INVALID);
         }
@@ -272,17 +319,41 @@ pub unsafe extern "C" fn hh_agent_validate_handshake_reply(
 ) -> i32 {
     ffi_result(|| {
         let input = unsafe { bytes(input, length)? };
-        let valid = match phase {
-            0 => input.len() == 2 && input[0] == 5 && input[1] == 2,
-            1 => input.len() == 2 && input[0] == 1 && input[1] == 0,
-            2 => input.len() >= 5 && input[0] == 5 && input[1] == 0,
-            _ => return Err(HH_ERR_INVALID),
-        };
-        if valid {
-            Ok(HH_OK)
-        } else {
-            Err(HH_ERR_PROTOCOL)
-        }
+        let engine = state().lock().map_err(|_| HH_ERR_INVALID)?.engine.clone();
+        hyperhub_engine::validate_reply(
+            &crate::engine_call::calling(&engine)?,
+            phase,
+            input,
+            false,
+        )
+        .map_err(crate::engine_error)?;
+        Ok(HH_OK)
+    })
+}
+
+/// Socket-specific validation keeps all handshake phases on the connection's
+/// original Engine, even if a compatible upgrade commits between phases.
+#[no_mangle]
+pub unsafe extern "C" fn hh_agent_validate_socket_handshake_reply(
+    socket: u64,
+    phase: u32,
+    input: *const u8,
+    length: usize,
+) -> i32 {
+    ffi_result(|| {
+        let input = unsafe { bytes(input, length)? };
+        let lease = state()
+            .lock()
+            .map_err(|_| HH_ERR_INVALID)?
+            .gateway
+            .sockets
+            .get(&socket)
+            .ok_or(HH_ERR_INVALID)?
+            .engine
+            .clone();
+        hyperhub_engine::validate_reply(&lease, phase, input, false)
+            .map_err(crate::engine_error)?;
+        Ok(HH_OK)
     })
 }
 

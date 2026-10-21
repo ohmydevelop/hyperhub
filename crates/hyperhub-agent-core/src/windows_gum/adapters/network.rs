@@ -613,6 +613,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_w(
 }
 
 struct DnsQueryExContext {
+    engine: hyperhub_runtime::Lease,
     hostname: String,
     callback: PDNS_QUERY_COMPLETION_ROUTINE,
     callback_context: usize,
@@ -626,10 +627,14 @@ unsafe extern "system" fn dns_query_ex_completion(
     let context = Arc::from_raw(context.cast::<DnsQueryExContext>());
     context.callback_called.store(true, Ordering::Release);
     if let Some(results) = results.as_ref() {
+        let _guard = HookGuard::enter();
+        let _engine = crate::engine_call::EngineCallGuard::with_lease(context.engine.clone());
         record_dns_query_results(&context.hostname, results.pQueryRecords);
     }
     if let Some(callback) = context.callback {
+        let inside = INSIDE_HOOK.with(|value| value.replace(false));
         callback(context.callback_context as *const c_void, results);
+        INSIDE_HOOK.with(|value| value.set(inside));
     }
 }
 
@@ -648,8 +653,19 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_ex(
     if request.QueryName.is_null() || INSIDE_HOOK.with(Cell::get) {
         return original(request, results, cancel);
     }
+    let Some(_guard) = HookGuard::enter() else {
+        return original(request, results, cancel);
+    };
+    let Some(engine) = crate::state()
+        .lock()
+        .ok()
+        .and_then(|core| crate::engine_call::calling(&core.engine).ok())
+    else {
+        return windows_sys::Win32::Networking::WinSock::WSAENOBUFS;
+    };
     let hostname = wide_string(request.QueryName);
     let context = Arc::new(DnsQueryExContext {
+        engine,
         hostname: hostname.clone(),
         callback: request.pQueryCompletionCallback,
         callback_context: request.pQueryContext as usize,
@@ -1482,7 +1498,12 @@ pub(in crate::windows_gum) unsafe fn exchange_phase(socket: SOCKET, phase: u32) 
     if phase < 2 {
         let mut reply = [0_u8; 2];
         return recv_all(socket, &mut reply)
-            && hh_agent_validate_handshake_reply(phase, reply.as_ptr(), reply.len()) == HH_OK;
+            && hh_agent_validate_socket_handshake_reply(
+                socket as u64,
+                phase,
+                reply.as_ptr(),
+                reply.len(),
+            ) == HH_OK;
     }
     let mut head = [0_u8; 4];
     if !recv_all(socket, &mut head) || head[0] != 5 || head[1] != 0 {
@@ -1505,8 +1526,12 @@ pub(in crate::windows_gum) unsafe fn exchange_phase(socket: SOCKET, phase: u32) 
         return false;
     }
     let validation = [head[0], head[1], head[2], head[3], 0];
-    let ok =
-        hh_agent_validate_handshake_reply(phase, validation.as_ptr(), validation.len()) == HH_OK;
+    let ok = hh_agent_validate_socket_handshake_reply(
+        socket as u64,
+        phase,
+        validation.as_ptr(),
+        validation.len(),
+    ) == HH_OK;
 
     ok
 }

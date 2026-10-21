@@ -76,3 +76,8 @@ unsafe fn signal_ready(path: *const libc::c_char, status: &str) {
     }
     let _ = libc::syscall(libc::SYS_close, fd);
 }
+
+pub(crate) fn with_host_io<T>(call: impl FnOnce() -> T) -> T {
+    let _guard = adapters::native::HookGuard::enter();
+    call()
+}
