@@ -10,10 +10,19 @@ $previousGumRoot = $env:HYPERHUB_FRIDA_GUM_ROOT
 $previousEngineCli = $env:HYPERHUB_TEST_ENGINE_HYPERHUB
 $previousEngineBackend = $env:HYPERHUB_TEST_ENGINE_BACKEND
 $previousWorkerFixture = $env:HH_FORWARD_WORKER_FIXTURE
+$previousReleaseCli = $env:HYPERHUB_TEST_RELEASE_HYPERHUB
+$previousReleaseDiagnostics = $env:HYPERHUB_TEST_RELEASE_DIAGNOSTICS
 try {
   if (-not $env:HYPERHUB_FRIDA_GUM_ROOT) {
     $env:HYPERHUB_FRIDA_GUM_ROOT = Join-Path $root '.deps/frida-gum/17.17.0/windows-x64'
   }
+  New-Item -ItemType Directory -Path $Output -Force | Out-Null
+  $env:HYPERHUB_TEST_RELEASE_HYPERHUB = $HyperHub
+  $env:HYPERHUB_TEST_RELEASE_DIAGNOSTICS = Join-Path $Output 'release-diagnostics'
+  # Run the complete joint fixture first for fast failure diagnostics. Success
+  # still requires every existing Agent/Host/worker/recovery/Hook Suite below.
+  cargo test --locked -p hyperhub --test release_live -- --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw 'Windows joint release and installation upgrade failed.' }
   cargo test --locked --release -p hyperhub-agent-core --features gum-agent
   if ($LASTEXITCODE -ne 0) { throw 'Windows Gum Agent tests failed.' }
   $env:HYPERHUB_TEST_ENGINE_HYPERHUB = $HyperHub
@@ -26,8 +35,6 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Windows forwarding worker upgrade failed.' }
   cargo test --locked -p hyperhub-core --lib durable_release_recovery_status_installation_and_missing_host_boundaries -- --ignored --nocapture
   if ($LASTEXITCODE -ne 0) { throw 'Windows release recovery state tests failed.' }
-  cargo test --locked -p hyperhub --test release_live -- --ignored --nocapture
-  if ($LASTEXITCODE -ne 0) { throw 'Windows joint release and installation upgrade failed.' }
   cargo run --release --locked -p hyperhub-engine --example native_upgrade_bench -- (Join-Path $Output 'native-engine-performance')
   if ($LASTEXITCODE -ne 0) { throw 'Windows native Engine switch benchmark failed.' }
   cargo build --locked --release -p hyperhub-agent-core --example windows_hook_probe
@@ -42,5 +49,7 @@ finally {
   $env:HYPERHUB_TEST_ENGINE_HYPERHUB = $previousEngineCli
   $env:HYPERHUB_TEST_ENGINE_BACKEND = $previousEngineBackend
   $env:HH_FORWARD_WORKER_FIXTURE = $previousWorkerFixture
+  $env:HYPERHUB_TEST_RELEASE_HYPERHUB = $previousReleaseCli
+  $env:HYPERHUB_TEST_RELEASE_DIAGNOSTICS = $previousReleaseDiagnostics
   Pop-Location
 }

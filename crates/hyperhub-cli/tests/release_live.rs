@@ -18,15 +18,83 @@ use std::{
     time::Duration,
 };
 
+fn diagnostic(root: &Path, file: &str, message: &str) {
+    eprintln!("{message}");
+    if let Ok(mut log) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join(file))
+    {
+        let _ = writeln!(log, "{message}");
+    }
+}
+fn stage(root: &Path, message: &str) {
+    diagnostic(root, "stages.log", &format!("RELEASE_STAGE {message}"));
+}
+fn copy_diagnostic_file(source: &Path, destination: &Path) {
+    // Only callers' explicit fixture-log allowlist reaches this helper. Never
+    // follow a symlink into private configuration, keys, or executable caches.
+    if !fs::symlink_metadata(source).is_ok_and(|m| m.file_type().is_file()) {
+        return;
+    }
+    if let Some(parent) = destination.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!("release diagnostics directory failed: {error}");
+            return;
+        }
+    }
+    if let Err(error) = fs::copy(source, destination) {
+        eprintln!("release diagnostics copy failed: {error}");
+    }
+}
+fn copy_audit_logs(source: &Path, destination: &Path) {
+    let Ok(entries) = fs::read_dir(source) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            copy_audit_logs(&entry.path(), &destination.join(entry.file_name()));
+        } else if kind.is_file() && entry.file_name() == "security-alerts.jsonl" {
+            copy_diagnostic_file(&entry.path(), &destination.join(entry.file_name()));
+        }
+    }
+}
+
 struct Root(PathBuf);
 impl Drop for Root {
     fn drop(&mut self) {
         if std::thread::panicking() {
             eprintln!("release fixture retained: {}", self.0.display());
-            eprintln!(
-                "{}",
-                fs::read_to_string(self.0.join("serve.log")).unwrap_or_default()
-            );
+            for file in [
+                "stages.log",
+                "process-status.log",
+                "serve.log",
+                "target.log",
+                "target-stdout.log",
+            ] {
+                eprintln!(
+                    "RELEASE_DIAGNOSTIC {file}\n{}",
+                    fs::read_to_string(self.0.join(file)).unwrap_or_default()
+                );
+            }
+            if let Some(output) = std::env::var_os("HYPERHUB_TEST_RELEASE_DIAGNOSTICS") {
+                let destination = PathBuf::from(output).join(self.0.file_name().unwrap());
+                for file in [
+                    "stages.log",
+                    "process-status.log",
+                    "serve.log",
+                    "target.log",
+                    "target-stdout.log",
+                    "audit.jsonl",
+                ] {
+                    copy_diagnostic_file(&self.0.join(file), &destination.join(file));
+                }
+                copy_audit_logs(&self.0.join("audit"), &destination.join("audit"));
+                eprintln!("RELEASE_DIAGNOSTICS_EXPORTED {}", destination.display());
+            }
             return;
         }
         #[cfg(windows)]
@@ -52,11 +120,35 @@ impl Drop for Root {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-struct Process(Child);
+struct Process(Child, PathBuf, &'static str);
 impl Drop for Process {
     fn drop(&mut self) {
+        let failed = std::thread::panicking();
+        if failed {
+            let status = self.0.try_wait();
+            diagnostic(
+                &self.1,
+                "process-status.log",
+                &format!(
+                    "RELEASE_PROCESS_EXIT role={} pid={} before_cleanup={status:?}",
+                    self.2,
+                    self.0.id()
+                ),
+            );
+        }
         let _ = self.0.kill();
-        let _ = self.0.wait();
+        let status = self.0.wait();
+        if failed {
+            diagnostic(
+                &self.1,
+                "process-status.log",
+                &format!(
+                    "RELEASE_PROCESS_EXIT role={} pid={} after_cleanup={status:?}",
+                    self.2,
+                    self.0.id()
+                ),
+            );
+        }
     }
 }
 fn cli(path: &Path, root: &Path) -> Command {
@@ -101,7 +193,7 @@ async fn release_status(endpoint: &str, id: &str) -> release::RecordView {
         other => panic!("release status missing: {other:?}"),
     }
 }
-async fn line(receiver: &mut mpsc::Receiver<String>) -> String {
+async fn line(receiver: &mut mpsc::Receiver<String>, stage: &str) -> String {
     let started = tokio::time::Instant::now();
     loop {
         match receiver.try_recv() {
@@ -109,11 +201,11 @@ async fn line(receiver: &mut mpsc::Receiver<String>) -> String {
             Err(mpsc::TryRecvError::Empty) => {
                 assert!(
                     started.elapsed() < Duration::from_secs(30),
-                    "target output timed out"
+                    "target output timed out at {stage}"
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            Err(error) => panic!("target stdout ended: {error}"),
+            Err(error) => panic!("target stdout ended at {stage}: {error}"),
         }
     }
 }
@@ -124,9 +216,17 @@ async fn workload(
     pid: u32,
     count: usize,
 ) {
+    stage(
+        &target.1,
+        &format!("workload-begin command={command} expected_streams={count}"),
+    );
     writeln!(target.0.stdin.as_mut().unwrap(), "{command}").unwrap();
     target.0.stdin.as_mut().unwrap().flush().unwrap();
-    assert_eq!(line(output).await, format!("OK {pid} {count}"));
+    assert_eq!(line(output, command).await, format!("OK {pid} {count}"));
+    stage(
+        &target.1,
+        &format!("workload-complete command={command} streams={count}"),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -209,8 +309,9 @@ async fn private_home_release_keeps_native_target_streams_and_installs_after_joi
         .arg("serve")
         .stdout(log.try_clone().unwrap())
         .stderr(log);
-    let mut resident = Process(resident.spawn().unwrap());
+    let mut resident = Process(resident.spawn().unwrap(), root.0.clone(), "serve");
     let serve_pid = resident.0.id();
+    stage(&root.0, &format!("serve-started pid={serve_pid}"));
     let endpoint = control::instance_control_endpoint(&root.0);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -267,17 +368,36 @@ async fn private_home_release_keeps_native_target_streams_and_installs_after_joi
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(fs::File::create(root.0.join("target.log")).unwrap());
-    let mut target = Process(launcher.spawn().unwrap());
+    let mut target = Process(launcher.spawn().unwrap(), root.0.clone(), "target-launcher");
+    stage(
+        &root.0,
+        &format!("target-launcher-started pid={}", target.0.id()),
+    );
     let (sender, mut output) = mpsc::channel();
     let stdout = target.0.stdout.take().unwrap();
+    let output_root = root.0.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            if sender.send(line.unwrap()).is_err() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    diagnostic(
+                        &output_root,
+                        "target-stdout.log",
+                        &format!("RELEASE_TARGET_STDOUT_READ_ERROR {error}"),
+                    );
+                    break;
+                }
+            };
+            diagnostic(&output_root, "target-stdout.log", &line);
+            if sender.send(line).is_err() {
                 break;
             }
         }
     });
-    let ready = line(&mut output).await;
+    stage(&root.0, "waiting-target-ready");
+    let ready = line(&mut output, "target READY").await;
+    stage(&root.0, &format!("target-ready {ready}"));
     let target_pid: u32 = ready
         .strip_prefix("READY ")
         .expect("target ready")
@@ -333,6 +453,7 @@ async fn private_home_release_keeps_native_target_streams_and_installs_after_joi
         .await,
         ControlResponse::ReleaseUpgrade { .. }
     ));
+    stage(&root.0, "release-prepare-accepted");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     let mut switched = false;
     loop {
@@ -345,6 +466,7 @@ async fn private_home_release_keeps_native_target_streams_and_installs_after_joi
             "{status:?}"
         );
         if status.phase == Phase::Observing && !switched {
+            stage(&root.0, "joint-observing");
             assert!(!status.finalize_decided && !status.installation_confirmed);
             assert_eq!(release::installer::digest(&installed).unwrap(), old_digest);
             workload(&mut target, &mut output, "open", target_pid, 2).await;
@@ -368,6 +490,7 @@ async fn private_home_release_keeps_native_target_streams_and_installs_after_joi
             switched = true;
         }
         if status.installation_confirmed {
+            stage(&root.0, "installation-confirmed");
             assert!(status.finalize_decided);
             assert_eq!(
                 release::installer::digest(&installed).unwrap(),
@@ -422,6 +545,7 @@ async fn private_home_release_keeps_native_target_streams_and_installs_after_joi
         panic!("missing final status")
     };
     assert_eq!(pid, serve_pid);
+    stage(&root.0, "release-complete");
     writeln!(target.0.stdin.as_mut().unwrap(), "quit").unwrap();
     assert!(target.0.wait().unwrap().success());
     echo.abort();
