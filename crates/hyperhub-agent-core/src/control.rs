@@ -712,66 +712,68 @@ pub(crate) fn subscribe_sandbox() {
     let _ = std::thread::Builder::new()
         .name("hyperhub-sandbox-subscription".into())
         .spawn(|| {
-            let delays = [250u64, 1000, 2000, 5000, 10000, 30000];
-            let mut attempt = 0usize;
-            loop {
-                let values = crate::state().lock().ok().map(|c| {
-                    (
-                        c.session.control_endpoint.clone(),
-                        c.session.session_id.clone(),
-                        c.session.token.clone(),
-                    )
-                });
-                let Some((endpoint, session_id, token)) = values else {
-                    return;
-                };
-                let request = AgentControlRequest::SubscribeSandbox {
-                    session_id: &session_id,
-                    token: &token,
-                    current_version: crate::sandbox_version(),
-                };
-                let result = (|| -> Result<(), i32> {
-                    let payload = serde_json::to_vec(&request).map_err(|_| HH_ERR_PROTOCOL)?;
-                    let mut stream = open_control(&endpoint)?;
-                    stream
-                        .write_all(&(payload.len() as u32).to_be_bytes())
-                        .and_then(|_| stream.write_all(&payload))
-                        .and_then(|_| stream.flush())
-                        .map_err(|_| HH_ERR_PROTOCOL)?;
-                    loop {
-                        let mut length = [0; 4];
+            crate::engine_call::background(|| {
+                let delays = [250u64, 1000, 2000, 5000, 10000, 30000];
+                let mut attempt = 0usize;
+                loop {
+                    let values = crate::state().lock().ok().map(|c| {
+                        (
+                            c.session.control_endpoint.clone(),
+                            c.session.session_id.clone(),
+                            c.session.token.clone(),
+                        )
+                    });
+                    let Some((endpoint, session_id, token)) = values else {
+                        return;
+                    };
+                    let request = AgentControlRequest::SubscribeSandbox {
+                        session_id: &session_id,
+                        token: &token,
+                        current_version: crate::sandbox_version(),
+                    };
+                    let result = (|| -> Result<(), i32> {
+                        let payload = serde_json::to_vec(&request).map_err(|_| HH_ERR_PROTOCOL)?;
+                        let mut stream = open_control(&endpoint)?;
                         stream
-                            .read_exact(&mut length)
+                            .write_all(&(payload.len() as u32).to_be_bytes())
+                            .and_then(|_| stream.write_all(&payload))
+                            .and_then(|_| stream.flush())
                             .map_err(|_| HH_ERR_PROTOCOL)?;
-                        let len = u32::from_be_bytes(length) as usize;
-                        if len > CONTROL_MAX_FRAME {
-                            return Err(HH_ERR_PROTOCOL);
+                        loop {
+                            let mut length = [0; 4];
+                            stream
+                                .read_exact(&mut length)
+                                .map_err(|_| HH_ERR_PROTOCOL)?;
+                            let len = u32::from_be_bytes(length) as usize;
+                            if len > CONTROL_MAX_FRAME {
+                                return Err(HH_ERR_PROTOCOL);
+                            }
+                            let mut payload = vec![0; len];
+                            stream
+                                .read_exact(&mut payload)
+                                .map_err(|_| HH_ERR_PROTOCOL)?;
+                            match serde_json::from_slice::<AgentControlResponse>(&payload)
+                                .map_err(|_| HH_ERR_PROTOCOL)?
+                            {
+                                AgentControlResponse::SandboxUpdate {
+                                    sandbox: Some(snapshot),
+                                    ..
+                                } => crate::apply_sandbox_snapshot(snapshot),
+                                AgentControlResponse::SandboxUpdate { .. } => {}
+                                _ => return Err(HH_ERR_PROTOCOL),
+                            }
                         }
-                        let mut payload = vec![0; len];
-                        stream
-                            .read_exact(&mut payload)
-                            .map_err(|_| HH_ERR_PROTOCOL)?;
-                        match serde_json::from_slice::<AgentControlResponse>(&payload)
-                            .map_err(|_| HH_ERR_PROTOCOL)?
-                        {
-                            AgentControlResponse::SandboxUpdate {
-                                sandbox: Some(snapshot),
-                                ..
-                            } => crate::apply_sandbox_snapshot(snapshot),
-                            AgentControlResponse::SandboxUpdate { .. } => {}
-                            _ => return Err(HH_ERR_PROTOCOL),
-                        }
+                    })();
+                    if result.is_ok() {
+                        attempt = 0
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            delays[attempt.min(delays.len() - 1)],
+                        ));
+                        attempt = attempt.saturating_add(1);
                     }
-                })();
-                if result.is_ok() {
-                    attempt = 0
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        delays[attempt.min(delays.len() - 1)],
-                    ));
-                    attempt = attempt.saturating_add(1);
                 }
-            }
+            })
         });
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]

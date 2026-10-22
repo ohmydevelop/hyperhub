@@ -1,8 +1,8 @@
 use crate::hook_runtime::{
     AgentHookPlugin, CallbackCategory, HookDecision, HookError, HookFailureMode,
 };
+use crate::snapshot::Snapshot;
 use crate::windows_gum::runtime::PluginRegistrar;
-use arc_swap::ArcSwapOption;
 use std::net::IpAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +17,7 @@ const AUDIT_QUEUE_CAPACITY: usize = 256;
 const FIREWALL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 struct FirewallPlugin {
-    snapshot: Arc<ArcSwapOption<crate::FirewallSnapshot>>,
+    snapshot: Arc<Snapshot<crate::FirewallSnapshot>>,
     current_version: Arc<AtomicU64>,
     audit: Option<SyncSender<crate::FirewallAuditEvent>>,
     dropped_events: Arc<AtomicU64>,
@@ -39,7 +39,7 @@ impl FirewallPlugin {
         let current_version = Arc::new(AtomicU64::new(
             initial.as_deref().map_or(0, |snapshot| snapshot.version),
         ));
-        let snapshot = Arc::new(ArcSwapOption::from(initial));
+        let snapshot = Arc::new(Snapshot::from(initial));
         if cfg!(test) {
             return Self {
                 snapshot,
@@ -290,7 +290,7 @@ impl FirewallPlugin {
 }
 
 fn apply_refresh(
-    snapshot: &ArcSwapOption<crate::FirewallSnapshot>,
+    snapshot: &Snapshot<crate::FirewallSnapshot>,
     current_version: &AtomicU64,
     refresh: crate::FirewallRefresh,
 ) {
@@ -407,7 +407,7 @@ mod tests {
         let version = snapshot.version;
         let (audit, _receiver) = sync_channel(1);
         FirewallPlugin {
-            snapshot: Arc::new(ArcSwapOption::from(Some(Arc::new(snapshot)))),
+            snapshot: Arc::new(Snapshot::from(Some(Arc::new(snapshot)))),
             current_version: Arc::new(AtomicU64::new(version)),
             audit: Some(audit),
             dropped_events: Arc::new(AtomicU64::new(0)),
@@ -639,7 +639,7 @@ mod tests {
     fn missing_snapshot_and_missing_default_pass() {
         let (audit, _receiver) = sync_channel(1);
         let missing = FirewallPlugin {
-            snapshot: Arc::new(ArcSwapOption::empty()),
+            snapshot: Arc::new(Snapshot::empty()),
             current_version: Arc::new(AtomicU64::new(0)),
             audit: Some(audit),
             dropped_events: Arc::new(AtomicU64::new(0)),
@@ -716,7 +716,7 @@ mod tests {
         let (audit, _receiver) = sync_channel(1);
         let configured = snapshot(Some(crate::FirewallAction::Deny));
         let plugin = FirewallPlugin {
-            snapshot: Arc::new(ArcSwapOption::from(Some(Arc::new(configured.clone())))),
+            snapshot: Arc::new(Snapshot::from(Some(Arc::new(configured.clone())))),
             current_version: Arc::new(AtomicU64::new(configured.version)),
             audit: Some(audit),
             dropped_events: Arc::new(AtomicU64::new(0)),

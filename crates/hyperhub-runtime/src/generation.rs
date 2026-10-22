@@ -1,10 +1,9 @@
 use crate::Manifest;
-use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -178,10 +177,30 @@ impl Drop for StateGuard<'_> {
     }
 }
 
+// First acquisition can occur inside a loader/allocator Hook. ArcSwap's lazy
+// thread-local debt registration takes the native loader lock on first use.
+// A short pointer-only read lock avoids that lock inversion. No Engine code,
+// allocation or module destruction runs while this lock is held.
+struct ActiveGeneration(RwLock<Arc<Generation>>);
+impl ActiveGeneration {
+    fn from_pointee(generation: Generation) -> Self {
+        Self(RwLock::new(Arc::new(generation)))
+    }
+    fn load_full(&self) -> Arc<Generation> {
+        self.0.read().expect("active generation poisoned").clone()
+    }
+    fn swap(&self, generation: Arc<Generation>) -> Arc<Generation> {
+        std::mem::replace(
+            &mut self.0.write().expect("active generation poisoned"),
+            generation,
+        )
+    }
+}
+
 pub struct Runtime {
     host: Manifest,
     settings: Settings,
-    active: ArcSwap<Generation>,
+    active: ActiveGeneration,
     state: Mutex<State>,
 }
 
@@ -194,7 +213,7 @@ impl Runtime {
         Ok(Self {
             host: initial.manifest().clone(),
             settings,
-            active: ArcSwap::from_pointee(Generation {
+            active: ActiveGeneration::from_pointee(Generation {
                 id: 0,
                 engine: initial,
             }),
@@ -498,7 +517,7 @@ impl Runtime {
         let current = self.active.load_full();
         let healthy = current.engine.health();
         let mut state = self.lock()?;
-        if self.active.load().id != current.id {
+        if self.active.load_full().id != current.id {
             return Ok(());
         }
         if let Some(observation) = &state.observation {

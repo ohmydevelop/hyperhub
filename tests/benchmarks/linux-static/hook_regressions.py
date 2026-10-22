@@ -115,6 +115,9 @@ patterns = [{{enabled = true, pattern = {pattern}}}]
                         raise AssertionError(json.dumps(item))
                     return result
 
+                for backend in ("ptrace", "gum"):
+                    execute("exit", ["loader"], 7, backend)
+
                 original_response = echo.dns_response
                 echo.dns_response = lambda request: original_response(request)[:-4] + socket.inet_aton(
                     "198.18.99.7" if request[1] == 1 else "198.18.99.8")

@@ -21,7 +21,6 @@ path = "../../tests/fixtures/windows_hook_probe.rs"
 rand = "0.10"
 hyperhub-engine = { path = "../hyperhub-engine" }
 hyperhub-runtime = { path = "../hyperhub-runtime" }
-arc-swap = "1"
 base64 = "0.22"
 ipnet = { version = "2", features = ["serde"] }
 regex = "1"

@@ -289,6 +289,8 @@ record_check backend.runtime_boundary "dynamic/static default ptrace; explicit G
 record_check backend.thread_exit "late pthread destructor completes IO under ptrace and explicit Gum"
 (
   cd "$root"
+  cargo run -p hyperhub-runtime --example runtime_loader_probe --locked \
+    >"$result_dir/engine-loader.log" 2>&1
   HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" \
     cargo test -p hyperhub --test engine_host_live --locked -- --nocapture \
     >"$result_dir/engine-ptrace.log" 2>&1

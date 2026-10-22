@@ -1,7 +1,7 @@
 mod network;
 mod sanitizer;
 
-use arc_swap::ArcSwapOption;
+use crate::snapshot::Snapshot;
 pub(crate) use network::*;
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
 use sanitizer::ProtectionContext;
@@ -425,16 +425,16 @@ mod tests {
 
 pub(crate) struct SandboxState {
     pub(crate) firewall: Option<Arc<FirewallSnapshot>>,
-    pub(crate) process: Arc<ArcSwapOption<CompiledProcessSandboxSnapshot>>,
-    pub(crate) file: Arc<ArcSwapOption<CompiledFileSandboxSnapshot>>,
+    pub(crate) process: Arc<Snapshot<CompiledProcessSandboxSnapshot>>,
+    pub(crate) file: Arc<Snapshot<CompiledFileSandboxSnapshot>>,
     pub(crate) version: Arc<AtomicU64>,
 }
 impl Default for SandboxState {
     fn default() -> Self {
         Self {
             firewall: None,
-            process: Arc::new(ArcSwapOption::empty()),
-            file: Arc::new(ArcSwapOption::empty()),
+            process: Arc::new(Snapshot::empty()),
+            file: Arc::new(Snapshot::empty()),
             version: Arc::new(AtomicU64::new(0)),
         }
     }

@@ -14,6 +14,7 @@ mod lifecycle;
 mod platform;
 mod runtime;
 mod sandbox;
+mod snapshot;
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 mod unix_gum;
 #[cfg(all(windows, feature = "gum-agent"))]

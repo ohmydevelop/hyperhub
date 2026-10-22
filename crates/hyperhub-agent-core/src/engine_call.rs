@@ -7,9 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
     static CALLING: RefCell<Option<Lease>> = const { RefCell::new(None) };
-    // No destructor: this flag remains readable after CALLING and ArcSwap debt
-    // storage have been destroyed. Initialize ArcSwap BEFORE CALLING, so its
-    // destructor runs after ours. Do not initialize CALLING just to probe it.
+    // No destructor: this flag remains readable after CALLING is destroyed.
+    // Do not initialize CALLING just to probe it.
     static INITIALIZED: Cell<bool> = const { Cell::new(false) };
     static HOST_BACKGROUND: Cell<bool> = const { Cell::new(false) };
 }
@@ -50,11 +49,14 @@ impl EngineCallGuard {
         if !alive() {
             return None;
         }
-        let lease = crate::state().lock().ok()?.engine.acquire();
+        // Release the Agent-state lock BEFORE initializing CALLING: registering
+        // a TLS destructor can acquire the native loader lock.
+        let engine = crate::state().lock().ok()?.engine.clone();
+        let lease = engine.acquire();
         Self::with_lease(lease)
     }
-    /// Call after entering the Host Hook guard, which initializes ArcSwap TLS
-    /// before this slot. Async completions replace its active lease with theirs.
+    /// Call after entering the Host Hook guard. Async completions replace its
+    /// active lease with theirs. The caller must not hold Agent-state locks.
     pub(crate) fn with_lease(lease: Lease) -> Option<Self> {
         let guard = CALLING
             .try_with(|slot| Self {
@@ -92,12 +94,9 @@ pub(crate) fn calling(runtime: &Runtime) -> Result<Lease, i32> {
             return Ok(lease);
         }
     }
-    let lease = runtime.acquire();
-    CALLING
-        .try_with(|_| ())
-        .map_err(|_| crate::HH_ERR_INVALID)?;
-    INITIALIZED.with(|value| value.set(true));
-    Ok(lease)
+    // Direct ABI callers do not need a thread-local calling context. In
+    // particular, do not register a destructor while they own process state.
+    Ok(runtime.acquire())
 }
 #[cfg(all(windows, feature = "gum-agent"))]
 pub(crate) fn reset_after_fork() {
@@ -143,7 +142,7 @@ mod tests {
         std::thread::spawn(move || {
             let runtime = hyperhub_engine::resident();
             // Destructors run in reverse registration order. This destructor
-            // runs after BOTH the calling slot and ArcSwap's debt storage.
+            // runs after the calling slot.
             LATE.with(|slot| {
                 slot.replace(Some(Late {
                     runtime: runtime.clone(),
