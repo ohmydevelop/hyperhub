@@ -285,7 +285,17 @@ async fn concurrent_handoff_and_session_cancel_preserve_other_sessions() {
 #[ignore = "requires built forwarding worker fixture or final CLI"]
 async fn disconnected_control_drains_granted_streams_and_preserves_central_revocation() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn stage<T>(name: &str, operation: impl std::future::Future<Output = T>) -> T {
+        eprintln!("DISCONNECTED_CONTROL_STAGE begin={name}");
+        let result = tokio::time::timeout(Duration::from_secs(10), operation)
+            .await
+            .unwrap_or_else(|_| panic!("disconnected control stage {name} exceeded 10s"));
+        eprintln!("DISCONNECTED_CONTROL_STAGE complete={name}");
+        result
+    }
+    eprintln!("DISCONNECTED_CONTROL_STAGE begin=fixture-startup");
     let fixture = Fixture::start().await;
+    eprintln!("DISCONNECTED_CONTROL_STAGE complete=fixture-startup");
     let (origin, server) = echo().await;
     let stalled = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -331,7 +341,9 @@ async fn disconnected_control_drains_granted_streams_and_preserves_central_revoc
     });
     let other_token = add_session(&fixture.registry, "other-control-session");
     let initial = fixture.manager.status().active_generation;
+    eprintln!("DISCONNECTED_CONTROL_STAGE begin=candidate-prepare");
     prepare(&fixture, "control-failure".into()).await;
+    eprintln!("DISCONNECTED_CONTROL_STAGE complete=candidate-prepare");
     let candidate = fixture.manager.commit("control-failure").unwrap();
     let mut closed = fixture.connect(901, origin).await;
     let mut survivor = fixture.connect(902, stalled_address).await;
@@ -350,16 +362,26 @@ async fn disconnected_control_drains_granted_streams_and_preserves_central_revoc
         )
         .await;
     legitimate.write_all(b"half-close-request").await.unwrap();
-    observed_start.await.unwrap();
-    fixture
-        .manager
-        .quarantine(candidate.generation, "fixture control channel failure")
+    stage("origin-observed-request", observed_start)
+        .await
         .unwrap();
+    let manager = fixture.manager.clone();
+    stage(
+        "quarantine-control",
+        tokio::task::spawn_blocking(move || {
+            manager.quarantine(candidate.generation, "fixture control channel failure")
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     fixture.manager.rollback("control-failure").unwrap();
     assert_eq!(fixture.manager.status().active_generation, initial);
     exchange(&mut survivor, b"granted-flow-survives-control-loss").await;
     legitimate.shutdown().await.unwrap();
-    observed_half_close.await.unwrap();
+    stage("origin-observed-half-close", observed_half_close)
+        .await
+        .unwrap();
     closed.shutdown().await.unwrap();
     let mut byte = [0];
     assert_eq!(
@@ -409,8 +431,10 @@ async fn disconnected_control_drains_granted_streams_and_preserves_central_revoc
     assert_eq!(response, b"half-close-response");
     exchange(&mut other, b"other-session-still-live-after-half-close").await;
     drop((closed, survivor, future, other, legitimate));
-    legitimate_server.await.unwrap();
-    fixture.stop().await;
+    stage("legitimate-origin-completion", legitimate_server)
+        .await
+        .unwrap();
+    stage("fixture-drain", fixture.stop()).await;
     server.abort();
     stalled_server.abort();
 }

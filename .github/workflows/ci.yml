@@ -75,6 +75,7 @@ jobs:
         run: .\scripts\build.ps1 -SkipTests
 
       - name: Test Windows Hook semantics
+        timeout-minutes: 30
         if: runner.os == 'Windows'
         shell: pwsh
         run: .\scripts\test-windows-hooks.ps1

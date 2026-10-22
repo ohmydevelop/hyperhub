@@ -9,19 +9,24 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use windows_sys::Win32::System::{
     Threading::{GetCurrentThreadId, OpenThread, THREAD_TERMINATE},
-    IO::CancelSynchronousIo,
+    IO::{CancelIoEx, CancelSynchronousIo},
 };
 
 const MAGIC: &[u8; 4] = b"HHW1";
 const HEADER: usize = 12;
 
+trait WritePipe: Write + AsRawHandle + Send {}
+impl<T: Write + AsRawHandle + Send> WritePipe for T {}
+trait ReadPipe: Read + AsRawHandle + Send {}
+impl<T: Read + AsRawHandle + Send> ReadPipe for T {}
+
 pub(super) struct Sender {
-    pipe: Box<dyn Write + Send>,
+    pipe: Option<Box<dyn WritePipe>>,
     peer_pid: Option<u32>,
     control: Control,
 }
 pub(super) struct Receiver {
-    pipe: Box<dyn Read + Send>,
+    pipe: Option<Box<dyn ReadPipe>>,
     control: Control,
 }
 #[derive(Clone)]
@@ -36,7 +41,14 @@ struct Shared {
 struct State {
     closed: bool,
     next: u64,
-    active: Vec<(u64, OwnedHandle)>,
+    active: Vec<ActiveIo>,
+}
+struct ActiveIo {
+    id: u64,
+    thread: OwnedHandle,
+    // The exact handle used by IO, not a separately duplicated handle.
+    // with_operation retains the pipe borrow until its Operation is removed.
+    pipe: usize,
 }
 struct Operation {
     control: Control,
@@ -50,7 +62,7 @@ impl Drop for Operation {
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        state.active.retain(|(id, _)| *id != self.id);
+        state.active.retain(|operation| operation.id != self.id);
         self.control.0.changed.notify_all();
     }
 }
@@ -82,7 +94,11 @@ impl Control {
             Ok(())
         }
     }
-    fn operation(&self) -> io::Result<Operation> {
+    fn with_operation<P: AsRawHandle + ?Sized, T>(
+        &self,
+        pipe: &mut P,
+        io: impl FnOnce(&mut P) -> io::Result<T>,
+    ) -> io::Result<T> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed {
             return Err(io::Error::new(
@@ -100,22 +116,35 @@ impl Control {
             .checked_add(1)
             .ok_or_else(|| invalid("worker IO sequence exhausted"))?;
         let id = state.next;
-        state.active.push((id, handle));
-        Ok(Operation {
+        state.active.push(ActiveIo {
+            id,
+            thread: handle,
+            pipe: pipe.as_raw_handle() as usize,
+        });
+        drop(state);
+        // The guard cannot escape this scope. The original pipe stays borrowed
+        // through native IO completion (including Rust's overlapped APC wait),
+        // and is never closed/reused while shutdown can access its raw handle.
+        let _operation = Operation {
             control: self.clone(),
             id,
-        })
+        };
+        io(pipe)
     }
     pub(super) fn shutdown(&self) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.closed = true;
-        // The owned thread handles remain valid through cancellation. Repeating
-        // cancellation covers the interval between registration and entering a
-        // synchronous ReadFile/WriteFile. Do not take sender/receiver locks here.
+        // Rust ChildStdin/ChildStdout use overlapped IO even though their Read
+        // and Write methods block. CancelSynchronousIo alone cannot wake them.
+        // Retain both the exact pipe and owned thread handle through completion;
+        // from_stdio's File IO remains synchronous. Repeat both cancellation
+        // forms to cover registration racing actual IO submission. Do not take
+        // sender/receiver locks here or close handles before Operation drops.
         while !state.active.is_empty() {
-            for (_, handle) in &state.active {
+            for operation in &state.active {
                 unsafe {
-                    CancelSynchronousIo(handle.as_raw_handle().cast());
+                    CancelIoEx(operation.pipe as _, std::ptr::null());
+                    CancelSynchronousIo(operation.thread.as_raw_handle().cast());
                 }
             }
             state = self
@@ -129,7 +158,7 @@ impl Control {
 }
 impl Sender {
     pub(super) fn close(&mut self) {
-        self.pipe = Box::new(io::sink());
+        self.pipe.take();
     }
     pub(super) fn send(&mut self, payload: &[u8], socket: Option<&TcpStream>) -> io::Result<()> {
         let offer = match socket {
@@ -145,50 +174,61 @@ impl Sender {
         header[..4].copy_from_slice(MAGIC);
         header[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         header[8..12].copy_from_slice(&(socket_bytes.len() as u32).to_le_bytes());
-        let _operation = self.control.operation()?;
-        write_all(&mut *self.pipe, &self.control, &header)?;
-        write_all(&mut *self.pipe, &self.control, socket_bytes)?;
-        write_all(&mut *self.pipe, &self.control, payload)?;
-        self.pipe.flush()
+        let pipe = self.pipe.as_deref_mut().ok_or_else(closed)?;
+        self.control.with_operation(pipe, |pipe| {
+            write_all(pipe, &self.control, &header)?;
+            write_all(pipe, &self.control, socket_bytes)?;
+            write_all(pipe, &self.control, payload)?;
+            pipe.flush()
+        })
     }
 }
 impl Receiver {
     pub(super) fn close(&mut self) {
-        self.pipe = Box::new(io::empty());
+        self.pipe.take();
     }
     pub(super) fn receive(&mut self) -> io::Result<(Vec<u8>, Option<TcpStream>)> {
-        let _operation = self.control.operation()?;
-        let mut header = [0; HEADER];
-        read_exact(&mut *self.pipe, &self.control, &mut header)?;
-        if &header[..4] != MAGIC {
-            return Err(invalid("invalid worker frame header"));
-        }
-        let length = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-        let socket_length = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-        if length == 0
-            || length > MAX_FRAME
-            || (socket_length != 0 && socket_length != handoff::SocketOffer::WIRE_SIZE)
-        {
-            return Err(invalid("invalid worker frame size"));
-        }
-        let mut socket_bytes = vec![0; socket_length];
-        read_exact(&mut *self.pipe, &self.control, &mut socket_bytes)?;
-        let socket = if socket_length == 0 {
-            None
-        } else {
-            Some(handoff::import(&handoff::SocketOffer::from_bytes(
-                &socket_bytes,
-            )?)?)
-        };
-        let mut payload = vec![0; length];
-        read_exact(&mut *self.pipe, &self.control, &mut payload)?;
-        Ok((payload, socket))
+        let pipe = self.pipe.as_deref_mut().ok_or_else(closed)?;
+        self.control.with_operation(pipe, |pipe| {
+            let mut header = [0; HEADER];
+            read_exact(pipe, &self.control, &mut header)?;
+            if &header[..4] != MAGIC {
+                return Err(invalid("invalid worker frame header"));
+            }
+            let length = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            let socket_length = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+            if length == 0
+                || length > MAX_FRAME
+                || (socket_length != 0 && socket_length != handoff::SocketOffer::WIRE_SIZE)
+            {
+                return Err(invalid("invalid worker frame size"));
+            }
+            let mut socket_bytes = vec![0; socket_length];
+            read_exact(pipe, &self.control, &mut socket_bytes)?;
+            let socket = if socket_length == 0 {
+                None
+            } else {
+                Some(handoff::import(&handoff::SocketOffer::from_bytes(
+                    &socket_bytes,
+                )?)?)
+            };
+            let mut payload = vec![0; length];
+            read_exact(pipe, &self.control, &mut payload)?;
+            Ok((payload, socket))
+        })
     }
+}
+fn closed() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "worker pipe is closed")
 }
 // Check closure between individual IO calls, including Interrupted retries.
 // Using Read::read_exact/Write::write_all here could retry an aborted operation
 // without observing the shutdown flag on a platform that maps it to Interrupted.
-fn read_exact(reader: &mut dyn Read, control: &Control, mut bytes: &mut [u8]) -> io::Result<()> {
+fn read_exact<R: Read + ?Sized>(
+    reader: &mut R,
+    control: &Control,
+    mut bytes: &mut [u8],
+) -> io::Result<()> {
     while !bytes.is_empty() {
         control.check()?;
         match reader.read(bytes) {
@@ -205,7 +245,11 @@ fn read_exact(reader: &mut dyn Read, control: &Control, mut bytes: &mut [u8]) ->
     }
     Ok(())
 }
-fn write_all(writer: &mut dyn Write, control: &Control, mut bytes: &[u8]) -> io::Result<()> {
+fn write_all<W: Write + ?Sized>(
+    writer: &mut W,
+    control: &Control,
+    mut bytes: &[u8],
+) -> io::Result<()> {
     while !bytes.is_empty() {
         control.check()?;
         match writer.write(bytes) {
@@ -223,20 +267,20 @@ fn write_all(writer: &mut dyn Write, control: &Control, mut bytes: &[u8]) -> io:
     Ok(())
 }
 fn attach(
-    reader: Box<dyn Read + Send>,
-    writer: Box<dyn Write + Send>,
+    reader: Box<dyn ReadPipe>,
+    writer: Box<dyn WritePipe>,
     peer_pid: Option<u32>,
     peer_process: Option<OwnedHandle>,
 ) -> Wire {
     let control = Control::new(peer_process);
     Wire::new(
         Sender {
-            pipe: writer,
+            pipe: Some(writer),
             peer_pid,
             control: control.clone(),
         },
         Receiver {
-            pipe: reader,
+            pipe: Some(reader),
             control: control.clone(),
         },
         control,
@@ -323,6 +367,104 @@ pub(super) fn test_pair() -> (Wire, Wire) {
 mod tests {
     use super::*;
     #[test]
+    fn shutdown_cancels_real_child_stdio_overlapped_reads_and_writes() {
+        struct SilentChild {
+            child: Child,
+            directory: std::path::PathBuf,
+        }
+        impl Drop for SilentChild {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                let _ = std::fs::remove_dir_all(&self.directory);
+            }
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "hh-wire-overlapped-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let marker = directory.join("entered");
+        let binary = directory.join("silent-worker.exe");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/forward_worker_silent.rs");
+        let output = Command::new("rustc")
+            .args(["--edition=2021", "--crate-name", "forward_worker_silent"])
+            .arg(source)
+            .arg("-o")
+            .arg(&binary)
+            .env("HH_SILENT_WORKER_MARKER", &marker)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut command = Command::new(&binary);
+        command.arg("forward-worker");
+        let (wire, child) = spawn(&mut command).unwrap();
+        let mut child = SilentChild { child, directory };
+        let sender = wire.clone();
+        let receiver = wire.clone();
+        let (sent, sending) = std::sync::mpsc::channel();
+        let (received, receiving) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            sent.send(sender.send(&"x".repeat(MAX_FRAME - 2), None).is_err())
+                .unwrap();
+        });
+        let reader = std::thread::spawn(move || {
+            received
+                .send(receiver.receive::<String>().is_err())
+                .unwrap();
+        });
+        let started = std::time::Instant::now();
+        loop {
+            let active = wire.inner.control.0.state.lock().unwrap().active.len();
+            if marker.is_file() && active == 2 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "both real stdio operations did not start"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(child.child.try_wait().unwrap().is_none());
+        let closer = wire.clone();
+        let (closed, closing) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            closer.shutdown();
+            closed.send(()).unwrap();
+        });
+        let result = closing.recv_timeout(Duration::from_secs(5));
+        if result.is_err() {
+            // Reap the bounded fixture before reporting a regression, so a
+            // broken cancellation implementation cannot leave blocked threads.
+            let _ = child.child.kill();
+            let _ = child.child.wait();
+        }
+        assert!(sending.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(receiving.recv_timeout(Duration::from_secs(5)).unwrap());
+        writer.join().unwrap();
+        reader.join().unwrap();
+        shutdown.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "shutdown did not cancel real overlapped stdio within 5 seconds"
+        );
+        assert!(
+            child.child.try_wait().unwrap().is_none(),
+            "cancellation waited for the live child to exit"
+        );
+        assert!(wire.is_closed());
+    }
+
+    #[test]
     fn interrupted_pipe_io_observes_shutdown_before_retry() {
         struct InterruptedPipe(Control);
         impl Read for InterruptedPipe {
@@ -373,6 +515,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pipe
+                .as_mut()
+                .unwrap()
                 .write_all(&header)
                 .unwrap();
             assert!(right.receive::<String>().is_err());
