@@ -1,6 +1,7 @@
 //! Stateless network processing shared by the initial resident fallback and the
 //! independently built native Engine. Session/socket/DNS ownership stays in Host.
 pub mod contract;
+pub mod host;
 pub mod management;
 mod operations;
 

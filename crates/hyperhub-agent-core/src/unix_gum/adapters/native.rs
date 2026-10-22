@@ -184,6 +184,9 @@ pub(in crate::unix_gum) struct HookGuard {
 }
 impl HookGuard {
     pub(in crate::unix_gum) fn enter() -> Option<Self> {
+        if crate::engine_call::host_background() {
+            return None;
+        }
         INSIDE_HOOK.with(|inside| {
             if inside.replace(true) {
                 None

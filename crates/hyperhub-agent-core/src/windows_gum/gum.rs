@@ -143,6 +143,9 @@ pub(in crate::windows_gum) struct HookGuard {
 
 impl HookGuard {
     pub(in crate::windows_gum) fn enter() -> Option<Self> {
+        if crate::engine_call::host_background() {
+            return None;
+        }
         INSIDE_HOOK.with(|inside| {
             if inside.replace(true) {
                 None

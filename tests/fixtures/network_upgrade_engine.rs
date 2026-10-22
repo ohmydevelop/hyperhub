@@ -1,6 +1,7 @@
 //! Native upgrade fixture for the network Host suite. Controlled ASCII JSON
 //! requests only; this independent decoder is not a production JSON parser.
-//! New semantics: prefix CONNECT domains and require a zero reserved reply byte.
+//! New semantics: advertise two SOCKS methods, prefix CONNECT domains and
+//! require a zero reserved reply byte. The server can select method 2 in both.
 #![allow(dead_code)]
 #[path = "../../crates/hyperhub-runtime/src/abi.rs"]
 mod abi;
@@ -45,7 +46,7 @@ fn run(operation: u32, input: &str) -> Option<Vec<u8>> {
             Some(format!("{{\"intercept\":{intercept},\"family\":{family},\"address\":{address:?},\"port\":{},\"target\":{target}}}", proxy.port()).into_bytes())
         }
         3 => match number(input, "phase")? {
-            0 => Some(vec![5, 1, 2]),
+            0 => Some(vec![5, 2, 0, 2]),
             1 => {
                 let username = text(input, "username")?.as_bytes();
                 let password = array(input, "password")?;

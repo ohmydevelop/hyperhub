@@ -7,6 +7,7 @@ pub mod config_store;
 pub mod connector;
 pub mod control;
 pub mod duplex;
+pub mod engine_hosts;
 pub mod firewall;
 pub mod framing;
 pub mod http;

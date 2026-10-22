@@ -99,6 +99,8 @@ pub struct Snapshot {
     pub active: GenerationStatus,
     pub retired: Vec<GenerationStatus>,
     pub transactions: Vec<Transaction>,
+    #[serde(default)]
+    pub transactions_omitted: usize,
 }
 
 struct Generation {
@@ -494,7 +496,20 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn query(&self, id: &str) -> Result<Transaction, Error> {
+        let mut state = self.lock()?;
+        Self::expire(&mut state, self.settings.prepare_timeout);
+        Self::collect(&mut state);
+        state
+            .transactions
+            .get(id)
+            .cloned()
+            .ok_or(Error::NotPrepared)
+    }
     pub fn snapshot(&self) -> Result<Snapshot, Error> {
+        self.snapshot_limited(usize::MAX)
+    }
+    pub fn snapshot_limited(&self, transactions: usize) -> Result<Snapshot, Error> {
         let mut state = self.lock()?;
         Self::expire(&mut state, self.settings.prepare_timeout);
         Self::collect(&mut state);
@@ -506,11 +521,20 @@ impl Runtime {
             references: Arc::strong_count(g).saturating_sub(1 + extra),
             rollback_reserved: reserved == Some(g.id),
         };
+        let mut transaction_report: Vec<_> = state
+            .transactions
+            .values()
+            .rev()
+            .take(transactions)
+            .cloned()
+            .collect();
+        transaction_report.reverse();
         Ok(Snapshot {
             host: self.host.clone(),
             active: status(&active, 1),
             retired: state.retired.iter().map(|g| status(g, 0)).collect(),
-            transactions: state.transactions.values().cloned().collect(),
+            transactions: transaction_report,
+            transactions_omitted: state.transactions.len().saturating_sub(transactions),
         })
     }
 }

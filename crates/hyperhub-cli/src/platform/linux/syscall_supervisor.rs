@@ -298,6 +298,14 @@ where
         dns_ports,
         root_status: None,
     };
+    let _engine_control = super::engine_control::start(
+        supervisor.engine.clone(),
+        supervisor.endpoint.clone(),
+        supervisor.session_id.clone(),
+        String::from_utf8(supervisor.password.clone()).map_err(|_| "invalid session token")?,
+        child as u32,
+    )
+    .inspect_err(|_| terminate(child))?;
     resume_syscall(child, 0).inspect_err(|_| terminate(child))?;
     let result = supervisor.event_loop();
     if result.is_err() {

@@ -708,6 +708,7 @@ pub(crate) fn register_unix_process(
 
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn subscribe_sandbox() {
+    subscribe_engine();
     let _ = std::thread::Builder::new()
         .name("hyperhub-sandbox-subscription".into())
         .spawn(|| {
@@ -771,6 +772,57 @@ pub(crate) fn subscribe_sandbox() {
                     attempt = attempt.saturating_add(1);
                 }
             }
+        });
+}
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
+fn subscribe_engine() {
+    let _ = std::thread::Builder::new()
+        .name("hyperhub-engine-control".into())
+        .spawn(|| {
+            crate::engine_call::background(|| {
+                let delays = [250u64, 1000, 2000, 5000, 10000, 30000];
+                let mut attempt = 0usize;
+                loop {
+                    let values = crate::state().lock().ok().map(|c| {
+                        (
+                            c.session.control_endpoint.clone(),
+                            c.session.session_id.clone(),
+                            c.session.token.clone(),
+                            c.engine.clone(),
+                        )
+                    });
+                    let Some((endpoint, session_id, token, engine)) = values else {
+                        return;
+                    };
+                    let _ = (|| -> Result<(), i32> {
+                        let mut stream = open_control(&endpoint)?;
+                        let nonce = rand::random();
+                        let request = hyperhub_engine::host::Enrollment {
+                            kind: "subscribe_engine_host",
+                            session_id: &session_id,
+                            token: &token,
+                            root_pid: std::process::id(),
+                            #[cfg(target_os = "linux")]
+                            backend: hyperhub_engine::host::Backend::LinuxGum,
+                            #[cfg(windows)]
+                            backend: hyperhub_engine::host::Backend::WindowsGum,
+                            snapshot: hyperhub_engine::host::report(&engine)
+                                .map_err(|_| HH_ERR_PROTOCOL)?,
+                            nonce,
+                        };
+                        hyperhub_engine::host::write_frame(&mut *stream, &request)
+                            .map_err(|_| HH_ERR_PROTOCOL)?;
+                        unsafe {
+                            hyperhub_engine::host::serve(&mut *stream, &engine, &token, &nonce)
+                        }
+                        .map_err(|_| HH_ERR_PROTOCOL)
+                    })();
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        delays[attempt.min(delays.len() - 1)],
+                    ));
+                    attempt = attempt.saturating_add(1);
+                }
+            });
         });
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]

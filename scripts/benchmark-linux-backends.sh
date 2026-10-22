@@ -287,6 +287,16 @@ chmod 0755 "$standalone_hyperhub"
 )
 record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum uses embedded Agent"
 record_check backend.thread_exit "late pthread destructor completes IO under ptrace and explicit Gum"
+(
+  cd "$root"
+  HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" \
+    cargo test -p hyperhub --test engine_host_live --locked -- --nocapture \
+    >"$result_dir/engine-ptrace.log" 2>&1
+  HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" HYPERHUB_TEST_ENGINE_BACKEND=gum \
+    cargo test -p hyperhub --test engine_host_live --locked -- --nocapture \
+    >"$result_dir/engine-gum.log" 2>&1
+)
+record_check backend.engine_upgrade "authenticated native Engine switch preserves target identity and existing TCP streams"
 
 pass_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $pass_audit ]] || { echo 'static coverage audit was not created' >&2; exit 1; }

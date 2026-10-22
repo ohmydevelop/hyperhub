@@ -9,3 +9,4 @@ pub use launcher::{
     backend_trust_environment, doctor_target, run_injected, target_backend, validate_target_runtime,
 };
 pub use pty::run_internal;
+mod engine_control;

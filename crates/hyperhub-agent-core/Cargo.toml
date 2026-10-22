@@ -18,6 +18,7 @@ name = "windows_hook_probe"
 path = "../../tests/fixtures/windows_hook_probe.rs"
 
 [dependencies]
+rand = "0.10"
 hyperhub-engine = { path = "../hyperhub-engine" }
 hyperhub-runtime = { path = "../hyperhub-runtime" }
 arc-swap = "1"

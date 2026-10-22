@@ -28,11 +28,22 @@ pub const DISCOVERY_CONTROL_ENDPOINT: &str = "/tmp/hyperhub-control.sock";
 
 #[cfg(windows)]
 pub fn discovery_control_endpoint() -> String {
-    let sid = crate::config_store::current_user_sid_string().unwrap_or_else(|_| "unknown".into());
-    let home = crate::config_store::hyperhub_home()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    windows_control_endpoint(&sid, &home)
+    let home = crate::config_store::hyperhub_home().unwrap_or_default();
+    instance_control_endpoint(&home)
+}
+
+/// Resolve a specific instance without changing this process's environment.
+pub fn instance_control_endpoint(home: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        let sid =
+            crate::config_store::current_user_sid_string().unwrap_or_else(|_| "unknown".into());
+        windows_control_endpoint(&sid, &home.display().to_string())
+    }
+    #[cfg(unix)]
+    {
+        control_endpoint_for_home(home).display().to_string()
+    }
 }
 
 #[cfg(windows)]
@@ -134,6 +145,7 @@ pub struct ControlService {
     shutdown: Option<tokio::sync::watch::Sender<bool>>,
     session_state_path: Option<PathBuf>,
     session_state_key: Option<Zeroizing<Vec<u8>>>,
+    engine_hosts: crate::engine_hosts::EngineHosts,
 }
 
 impl ControlService {
@@ -159,6 +171,7 @@ impl ControlService {
             shutdown: None,
             session_state_path: None,
             session_state_key: None,
+            engine_hosts: Default::default(),
         }
     }
 
@@ -244,6 +257,21 @@ impl ControlService {
         peer_pid: Option<u32>,
     ) -> io::Result<()> {
         let request: ControlRequest = read_frame(&mut stream).await?;
+        if let ControlRequest::SubscribeEngineHost {
+            session_id,
+            token,
+            root_pid,
+            backend,
+            snapshot,
+            nonce,
+        } = request
+        {
+            return self
+                .subscribe_engine_host(
+                    stream, peer_pid, session_id, token, root_pid, backend, snapshot, nonce,
+                )
+                .await;
+        }
         if let ControlRequest::SubscribeSandbox {
             session_id,
             token,
@@ -257,6 +285,33 @@ impl ControlService {
         let runtime = self.runtime.snapshot();
         let mut shutdown_requested = false;
         let response = match request {
+            ControlRequest::EngineHostCommand { request, proof } => {
+                if !request.authenticate(&self.session_auth_key, &proof, unix_timestamp_ms()) {
+                    ControlResponse::Error {
+                        message: "invalid engine upgrade owner proof".into(),
+                    }
+                } else {
+                    match self.engine_hosts.dispatch(request) {
+                        Ok(status) => ControlResponse::EngineHostCommand { status },
+                        Err(error) => ControlResponse::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                }
+            }
+            ControlRequest::GetEngineHosts {
+                request_id,
+                host_id,
+            } => ControlResponse::EngineHosts {
+                hosts: self.engine_hosts.host(host_id.as_deref()),
+                commands: request_id
+                    .and_then(|id| self.engine_hosts.command(&id))
+                    .into_iter()
+                    .collect(),
+            },
+            ControlRequest::SubscribeEngineHost { .. } => {
+                unreachable!("Host subscription handled before dispatch")
+            }
             ControlRequest::BeginSessionAuth {
                 session_id,
                 executable,
@@ -1545,6 +1600,7 @@ impl ControlService {
                 generated_at_ms: unix_timestamp_ms(),
                 sessions: self.sessions.snapshot(),
                 connections: self.connections.snapshot(),
+                engine_hosts: self.engine_hosts.hosts(),
             },
             ControlRequest::SubscribeSandbox { .. } => {
                 unreachable!("subscription handled before request dispatch")
@@ -1593,6 +1649,91 @@ impl ControlService {
             }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn subscribe_engine_host<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        mut stream: S,
+        peer_pid: Option<u32>,
+        session_id: String,
+        token: String,
+        root_pid: u32,
+        backend: hyperhub_engine::host::Backend,
+        snapshot: hyperhub_runtime::Snapshot,
+        nonce: [u8; 32],
+    ) -> io::Result<()> {
+        use hyperhub_engine::host::{Acknowledgement, Backend, Delivery};
+        use hyperhub_engine::management::Command;
+        let platform_matches = match backend {
+            Backend::LinuxPtrace | Backend::LinuxGum => cfg!(target_os = "linux"),
+            Backend::WindowsGum => cfg!(windows),
+        };
+        let authenticated = platform_matches
+            && peer_pid.is_some_and(|pid| match backend {
+                Backend::LinuxGum | Backend::WindowsGum => pid == root_pid,
+                Backend::LinuxPtrace => process_ancestors(root_pid).contains(&pid),
+            })
+            && self
+                .sessions
+                .authenticate_member(&session_id, &token, root_pid);
+        let instance = self.sessions.member_instance(&session_id, &token, root_pid);
+        if !authenticated || instance.is_none() {
+            return write_frame(
+                &mut stream,
+                &ControlResponse::Error {
+                    message: "invalid engine Host subscriber".into(),
+                },
+            )
+            .await;
+        }
+        let mut registration = self.engine_hosts.register(
+            session_id.clone(),
+            backend,
+            peer_pid.unwrap(),
+            root_pid,
+            instance.unwrap(),
+            crate::session::process_start_time(root_pid),
+            snapshot,
+        )?;
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+        let mut sequence = 0u64;
+        loop {
+            if self.sessions.member_instance(&session_id, &token, root_pid) != instance {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "engine Host session expired",
+                ));
+            }
+            let (mut delivery, is_heartbeat) = tokio::select! {
+                command = registration.receiver.recv() => (command.ok_or_else(|| io::Error::other("engine Host queue closed"))?, false),
+                _ = heartbeat.tick() => {
+                    sequence = sequence.checked_add(1).ok_or_else(|| io::Error::other("engine heartbeat exhausted"))?;
+                    (Delivery { request_id: format!("heartbeat-{sequence}"), command: Command::Observe, proof: vec![] }, true)
+                }
+            };
+            if !is_heartbeat {
+                self.engine_hosts
+                    .delivered(&registration.id, &delivery.request_id)?;
+            }
+            crate::engine_hosts::sign_delivery(&mut delivery, &token, &nonce)?;
+            let acknowledgement = tokio::time::timeout(Duration::from_secs(35), async {
+                write_frame(&mut stream, &delivery).await?;
+                read_frame::<_, Acknowledgement>(&mut stream).await
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "engine Host acknowledgement timed out",
+                )
+            })??;
+            if acknowledgement.request_id != delivery.request_id {
+                return Err(io::Error::other("engine Host acknowledgement ID mismatch"));
+            }
+            self.engine_hosts
+                .acknowledge(&registration.id, acknowledgement, is_heartbeat)?;
+        }
     }
 
     async fn subscribe_sandbox<S: AsyncRead + AsyncWrite + Unpin>(
@@ -1690,6 +1831,10 @@ impl ControlService {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "engine_host_control_tests.rs"]
+mod engine_host_control_tests;
 
 #[cfg(windows)]
 fn open_validated_root_process(pid: u32, executable: &str) -> io::Result<usize> {

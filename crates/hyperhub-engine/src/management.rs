@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub const MAX_COMMAND: usize = 16 * 1024;
 pub const MIN_REPLY: usize = 16 * 1024;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     Prepare {
@@ -33,8 +33,11 @@ pub enum Command {
     },
     Observe,
     Query,
+    QueryTransaction {
+        id: String,
+    },
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
     Transaction { transaction: Transaction },
@@ -74,6 +77,9 @@ pub unsafe fn execute(runtime: &Runtime, command: Command) -> Reply {
         Command::Query => runtime
             .snapshot()
             .map(|snapshot| Reply::Snapshot { snapshot }),
+        Command::QueryTransaction { id } => runtime
+            .query(&id)
+            .map(|transaction| Reply::Transaction { transaction }),
     };
     result.unwrap_or_else(|error| Reply::Error {
         message: error.to_string().chars().take(1024).collect(),

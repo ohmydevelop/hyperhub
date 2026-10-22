@@ -1355,6 +1355,7 @@ dependencies = [
  "hyperhub-runtime",
  "ipnet",
  "libc",
+ "rand",
  "regex",
  "serde",
  "serde_json",
@@ -1376,6 +1377,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "hyperhub-engine",
+ "hyperhub-runtime",
  "ipnet",
  "rand",
  "rcgen",
@@ -1402,7 +1405,9 @@ dependencies = [
 name = "hyperhub-engine"
 version = "0.2.12"
 dependencies = [
+ "hmac 0.12.1",
  "hyperhub-runtime",
+ "rand",
  "serde",
  "serde_json",
  "sha2 0.10.9",

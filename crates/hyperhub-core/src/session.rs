@@ -1336,14 +1336,36 @@ impl SessionRegistry {
     }
 }
 
-fn process_start_time(pid: u32) -> Option<u64> {
+pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let after = stat.rsplit_once(") ")?.1;
         return after.split_whitespace().nth(19)?.parse().ok();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, FILETIME},
+            System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let mut creation: FILETIME = std::mem::zeroed();
+            let mut exit: FILETIME = std::mem::zeroed();
+            let mut kernel: FILETIME = std::mem::zeroed();
+            let mut user: FILETIME = std::mem::zeroed();
+            let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+            CloseHandle(handle);
+            return (ok != 0).then_some(
+                (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime),
+            );
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = pid;
         None
@@ -1490,6 +1512,22 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
+    SubscribeEngineHost {
+        session_id: String,
+        token: String,
+        root_pid: u32,
+        backend: hyperhub_engine::host::Backend,
+        snapshot: hyperhub_runtime::Snapshot,
+        nonce: [u8; 32],
+    },
+    EngineHostCommand {
+        request: crate::engine_hosts::OwnerCommand,
+        proof: Vec<u8>,
+    },
+    GetEngineHosts {
+        request_id: Option<String>,
+        host_id: Option<String>,
+    },
     BeginSessionAuth {
         session_id: String,
         executable: String,
@@ -1669,6 +1707,13 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlResponse {
+    EngineHostCommand {
+        status: crate::engine_hosts::CommandStatus,
+    },
+    EngineHosts {
+        hosts: Vec<crate::engine_hosts::HostStatus>,
+        commands: Vec<crate::engine_hosts::CommandStatus>,
+    },
     SessionChallenge {
         challenge: SessionChallenge,
     },
@@ -1750,6 +1795,8 @@ pub enum ControlResponse {
         generated_at_ms: u64,
         sessions: Vec<SessionSnapshot>,
         connections: Vec<ConnectionSnapshot>,
+        #[serde(default)]
+        engine_hosts: Vec<crate::engine_hosts::HostStatus>,
     },
     SmartProtectionDecision {
         action: crate::config::SandboxAction,

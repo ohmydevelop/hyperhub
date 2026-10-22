@@ -248,6 +248,7 @@ pub fn status(json: bool) -> Result<i32, String> {
             "generated_at_ms": status.generated_at_ms,
             "sessions": status.sessions,
             "connections": status.connections,
+            "engine_hosts": status.engine_hosts,
         });
         println!(
             "{}",
@@ -336,6 +337,7 @@ struct ServeStatus {
     generated_at_ms: u64,
     sessions: Vec<hyperhub_core::session::SessionSnapshot>,
     connections: Vec<hyperhub_core::session::ConnectionSnapshot>,
+    engine_hosts: Vec<hyperhub_core::engine_hosts::HostStatus>,
 }
 
 fn query_status() -> Result<Option<ServeStatus>, String> {
@@ -368,6 +370,7 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
             generated_at_ms,
             sessions,
             connections,
+            engine_hosts,
         } => Ok(Some(ServeStatus {
             pid,
             socks_address,
@@ -375,6 +378,7 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
             generated_at_ms,
             sessions,
             connections,
+            engine_hosts,
         })),
         _ => Err("HyperHub serve returned an unexpected status response".into()),
     }

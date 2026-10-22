@@ -11,6 +11,24 @@ thread_local! {
     // storage have been destroyed. Initialize ArcSwap BEFORE CALLING, so its
     // destructor runs after ours. Do not initialize CALLING just to probe it.
     static INITIALIZED: Cell<bool> = const { Cell::new(false) };
+    static HOST_BACKGROUND: Cell<bool> = const { Cell::new(false) };
+}
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
+pub(crate) fn host_background() -> bool {
+    HOST_BACKGROUND.with(Cell::get)
+}
+/// Only dedicated resident-control threads use this guard. Blocking control IO
+/// must bypass target hooks without pinning an Engine generation while idle.
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
+pub(crate) fn background<T>(call: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HOST_BACKGROUND.with(|flag| flag.set(self.0));
+        }
+    }
+    let _reset = Reset(HOST_BACKGROUND.with(|flag| flag.replace(true)));
+    call()
 }
 fn alive() -> bool {
     !INITIALIZED.with(Cell::get) || CALLING.try_with(|_| ()).is_ok()
