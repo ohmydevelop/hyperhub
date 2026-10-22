@@ -277,7 +277,8 @@ pub(crate) fn report_firewall_audit(event: &FirewallAuditEvent) -> Result<(), i3
     }
 }
 
-#[cfg(all(test, any(windows, target_os = "linux"), feature = "gum-agent"))]
+#[cfg(test)]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 mod tests {
     use super::*;
 

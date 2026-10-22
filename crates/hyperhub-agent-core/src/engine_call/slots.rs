@@ -101,7 +101,8 @@ pub(super) fn get() -> *mut c_void {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg(windows)]
 mod tests {
     use super::*;
     use windows_sys::Win32::{

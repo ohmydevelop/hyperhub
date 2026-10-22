@@ -10,6 +10,7 @@ fn comments_formatting_and_test_modules_do_not_change_the_base() {
         /// Handle a native call.
         pub fn hook (x: u32) -> u32 { x + 1 }
         #[cfg(test)]
+        #[cfg(windows)]
         mod tests { #[test] fn regression() { assert_eq!(super::hook(1), 2); } }
     "#;
     assert_eq!(
@@ -25,8 +26,35 @@ fn native_hook_and_body_changes_are_significant() {
         "pub fn hook(x:u32)->u32{x+2}",
         "pub fn hook(x:u32)->u32{x+1} pub fn new_hook(){}",
         "pub fn hook(x:u64)->u64{x+1}",
+        "#[cfg(windows)] pub fn hook(x:u32)->u32{x+1}",
+        "#[cfg(any(test, windows))] pub fn hook(x:u32)->u32{x+1}",
+        "#[cfg(any(test, all(windows, feature=\"gum-agent\")))] pub fn hook(x:u32)->u32{x+1}",
     ] {
         assert_ne!(original, native_base::normalized(changed).unwrap());
+    }
+}
+
+#[test]
+fn platform_test_modules_in_resident_sources_do_not_change_the_base() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for path in [
+        "crates/hyperhub-agent-core/src/engine_call/slots.rs",
+        "crates/hyperhub-agent-core/src/control.rs",
+        "crates/hyperhub-agent-core/src/sandbox/mod.rs",
+        "crates/hyperhub-agent-core/src/sandbox/network.rs",
+        "crates/hyperhub-runtime/src/artifact.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(path)).unwrap();
+        let edited = source.replace("#[test]", "#[test]\n#[ignore = \"test-only fixture edit\"]");
+        assert_ne!(
+            source, edited,
+            "test-only source edit did not apply: {path}"
+        );
+        assert_eq!(
+            native_base::normalized(&source).unwrap(),
+            native_base::normalized(&edited).unwrap(),
+            "test-only edits changed the resident Base: {path}"
+        );
     }
 }
 

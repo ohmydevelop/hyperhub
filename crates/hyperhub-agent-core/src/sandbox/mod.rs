@@ -379,7 +379,8 @@ pub(crate) fn query_protection_gateway(
     )
 }
 
-#[cfg(all(test, any(windows, unix), feature = "gum-agent"))]
+#[cfg(test)]
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
 mod tests {
     use super::*;
 

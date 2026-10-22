@@ -974,7 +974,8 @@ pub(crate) struct SessionState {
     pub(crate) control_endpoint: String,
 }
 
-#[cfg(all(test, windows, feature = "gum-agent"))]
+#[cfg(test)]
+#[cfg(all(windows, feature = "gum-agent"))]
 mod tests {
     use super::*;
     use std::ffi::OsString;
