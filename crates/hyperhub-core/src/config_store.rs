@@ -1197,14 +1197,6 @@ mod tests {
         fs::remove_file(redacted_config_path(&path)).unwrap();
     }
 
-    fn temp_certificate_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "hyperhub-{name}-{}-{}.pem",
-            std::process::id(),
-            rand::random::<u64>()
-        ))
-    }
-
     fn write_test_ca(path: &Path) -> (String, Vec<u8>) {
         let key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -1221,11 +1213,15 @@ mod tests {
 
     #[test]
     fn root_certificates_import_read_reencrypt_and_reconcile() {
-        let config_path = temp_path("cert-config");
+        // Root certificates belong to the configuration's parent directory.
+        // Separate test processes must not share or reconcile /tmp/root-certificates.
+        let root = temp_path("cert-home").with_extension("");
+        fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.bin");
         let config = Config::default();
         save_encrypted(&config_path, &config, b"old password").unwrap();
 
-        let source = temp_certificate_path("source-ca");
+        let source = root.join("source-ca.pem");
         let (fingerprint, der) = write_test_ca(&source);
         let imported = import_root_certificates(&source, &config_path, b"old password").unwrap();
         assert_eq!(imported.len(), 1);
@@ -1265,7 +1261,7 @@ mod tests {
 
         fs::remove_file(&config_path).unwrap();
         fs::remove_file(redacted_config_path(&config_path)).unwrap();
-        fs::remove_dir_all(root_certificates_dir(&config_path)).ok();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
