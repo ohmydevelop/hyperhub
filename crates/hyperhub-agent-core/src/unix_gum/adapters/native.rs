@@ -125,7 +125,31 @@ unsafe extern "C" fn record_exit_status(status: c_int, _: *mut c_void) {
     if fd < 0 {
         return;
     }
-    let status = (status & 255).to_string();
+    let stat_fd = libc::syscall(
+        libc::SYS_openat,
+        libc::AT_FDCWD,
+        c"/proc/self/stat".as_ptr(),
+        libc::O_RDONLY | libc::O_CLOEXEC,
+        0,
+    ) as c_int;
+    if stat_fd < 0 {
+        libc::syscall(libc::SYS_close, fd);
+        return;
+    }
+    let mut stat = [0u8; 4096];
+    let count = libc::syscall(libc::SYS_read, stat_fd, stat.as_mut_ptr(), stat.len());
+    libc::syscall(libc::SYS_close, stat_fd);
+    let birth = (count > 0)
+        .then(|| std::str::from_utf8(&stat[..count as usize]).ok())
+        .flatten()
+        .and_then(|text| text.rsplit_once(") "))
+        .and_then(|(_, tail)| tail.split_whitespace().nth(19))
+        .and_then(|value| value.parse::<u64>().ok());
+    let Some(birth) = birth else {
+        libc::syscall(libc::SYS_close, fd);
+        return;
+    };
+    let status = format!("{} {birth}", status & 255);
     let mut written = 0;
     while written < status.len() {
         let result = libc::syscall(
@@ -184,7 +208,7 @@ pub(in crate::unix_gum) struct HookGuard {
 }
 impl HookGuard {
     pub(in crate::unix_gum) fn enter() -> Option<Self> {
-        if crate::engine_call::host_background() {
+        if super::super::fork::awaiting_rebuild() || crate::engine_call::host_background() {
             return None;
         }
         INSIDE_HOOK.with(|inside| {
@@ -209,6 +233,32 @@ impl Drop for HookGuard {
     }
 }
 
+/// Resolve lazy native trampolines before any application fork. A copied
+/// OnceLock in its initializing state cannot be completed by a vanished thread.
+pub(crate) fn warm_originals() {
+    let _ = connect_fn();
+    let _ = send_fn();
+    let _ = recv_fn();
+    let _ = sendto_fn();
+    let _ = recvfrom_fn();
+    let _ = sendmsg_fn();
+    let _ = recvmsg_fn();
+    let _ = gai_fn();
+    let _ = free_fn();
+    let _ = read_fn();
+    let _ = write_fn();
+    let _ = unlink_fn();
+    let _ = rename_fn();
+    let _ = execve_fn();
+    let _ = mmap_fn();
+    let _ = readv_fn();
+    let _ = writev_fn();
+    let _ = pread_fn();
+    let _ = pwrite_fn();
+    if gum::original("renameat2").is_some() {
+        let _ = renameat2_fn();
+    }
+}
 type ConnectFn = unsafe extern "C" fn(c_int, *const sockaddr, socklen_t) -> c_int;
 type SendFn = unsafe extern "C" fn(c_int, *const c_void, usize, c_int) -> isize;
 type RecvFn = unsafe extern "C" fn(c_int, *mut c_void, usize, c_int) -> isize;
@@ -894,6 +944,7 @@ struct ListenerState {
     fd: c_int,
     nonblocking: u8,
     duplicate: u8,
+    guard: *mut HookGuard,
 }
 
 impl Default for ListenerState {
@@ -904,6 +955,7 @@ impl Default for ListenerState {
             fd: -1,
             nonblocking: 0,
             duplicate: 0,
+            guard: std::ptr::null_mut(),
         }
     }
 }
@@ -924,10 +976,10 @@ pub(crate) unsafe extern "C" fn variadic_on_enter(
         );
         return;
     }
-    let active = INSIDE_HOOK.with(|inside| !inside.replace(true));
-    if !active {
+    let Some(guard) = HookGuard::enter() else {
         return;
-    }
+    };
+    (*state).guard = Box::into_raw(Box::new(guard));
     (*state).active = 1;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let kind = data as usize;
@@ -948,7 +1000,10 @@ pub(crate) unsafe extern "C" fn variadic_on_enter(
     }));
     if result.is_err() {
         (*state).active = 0;
-        INSIDE_HOOK.with(|inside| inside.set(false));
+        drop(Box::from_raw(std::mem::replace(
+            &mut (*state).guard,
+            std::ptr::null_mut(),
+        )));
     }
 }
 
@@ -976,7 +1031,11 @@ pub(crate) unsafe extern "C" fn variadic_on_leave(
             );
         }
     }));
-    INSIDE_HOOK.with(|inside| inside.set(false));
+    (*state).active = 0;
+    drop(Box::from_raw(std::mem::replace(
+        &mut (*state).guard,
+        std::ptr::null_mut(),
+    )));
 }
 
 unsafe fn inspect_open(
@@ -1196,9 +1255,16 @@ pub unsafe extern "C" fn renameat2(
     }
     original(od, old, nd, new, flags)
 }
+fn housekeeping_allowed() -> bool {
+    !super::super::fork::awaiting_rebuild()
+        && !crate::engine_call::host_background()
+        && INSIDE_HOOK.with(|inside| !inside.get())
+}
 pub unsafe extern "C" fn close(fd: c_int) -> c_int {
     hook_hit(6);
-    let _ = crate::hh_agent_close_socket(fd as u64);
+    if housekeeping_allowed() {
+        let _ = crate::hh_agent_close_socket(fd as u64);
+    }
     let f: unsafe extern "C" fn(c_int) -> c_int = symbol(c"close");
     f(fd)
 }
@@ -1207,7 +1273,7 @@ pub unsafe extern "C" fn dup(fd: c_int) -> c_int {
     hook_hit(26);
     let f: unsafe extern "C" fn(c_int) -> c_int = symbol(c"dup");
     let result = f(fd);
-    if result >= 0 {
+    if result >= 0 && housekeeping_allowed() {
         let _ = crate::hh_agent_dup_socket(fd as u64, result as u64);
     }
     result
@@ -1217,7 +1283,7 @@ pub unsafe extern "C" fn dup2(fd: c_int, destination: c_int) -> c_int {
     hook_hit(27);
     let f: unsafe extern "C" fn(c_int, c_int) -> c_int = symbol(c"dup2");
     let result = f(fd, destination);
-    if result >= 0 {
+    if result >= 0 && housekeeping_allowed() {
         let _ = crate::hh_agent_dup_socket(fd as u64, result as u64);
     }
     result
@@ -1227,7 +1293,7 @@ pub unsafe extern "C" fn dup3(fd: c_int, destination: c_int, flags: c_int) -> c_
     hook_hit(28);
     let f: unsafe extern "C" fn(c_int, c_int, c_int) -> c_int = symbol(c"dup3");
     let result = f(fd, destination, flags);
-    if result >= 0 {
+    if result >= 0 && housekeeping_allowed() {
         let _ = crate::hh_agent_dup_socket(fd as u64, result as u64);
     }
     result
@@ -1246,6 +1312,9 @@ fn mapping_operations(prot: c_int) -> Vec<crate::FileSandboxOperation> {
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
     hook_hit(24);
     let f: unsafe extern "C" fn(*mut c_void, usize, c_int) -> c_int = symbol(c"mprotect");
+    if prot & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) == 0 {
+        return f(addr, len, prot);
+    }
     let Some(_guard) = HookGuard::enter() else {
         return f(addr, len, prot);
     };
@@ -1508,6 +1577,12 @@ pub unsafe extern "C" fn mmap(
 ) -> *mut c_void {
     hook_hit(23);
     let original = mmap_fn();
+    // Anonymous allocator mappings carry no file-policy work. In particular,
+    // do not register generation TLS destructors while a loader-created thread
+    // allocates its first heap under the dynamic loader's rendezvous lock.
+    if fd < 0 || flags & libc::MAP_ANONYMOUS != 0 {
+        return original(addr, len, prot, flags, fd, off);
+    }
     let Some(_guard) = HookGuard::enter() else {
         return original(addr, len, prot, flags, fd, off);
     };

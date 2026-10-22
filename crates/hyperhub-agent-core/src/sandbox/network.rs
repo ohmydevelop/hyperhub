@@ -18,7 +18,7 @@ pub(crate) enum FirewallAction {
     Deny,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct FirewallSnapshot {
     pub(crate) version: u64,
     pub(crate) default_action: Option<FirewallAction>,
@@ -27,7 +27,7 @@ pub(crate) struct FirewallSnapshot {
     pub(crate) rules: Vec<FirewallSnapshotRule>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct FirewallSnapshotRule {
     pub(crate) id: String,
     pub(crate) action: FirewallAction,
@@ -35,13 +35,13 @@ pub(crate) struct FirewallSnapshotRule {
     #[serde(default)]
     pub(crate) protection: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct FirewallEndpoint {
     pub(crate) target: FirewallRuleTarget,
     pub(crate) port: Option<u16>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub(crate) enum FirewallRuleTarget {
     Domain(FirewallDomainTarget),
@@ -49,7 +49,7 @@ pub(crate) enum FirewallRuleTarget {
     Network(ipnet::IpNet),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct FirewallDomainTarget {
     pub(crate) host: String,
     pub(crate) wildcard: bool,
@@ -157,56 +157,63 @@ pub(crate) fn firewall_decision(
     snapshot: &FirewallSnapshot,
     target: &FirewallConnectTarget,
 ) -> (FirewallAction, Option<String>, FirewallDecisionSource) {
-    if target.bypass {
-        return (FirewallAction::Pass, None, FirewallDecisionSource::Default);
+    let result = (|| {
+        let engine = crate::state().lock().ok()?.engine.clone();
+        let lease = crate::engine_call::calling(&engine).ok()?;
+        hyperhub_engine::firewall(
+            &lease,
+            &hyperhub_engine::contract::FirewallInput {
+                snapshot: serde_json::to_value(snapshot).ok()?,
+                hostname: target.hostname.clone(),
+                ip: target.ip,
+                port: target.port,
+                bypass: target.bypass,
+                dns: false,
+            },
+        )
+        .ok()
+    })();
+    match result {
+        Some(decision) => (
+            if decision.action == "pass" {
+                FirewallAction::Pass
+            } else {
+                FirewallAction::Deny
+            },
+            decision.rule_id,
+            if decision.source == "rule" {
+                FirewallDecisionSource::Rule
+            } else {
+                FirewallDecisionSource::Default
+            },
+        ),
+        None => (snapshot.error_action, None, FirewallDecisionSource::Error),
     }
-    for rule in &snapshot.rules {
-        if rule.endpoints.iter().any(|endpoint| {
-            endpoint.port.is_none_or(|port| port == target.port)
-                && match &endpoint.target {
-                    FirewallRuleTarget::Domain(domain) => {
-                        target.hostname.as_deref().is_some_and(|hostname| {
-                            domain_matches(
-                                hostname,
-                                &domain.host,
-                                domain.wildcard,
-                                domain.include_apex,
-                            )
-                        })
-                    }
-                    FirewallRuleTarget::Ip(ip) => target.hostname.is_none() && target.ip == *ip,
-                    FirewallRuleTarget::Network(network) => {
-                        target.hostname.is_none() && network.contains(&target.ip)
-                    }
-                }
-        }) {
-            return (
-                rule.action,
-                Some(rule.id.clone()),
-                FirewallDecisionSource::Rule,
-            );
-        }
-    }
-    (
-        snapshot.default_action.unwrap_or(FirewallAction::Pass),
-        None,
-        FirewallDecisionSource::Default,
+}
+
+#[cfg(all(windows, feature = "gum-agent"))]
+pub(crate) fn firewall_dns_decision(
+    snapshot: &FirewallSnapshot,
+    hostname: &str,
+) -> Result<hyperhub_engine::contract::PolicyDecision, i32> {
+    let engine = crate::state()
+        .lock()
+        .map_err(|_| HH_ERR_PROTOCOL)?
+        .engine
+        .clone();
+    let lease = crate::engine_call::calling(&engine)?;
+    hyperhub_engine::firewall(
+        &lease,
+        &hyperhub_engine::contract::FirewallInput {
+            snapshot: serde_json::to_value(snapshot).map_err(|_| HH_ERR_PROTOCOL)?,
+            hostname: Some(hostname.into()),
+            ip: std::net::Ipv4Addr::UNSPECIFIED.into(),
+            port: 0,
+            bypass: false,
+            dns: true,
+        },
     )
 }
-
-#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
-#[cfg_attr(all(windows, feature = "gum-agent"), allow(dead_code))]
-fn domain_matches(candidate: &str, configured: &str, wildcard: bool, include_apex: bool) -> bool {
-    let candidate = candidate.trim_end_matches('.').to_ascii_lowercase();
-    let configured = configured.trim_end_matches('.').to_ascii_lowercase();
-    if wildcard {
-        (include_apex && candidate == configured)
-            || (candidate != configured && candidate.ends_with(&format!(".{configured}")))
-    } else {
-        candidate == configured
-    }
-}
-
 #[cfg(all(windows, feature = "gum-agent"))]
 pub(crate) struct FirewallRefresh {
     pub(crate) version: u64,

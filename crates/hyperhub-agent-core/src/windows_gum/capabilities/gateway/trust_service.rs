@@ -185,7 +185,13 @@ pub(super) unsafe fn chain_uses_hyperhub_root(chain: *const CERT_CHAIN_CONTEXT) 
             (*certificate).pbCertEncoded,
             (*certificate).cbCertEncoded as usize,
         );
-        if certificate_der == root_der {
+        let matches = (|| {
+            let engine = crate::state().lock().ok()?.engine.clone();
+            let lease = crate::engine_call::calling(&engine).ok()?;
+            hyperhub_engine::trust_bundle(&lease, "!der", certificate_der, root_der).ok()
+        })()
+        .is_some_and(|result| result == [1]);
+        if matches {
             return true;
         }
     }

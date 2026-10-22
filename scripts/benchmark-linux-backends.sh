@@ -77,8 +77,8 @@ done
 
 [[ $iterations =~ ^[1-9][0-9]*$ ]] || { echo '--iterations must be a positive integer' >&2; exit 2; }
 case "$(uname -m)" in
-  x86_64) architecture=x86_64 ;;
-  aarch64|arm64) architecture=aarch64 ;;
+  x86_64) architecture=x86_64; frida_layout=linux-x64 ;;
+  aarch64|arm64) architecture=aarch64; frida_layout=linux-arm64 ;;
   *) echo "unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 [[ -n $fixture_dir ]] || fixture_dir="$root/target/benchmarks/linux-fixtures/$architecture"
@@ -96,6 +96,8 @@ if ((build_release)); then
   export BINDGEN_EXTRA_CLANG_ARGS="-I$HYPERHUB_FRIDA_CORE_ROOT -isystem $compiler_include ${BINDGEN_EXTRA_CLANG_ARGS:-}"
   cargo build --release --locked -p hyperhub-agent-core --features gum-agent
   export HYPERHUB_EMBEDDED_AGENT_PATH="$root/target/release/libhyperhub_gum_agent.so"
+  cargo build --release --locked -p hyperhub-engine
+  export HYPERHUB_EMBEDDED_ENGINE_PATH="$root/target/release/libhyperhub_engine.so"
   cargo build --release --locked -p hyperhub --no-default-features --features embedded-agent
 fi
 
@@ -113,6 +115,9 @@ trust_tls_pid=
 trust_ssh_pid=
 hot_update_pid=
 cleanup() {
+  for diagnostic_log in "$temporary"/*.stderr.log; do
+    [[ ! -f $diagnostic_log ]] || cp "$diagnostic_log" "$result_dir/" || true
+  done
   if [[ -f "$temporary/dynamic-embedded-runtime.stderr.log" ]]; then
     cp "$temporary/dynamic-embedded-runtime.stderr.log" "$result_dir/embedded-runtime.stderr.log" || true
   fi
@@ -291,14 +296,44 @@ record_check backend.thread_exit "late pthread destructor completes IO under ptr
   cd "$root"
   cargo run -p hyperhub-runtime --example runtime_loader_probe --locked \
     >"$result_dir/engine-loader.log" 2>&1
-  HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" \
+  HYPERHUB_FRIDA_GUM_ROOT="${HYPERHUB_FRIDA_GUM_ROOT:-$root/.deps/frida-gum/17.17.0/$frida_layout}" \
+    cargo test -p hyperhub-agent-core --features gum-agent --locked engine_tests::native_upgrade \
+    >"$result_dir/engine-fork-runtime.log" 2>&1
+  env -u HYPERHUB_TEST_ENGINE_GUM_AGENT -u HYPERHUB_TEST_ENGINE_EMBEDDED_AGENT \
+    HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" HYPERHUB_TEST_ENGINE_BACKEND=ptrace \
     cargo test -p hyperhub --test engine_host_live --locked -- --nocapture \
     >"$result_dir/engine-ptrace.log" 2>&1
-  HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" HYPERHUB_TEST_ENGINE_BACKEND=gum \
+  env -u HYPERHUB_TEST_ENGINE_GUM_AGENT \
+    HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" HYPERHUB_TEST_ENGINE_BACKEND=gum \
+    HYPERHUB_TEST_ENGINE_EMBEDDED_AGENT=1 \
     cargo test -p hyperhub --test engine_host_live --locked -- --nocapture \
     >"$result_dir/engine-gum.log" 2>&1
 )
 record_check backend.engine_upgrade "authenticated native Engine switch preserves target identity and existing TCP streams"
+record_check backend.engine_fork_runtime "native module cache lock and old leases survive fork and reclaim after rollback"
+(
+  cd "$root"
+  HH_FORWARD_WORKER_FIXTURE="$standalone_hyperhub" \
+    cargo test -p hyperhub-core --test forward_workers --locked -- --ignored --nocapture \
+    >"$result_dir/forward-workers.log" 2>&1
+  HH_FORWARD_WORKER_FIXTURE="$standalone_hyperhub" \
+    cargo test -p hyperhub-core --lib --locked durable_release_recovery_status_installation_and_missing_host_boundaries -- --ignored --nocapture \
+    >"$result_dir/release-recovery.log" 2>&1
+)
+record_check backend.forward_workers "real worker processes preserve resident identities and old streams across generation changes"
+(
+  cd "$root"
+  HH_FORWARD_WORKER_FIXTURE="$standalone_hyperhub" \
+    cargo test -p hyperhub --test release_live --locked -- --ignored --nocapture \
+    >"$result_dir/release-upgrade.log" 2>&1
+)
+record_check backend.release_upgrade "joint Engine and worker finalize preserves target streams before verified helper installation"
+(
+  cd "$root"
+  cargo run --release -p hyperhub-engine --example native_upgrade_bench --locked -- \
+    "$result_dir/native-engine-performance" >"$result_dir/native-engine-performance.log" 2>&1
+)
+record_check backend.engine_switch_budget "real native prepare and commit overlap four active decision threads and meet the 100ms soft switch budget"
 
 pass_audit=$(find "$HOME/.hyperhub/audit" -name security-alerts.jsonl -type f -print -quit)
 [[ -n $pass_audit ]] || { echo 'static coverage audit was not created' >&2; exit 1; }

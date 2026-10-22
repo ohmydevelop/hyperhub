@@ -26,6 +26,9 @@ def run(hyperhub, probe, output):
                            HYPERHUB_AGENT_INIT_LOG=str(output / "agent-init.log"))
         password = work / "admin-password"
         password.write_text("local-windows-regression-password\n")
+        denied_file = work / "fls-policy-secret"
+        denied_file.write_bytes(b"fls-secret-fixture\n")
+        denied_pattern = json.dumps(r"(?i)(?:^|[/\\])fls-policy-secret$")
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -55,10 +58,16 @@ default_action = "allow"
 error_action = "allow"
 rules = []
 [sandbox.file]
-enabled = false
+enabled = true
 default_action = "allow"
 error_action = "allow"
-rules = []
+[[sandbox.file.rules]]
+id = "fls-deny-read"
+enabled = true
+priority = 100
+action = "deny"
+operations = ["read"]
+patterns = [{{enabled = true, pattern = {denied_pattern}}}]
 [sandbox.process]
 enabled = false
 default_action = "allow"
@@ -91,11 +100,13 @@ rules = []
                         modes = [(mode, 0) for mode in (
                             "dns-event", "dns-poll", "dns-callback", "dns-cancel",
                             "dns-cancel-callback", "dns-cancel-poll",
-                            "connectex-empty", "connectex-data")]
+                            "connectex-empty", "connectex-data", "fls-teardown")]
                         modes.extend(("dns-cancel-concurrent", index) for index in range(8))
                         for managed in (False, True):
                             for mode, iteration in modes:
                                 command = [str(probe), mode, str(server.server_address[1])]
+                                if mode == "fls-teardown":
+                                    command.extend((str(denied_file), "deny" if managed else "allow"))
                                 if managed:
                                     command = [str(hyperhub), "run", "--", *command]
                                 try:
@@ -121,7 +132,12 @@ rules = []
                                     assert item["terminal_count"] == expected, item
                                     assert item["cancel_accepted_count"] > 0, (
                                         "Cancellation did not occur; coverage is unproven", item)
-                                marker = ("connectex=unsupported-initial-data" if managed and mode == "connectex-data"
+                                if mode == "fls-teardown":
+                                    assert result.stdout.count("fls_callback ") == 66, item
+                                    assert result.stdout.count("success=true") == 66, item
+                                    assert f"denied={str(managed).lower()}" in result.stdout, item
+                                marker = ("fls_teardown=ok callbacks=66 fiber_switches=6" if mode == "fls-teardown"
+                                          else "connectex=unsupported-initial-data" if managed and mode == "connectex-data"
                                           else "dns=terminal" if mode.startswith("dns-cancel")
                                           else "dns=ok" if mode.startswith("dns-") else "connectex=ok")
                                 assert marker in result.stdout, item
@@ -137,7 +153,7 @@ rules = []
                 assert len(dns) == 3, f"async DNS connections lost hostname attribution: {audit}"
                 assert len({entry["session_id"] for entry in dns}) == 3, "DNS modes did not each reach the gateway"
                 connections = [entry for entry in audit if entry.get("event") == "connect"]
-                assert len(connections) == 4, f"unexpected managed connection side effects: {connections}"
+                assert len(connections) == 70, f"unexpected managed connection side effects: {connections}"
             finally:
                 serve.terminate()
                 try:

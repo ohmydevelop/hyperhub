@@ -9,6 +9,7 @@ Push-Location $root
 $previousGumRoot = $env:HYPERHUB_FRIDA_GUM_ROOT
 $previousEngineCli = $env:HYPERHUB_TEST_ENGINE_HYPERHUB
 $previousEngineBackend = $env:HYPERHUB_TEST_ENGINE_BACKEND
+$previousWorkerFixture = $env:HH_FORWARD_WORKER_FIXTURE
 try {
   if (-not $env:HYPERHUB_FRIDA_GUM_ROOT) {
     $env:HYPERHUB_FRIDA_GUM_ROOT = Join-Path $root '.deps/frida-gum/17.17.0/windows-x64'
@@ -20,6 +21,15 @@ try {
   # Keep the already-built embedded release CLI intact while compiling the test.
   cargo test --locked -p hyperhub --test engine_host_live -- --ignored --nocapture
   if ($LASTEXITCODE -ne 0) { throw 'Windows native Host live upgrade failed.' }
+  $env:HH_FORWARD_WORKER_FIXTURE = $HyperHub
+  cargo test --locked -p hyperhub-core --test forward_workers -- --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw 'Windows forwarding worker upgrade failed.' }
+  cargo test --locked -p hyperhub-core --lib durable_release_recovery_status_installation_and_missing_host_boundaries -- --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw 'Windows release recovery state tests failed.' }
+  cargo test --locked -p hyperhub --test release_live -- --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw 'Windows joint release and installation upgrade failed.' }
+  cargo run --release --locked -p hyperhub-engine --example native_upgrade_bench -- (Join-Path $Output 'native-engine-performance')
+  if ($LASTEXITCODE -ne 0) { throw 'Windows native Engine switch benchmark failed.' }
   cargo build --locked --release -p hyperhub-agent-core --example windows_hook_probe
   if ($LASTEXITCODE -ne 0) { throw 'Windows regression fixture build failed.' }
   python (Join-Path $root 'tests/benchmarks/windows-hooks/run.py') `
@@ -31,5 +41,6 @@ finally {
   $env:HYPERHUB_FRIDA_GUM_ROOT = $previousGumRoot
   $env:HYPERHUB_TEST_ENGINE_HYPERHUB = $previousEngineCli
   $env:HYPERHUB_TEST_ENGINE_BACKEND = $previousEngineBackend
+  $env:HH_FORWARD_WORKER_FIXTURE = $previousWorkerFixture
   Pop-Location
 }

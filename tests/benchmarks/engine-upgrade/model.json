@@ -1,0 +1,545 @@
+{
+  "schema_version": "1.1",
+  "target": "HyperHub native Engine component",
+  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v7 worktree snapshot)",
+  "sources": [
+    {
+      "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+      "sha256": "64fae1816f2ca8bc080f997a8dfdaf76a3a20bd1c69694ec9dde78da6d414804"
+    },
+    {
+      "path": "tests/fixtures/network_upgrade_engine.rs",
+      "sha256": "b32eb29e3cfda1345b038fdd7fee77740771b2df996f5557fcdcc25311635573"
+    },
+    {
+      "path": "tests/fixtures/engine_fixture_build.rs",
+      "sha256": "312ae35ffb2db399024beeeb07f63f063a497bce3f220ea37a49ac7c296752e2"
+    },
+    {
+      "path": "crates/hyperhub-engine/src/lib.rs",
+      "sha256": "c195335972a56640fc4cd82c29f420bb749bfc20ea2a84c8518d9db2179ace36"
+    },
+    {
+      "path": "crates/hyperhub-engine/build.rs",
+      "sha256": "b33c3c6a66c6e890990855e494caa8b77db48d6867bf23da3bd3a80378655852"
+    },
+    {
+      "path": "build_support/native_base.rs",
+      "sha256": "34391c5e8857e2e4a4806f3d39aaf7440624cd75c2fb452871691035694d7460"
+    },
+    {
+      "path": "crates/hyperhub-engine/src/policy.rs",
+      "sha256": "294dc09e25c3565ce0f3f698f888f5340a0d13cfa37a82700ac9f5dff9652c7b"
+    },
+    {
+      "path": "crates/hyperhub-engine/src/operations.rs",
+      "sha256": "100514cc0c7c277ff0f1b9ff957828c367c529fe5a6dee049b1cd711cc139ca9"
+    },
+    {
+      "path": "crates/hyperhub-engine/src/contract.rs",
+      "sha256": "6cc99eb607f0307195079158782c7ea2f04001d8365c1c8694ff065bf4810724"
+    },
+    {
+      "path": "crates/hyperhub-runtime/src/native.rs",
+      "sha256": "5fcc307a162c1c9d6c06fdfbd2971c49e0c5f7b7e9e22094c5c0f2f585ad9238"
+    },
+    {
+      "path": "crates/hyperhub-runtime/src/generation.rs",
+      "sha256": "0c5237ca00c516d0570dd5639e7337faa5ec4cff38179baff7fb9a70f8897b8e"
+    },
+    {
+      "path": "crates/hyperhub-runtime/src/artifact.rs",
+      "sha256": "f33f68ccac6839730bb09745bd61c113a559d6518d170b8595f840696d594e13"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "b07289572b4637a0b02e161163cec09376a0a7fc76c431049f8d1ffb4a200922"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "ae520aa3ad69b534592df54e0f54c8c6e66ea54331b78b7f61f677db7b6f4404"
+    },
+    {
+      "path": "crates/hyperhub-engine/Cargo.toml",
+      "sha256": "6cd2f5e78f8c9e505498108a5216138f06f5a24a35ac34119a06cd223e0b2e63"
+    },
+    {
+      "path": "crates/hyperhub-runtime/Cargo.toml",
+      "sha256": "dc2aa4549c6c6fa82a9bcaa2a78ed19c82035371fc25378fcc7489a9d5912f96"
+    },
+    {
+      "path": "tests/benchmarks/engine-upgrade/record.py",
+      "sha256": "e90fb6032a41321a18a4fad7a821c4ec48c0be54732022402f82c2c4d76048cf"
+    }
+  ],
+  "review": {
+    "kind": "self",
+    "reviewer": "Codex remaining_engines",
+    "notes": "Reviewed all sixteen categories against this controlled healthy-path native component scope; excludes whole-product delivery, hostile inputs and crash recovery. Existing separate functional regressions are not substituted for timing evidence. Final release context: immutable CLI SHA256 419800bd707330167f7486f3d4d2c945e423a984c084568e4efe1a03f19f64a4, Agent SHA256 f09a19ce5da463322ba9f14cc546f7ed5bd1f5c0d094b474053a550a7ad7416a, native Base 219dac7345afe39fb7d7f6f60fd351ecf7f26346a093b7e7fdbb6531183e4b8f. This timing harness still measures the native Engine component, not CLI or Core RPC latency."
+  },
+  "obligations": [
+    {
+      "id": "O-oracle",
+      "kind": "correctness",
+      "property": "Native FILE/PROCESS decisions match the last rule and protection; candidate code changes a sentinel from pass to deny while pinned old code stays pass.",
+      "basis": {
+        "kind": "contract",
+        "reference": "Authorized native component performance acceptance; 100 ms commit soft budget; no throughput regression threshold specified."
+      },
+      "source_refs": [
+        {
+          "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "first": 1,
+          "last": 231
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "A bounded native component experiment; semantic output and actual logical work are prerequisites for useful timings.",
+      "fault_ids": [
+        "F01",
+        "F02",
+        "F04",
+        "F05",
+        "F06",
+        "F07",
+        "F08",
+        "F09",
+        "F13",
+        "F14",
+        "F16"
+      ],
+      "trigger_dimensions": [
+        "input",
+        "state",
+        "concurrency",
+        "time",
+        "version"
+      ],
+      "allowed_outcomes": [
+        "Native FILE/PROCESS decisions match the last rule and protection; candidate code changes a sentinel from pass to deny while pinned old code stays pass.",
+        "Any failed native operation, bad decision, worker panic, or missing timing invalidates the measurement."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Direct native benchmark semantics and controlled workload",
+          "version": "native-component-v1",
+          "locator": "crates/hyperhub-engine/examples/native_upgrade_bench.rs:1-209",
+          "verified_scope": "Valid native policy workload, old lease preservation, direct prepare/commit only",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ]
+    },
+    {
+      "id": "O-decisions",
+      "kind": "performance",
+      "property": "Measure successful three-call file/process/old-file units under matched baseline and upgrade loads.",
+      "basis": {
+        "kind": "contract",
+        "reference": "Authorized native component performance acceptance; 100 ms commit soft budget; no throughput regression threshold specified."
+      },
+      "source_refs": [
+        {
+          "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "first": 1,
+          "last": 231
+        }
+      ],
+      "risk": "normal",
+      "applicability": "required",
+      "rationale": "A bounded native component experiment; semantic output and actual logical work are prerequisites for useful timings.",
+      "fault_ids": [
+        "F05",
+        "F07",
+        "F08",
+        "F13",
+        "F16"
+      ],
+      "trigger_dimensions": [
+        "input",
+        "state",
+        "concurrency",
+        "time",
+        "version"
+      ],
+      "allowed_outcomes": [
+        "Measure successful three-call file/process/old-file units under matched baseline and upgrade loads.",
+        "Any failed native operation, bad decision, worker panic, or missing timing invalidates the measurement."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Direct native benchmark semantics and controlled workload",
+          "version": "native-component-v1",
+          "locator": "crates/hyperhub-engine/examples/native_upgrade_bench.rs:1-209",
+          "verified_scope": "Valid native policy workload, old lease preservation, direct prepare/commit only",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ]
+    },
+    {
+      "id": "O-switch",
+      "kind": "performance",
+      "property": "Measure real native preparation separately from direct commit under concurrent decisions, retaining old leases; compare commit with the 100 ms soft budget.",
+      "basis": {
+        "kind": "contract",
+        "reference": "Authorized native component performance acceptance; 100 ms commit soft budget; no throughput regression threshold specified."
+      },
+      "source_refs": [
+        {
+          "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "first": 1,
+          "last": 231
+        }
+      ],
+      "risk": "normal",
+      "applicability": "required",
+      "rationale": "A bounded native component experiment; semantic output and actual logical work are prerequisites for useful timings.",
+      "fault_ids": [
+        "F05",
+        "F06",
+        "F07",
+        "F16"
+      ],
+      "trigger_dimensions": [
+        "input",
+        "state",
+        "concurrency",
+        "time",
+        "version"
+      ],
+      "allowed_outcomes": [
+        "Measure real native preparation separately from direct commit under concurrent decisions, retaining old leases; compare commit with the 100 ms soft budget.",
+        "Any failed native operation, bad decision, worker panic, or missing timing invalidates the measurement."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Direct native benchmark semantics and controlled workload",
+          "version": "native-component-v1",
+          "locator": "crates/hyperhub-engine/examples/native_upgrade_bench.rs:1-209",
+          "verified_scope": "Valid native policy workload, old lease preservation, direct prepare/commit only",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ]
+    }
+  ],
+  "factors": [
+    {
+      "id": "mode",
+      "values": [
+        "baseline",
+        "upgrade"
+      ]
+    }
+  ],
+  "constraints": [],
+  "interactions": [
+    {
+      "id": "I-mode",
+      "factors": [
+        "mode"
+      ],
+      "strength": 1,
+      "rationale": "Both matched modes use the same initial native version and workload.",
+      "obligation_ids": [
+        "O-decisions"
+      ]
+    }
+  ],
+  "assurance": {
+    "scope": {
+      "requested_level": "component",
+      "delivered_level": "component",
+      "goal": "Native prepare/commit latency and concurrent useful decision cost with old leases",
+      "rationale": "This report covers the native Engine component only; worker and product release acceptance remain separate."
+    },
+    "workloads": [
+      {
+        "id": "W-decisions",
+        "goal": "Four workers execute current file/current process/pinned old-file decisions with a 32-rule snapshot",
+        "role": "primary",
+        "applicability": "required",
+        "rationale": "Deterministic worst ordered-rule position, synthetic paths and no external service dependency",
+        "obligation_ids": [
+          "O-oracle",
+          "O-decisions"
+        ],
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ]
+      },
+      {
+        "id": "W-switch",
+        "goal": "One actual native prepare and commit while the four workers remain active",
+        "role": "primary",
+        "applicability": "required",
+        "rationale": "Direct management boundary excludes fixture compilation and all control polling",
+        "obligation_ids": [
+          "O-oracle",
+          "O-switch"
+        ],
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ]
+      }
+    ]
+  },
+  "quality_review": {
+    "catalog_version": "1.0",
+    "catalog_digest": "6213ed21d151dabcd89b020d2e38a9388f7de8c832099fe78446c563dc3b1f4f",
+    "categories": [
+      {
+        "id": "F01",
+        "applicability": "required",
+        "rationale": "Native policy output and real post-commit sentinel semantics are checked against fixed explicit expectations.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle"
+        ]
+      },
+      {
+        "id": "F02",
+        "applicability": "required",
+        "rationale": "The controlled workload matches the last of 32 ordered rules; release and retained generations are independently checked.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle"
+        ]
+      },
+      {
+        "id": "F03",
+        "applicability": "not_applicable",
+        "rationale": "This performance model accepts bounded valid JSON and manifests only. Invalid-input capability regressions run separately and no hostile-input performance claim is made.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": []
+      },
+      {
+        "id": "F04",
+        "applicability": "required",
+        "rationale": "Current and pinned old generation identities must differ after commit, while old semantics remain callable.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle"
+        ]
+      },
+      {
+        "id": "F05",
+        "applicability": "required",
+        "rationale": "Four active decision workers overlap actual native preparation and commit; no worker may fail or lose completed work.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle",
+          "O-decisions",
+          "O-switch"
+        ]
+      },
+      {
+        "id": "F06",
+        "applicability": "required",
+        "rationale": "Prepare and commit clocks are distinct from construction and RPC polling; the requested 100 ms soft commit budget is checked without a hard cancellation claim.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle",
+          "O-switch"
+        ]
+      },
+      {
+        "id": "F07",
+        "applicability": "required",
+        "rationale": "Each worker retains an old lease for the entire trial; real native old code remains callable across replacement.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle",
+          "O-decisions",
+          "O-switch"
+        ]
+      },
+      {
+        "id": "F08",
+        "applicability": "required",
+        "rationale": "Successful decision throughput and sampled unit latency are measured under the fixed four-thread/32-rule load.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle",
+          "O-decisions"
+        ]
+      },
+      {
+        "id": "F09",
+        "applicability": "required",
+        "rationale": "Any native error, bad result or worker panic invalidates the run. Failure recovery is outside this healthy-path performance model.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle"
+        ]
+      },
+      {
+        "id": "F10",
+        "applicability": "not_applicable",
+        "rationale": "The direct management component experiment performs no retries or fallback; control retry reliability is tested in the separate product Suite.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": []
+      },
+      {
+        "id": "F11",
+        "applicability": "not_applicable",
+        "rationale": "Preparation includes real immutable artifact installation and fsync, but no power-loss or process-interruption recovery claim is made by this timing experiment.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": []
+      },
+      {
+        "id": "F12",
+        "applicability": "not_applicable",
+        "rationale": "No coordinator RPC, participant fanout or subscription polling occurs inside the measured component boundary; those product boundaries require their separate tests.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": []
+      },
+      {
+        "id": "F13",
+        "applicability": "required",
+        "rationale": "Every measured decision calls the native C ABI through NativeEngine and verifies decoded result fields.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle",
+          "O-decisions"
+        ]
+      },
+      {
+        "id": "F14",
+        "applicability": "required",
+        "rationale": "Both modes use the same valid 32-rule snapshot, four threads and retained baseline version; only actual upgrade differs.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle"
+        ]
+      },
+      {
+        "id": "F15",
+        "applicability": "not_applicable",
+        "rationale": "Locally compiled trusted DSOs and deterministic fake paths contain no external credentials. Release authentication and hostile module security are separate acceptance gates.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": []
+      },
+      {
+        "id": "F16",
+        "applicability": "required",
+        "rationale": "Raw completed work, elapsed time, sampled unit latencies and distinct preparation/commit durations are preserved; no failed work is counted as success.",
+        "source_refs": [
+          {
+            "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+            "first": 1,
+            "last": 231
+          }
+        ],
+        "obligation_ids": [
+          "O-oracle",
+          "O-decisions",
+          "O-switch"
+        ]
+      }
+    ]
+  }
+}

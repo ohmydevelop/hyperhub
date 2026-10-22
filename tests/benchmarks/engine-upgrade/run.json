@@ -1,0 +1,292 @@
+{
+  "schema_version": "1.1",
+  "target": "HyperHub native Engine component",
+  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v7 worktree snapshot)",
+  "model_digest": "f408c8d3cff99a1b177285b51a2647a1df16ee71364f053b33a91d0d93dd7166",
+  "plan_digest": "db70268e46a5bc5df081911e9e8e8a48c84ddade9a57f8b51c9705f9f96d2ddc",
+  "environment": {
+    "description": "Actual optimized native component run; fixed four-worker/32-rule workload, shared local runner.",
+    "evidence": [
+      {
+        "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/environment.json",
+        "sha256": "ec2e4be03b8a5e994fa3abb0812317e1c89041783b0c0bdef4aa792d196a6a5b"
+      }
+    ]
+  },
+  "records": [
+    {
+      "case_id": "C-native",
+      "status": "completed",
+      "correctness": "passed",
+      "measurement": "not_applicable",
+      "acceptance": "not_evaluated",
+      "parameters": {},
+      "samples": {},
+      "evidence": [
+        {
+          "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
+          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+        }
+      ],
+      "checks": [],
+      "details": "Actual release native DSOs and five paired trials; component evidence, without product-wide or cross-platform performance claims.",
+      "verifications": [
+        {
+          "id": "V-native",
+          "trigger": "observed",
+          "status": "passed",
+          "evidence_paths": [
+            "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json"
+          ],
+          "details": "Compiled native baseline/candidate code and pinned old leases passed the fixed source semantic assertions."
+        }
+      ]
+    },
+    {
+      "case_id": "P-decisions-baseline",
+      "status": "completed",
+      "correctness": "passed",
+      "measurement": "valid",
+      "acceptance": "not_evaluated",
+      "parameters": {
+        "mode": "baseline"
+      },
+      "samples": {
+        "units_per_second": [
+          18144.721423724444,
+          20567.28310630514,
+          18567.460386742823,
+          12094.071454845052,
+          15513.147374695473
+        ],
+        "unit_latency_ns_p50": [
+          169343,
+          166848,
+          166047,
+          166403,
+          165938
+        ],
+        "unit_latency_ns_p99": [
+          938472,
+          226111,
+          184138,
+          181484,
+          1197957
+        ]
+      },
+      "evidence": [
+        {
+          "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
+          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+        }
+      ],
+      "checks": [
+        {
+          "id": "V-work",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-clock",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-samples",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-overlap",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        }
+      ],
+      "details": "Actual release native DSOs and five paired trials; component evidence, without product-wide or cross-platform performance claims.",
+      "verifications": [
+        {
+          "id": "V-decisions-baseline",
+          "trigger": "observed",
+          "status": "passed",
+          "evidence_paths": [
+            "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json"
+          ],
+          "details": "Compiled native baseline/candidate code and pinned old leases passed the fixed source semantic assertions."
+        }
+      ],
+      "measurement_context_digest": "3971a8c229c8bbf14be9ab5efc096aeb2672b4919a565a5fbe5c896b1cc28061",
+      "accounting": {
+        "work_unit_id": "decision_unit",
+        "offered": 21648,
+        "accepted": 21648,
+        "succeeded": 21648,
+        "failed": 0,
+        "rejected": 0,
+        "cancelled": 0,
+        "unfinished": 0,
+        "retries": 0
+      }
+    },
+    {
+      "case_id": "P-decisions-upgrade",
+      "status": "completed",
+      "correctness": "passed",
+      "measurement": "valid",
+      "acceptance": "not_evaluated",
+      "parameters": {
+        "mode": "upgrade"
+      },
+      "samples": {
+        "units_per_second": [
+          14344.214381448199,
+          20905.80462736558,
+          12896.634388933733,
+          15724.585405056663,
+          22448.72245805892
+        ],
+        "unit_latency_ns_p50": [
+          173026,
+          169972,
+          172128,
+          170165,
+          171627
+        ],
+        "unit_latency_ns_p99": [
+          3019729,
+          223100,
+          2188026,
+          225283,
+          424166
+        ]
+      },
+      "evidence": [
+        {
+          "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
+          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+        }
+      ],
+      "checks": [
+        {
+          "id": "V-work",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-clock",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-samples",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-overlap",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        }
+      ],
+      "details": "Actual release native DSOs and five paired trials; component evidence, without product-wide or cross-platform performance claims.",
+      "verifications": [
+        {
+          "id": "V-decisions-upgrade",
+          "trigger": "observed",
+          "status": "passed",
+          "evidence_paths": [
+            "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json"
+          ],
+          "details": "Compiled native baseline/candidate code and pinned old leases passed the fixed source semantic assertions."
+        }
+      ],
+      "measurement_context_digest": "bddaa85267a694c2a041846e4055cb02a42aa7d1b3b674b7bcc5bba52d5c6d6a",
+      "accounting": {
+        "work_unit_id": "decision_unit",
+        "offered": 21808,
+        "accepted": 21808,
+        "succeeded": 21808,
+        "failed": 0,
+        "rejected": 0,
+        "cancelled": 0,
+        "unfinished": 0,
+        "retries": 0
+      }
+    },
+    {
+      "case_id": "P-switch",
+      "status": "completed",
+      "correctness": "passed",
+      "measurement": "valid",
+      "acceptance": "passed",
+      "parameters": {},
+      "samples": {
+        "prepare_ns": [
+          67752261,
+          61057987,
+          76268923,
+          68985266,
+          58191492
+        ],
+        "commit_ns": [
+          1296,
+          988,
+          1073,
+          1019,
+          1139
+        ]
+      },
+      "evidence": [
+        {
+          "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
+          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+        }
+      ],
+      "checks": [
+        {
+          "id": "V-native",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-overlap",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-clock",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        },
+        {
+          "id": "V-samples",
+          "status": "passed",
+          "details": "Native source assertions and recorded counts, clocks and worker-overlap observations passed."
+        }
+      ],
+      "details": "Actual release native DSOs and five paired trials; component evidence, without product-wide or cross-platform performance claims.",
+      "verifications": [
+        {
+          "id": "V-switch",
+          "trigger": "observed",
+          "status": "passed",
+          "evidence_paths": [
+            "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json"
+          ],
+          "details": "Compiled native baseline/candidate code and pinned old leases passed the fixed source semantic assertions."
+        }
+      ],
+      "measurement_context_digest": "096ff3299ed09378b9fb9acffbda2e16fd0a65474e65be5cfa1500ce1637f969",
+      "accounting": {
+        "work_unit_id": "native_upgrade",
+        "offered": 5,
+        "accepted": 5,
+        "succeeded": 5,
+        "failed": 0,
+        "rejected": 0,
+        "cancelled": 0,
+        "unfinished": 0,
+        "retries": 0
+      }
+    }
+  ]
+}

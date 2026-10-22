@@ -159,39 +159,23 @@ impl FirewallPlugin {
         let Some(snapshot) = snapshot.as_deref() else {
             return FirewallDecision::Pass;
         };
-        let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
-        if hostname.is_empty() {
-            return self.error_decision(snapshot.error_action);
+        match crate::firewall_dns_decision(snapshot, hostname) {
+            Ok(decision) => action_decision(
+                if decision.action == "pass" {
+                    crate::FirewallAction::Pass
+                } else {
+                    crate::FirewallAction::Deny
+                },
+                decision.rule_id,
+                if decision.source == "rule" {
+                    crate::FirewallDecisionSource::Rule
+                } else {
+                    crate::FirewallDecisionSource::Default
+                },
+            ),
+            Err(_) => self.error_decision(snapshot.error_action),
         }
-
-        for rule in &snapshot.rules {
-            let domain_match = rule.endpoints.iter().any(|endpoint| {
-                    matches!(&endpoint.target, crate::FirewallRuleTarget::Domain(domain) if domain_matches(&hostname, &domain.host, domain.wildcard, domain.include_apex))
-                });
-            let needs_connect = rule.endpoints.iter().any(|endpoint| {
-                endpoint.port.is_some()
-                    || matches!(
-                        endpoint.target,
-                        crate::FirewallRuleTarget::Ip(_) | crate::FirewallRuleTarget::Network(_)
-                    )
-            });
-            if !domain_match && !needs_connect {
-                continue;
-            }
-            if needs_connect {
-                // The DNS adapter does not know the destination port or the real address behind a
-                // fake IP. Defer to socket.connect so an earlier rule cannot be bypassed.
-                return FirewallDecision::Pass;
-            }
-            return action_decision(
-                rule.action,
-                Some(rule.id.clone()),
-                crate::FirewallDecisionSource::Rule,
-            );
-        }
-        default_decision(snapshot, crate::FirewallDecisionSource::Default)
     }
-
     fn evaluate_connect(&self, target: Option<&crate::FirewallConnectTarget>) -> FirewallDecision {
         let snapshot = self.snapshot.load_full();
         let Some(snapshot) = snapshot.as_deref() else {
@@ -200,43 +184,12 @@ impl FirewallPlugin {
         let Some(target) = target else {
             return self.error_decision(snapshot.error_action);
         };
-        if target.bypass {
-            return FirewallDecision::Pass;
+        let (action, rule_id, source) = crate::firewall_decision(snapshot, target);
+        if source == crate::FirewallDecisionSource::Error {
+            self.error_decision(action)
+        } else {
+            action_decision(action, rule_id, source)
         }
-
-        for rule in &snapshot.rules {
-            if !rule.endpoints.iter().any(|endpoint| {
-                endpoint.port.is_none_or(|port| port == target.port)
-                    && match &endpoint.target {
-                        crate::FirewallRuleTarget::Domain(domain) => {
-                            target.hostname.as_deref().is_some_and(|hostname| {
-                                domain_matches(
-                                    hostname,
-                                    &domain.host,
-                                    domain.wildcard,
-                                    domain.include_apex,
-                                )
-                            })
-                        }
-                        // A fake-IP connection retains its hostname but not the upstream address.
-                        // IP/CIDR selectors therefore apply only to direct IP connections.
-                        crate::FirewallRuleTarget::Ip(ip) => {
-                            target.hostname.is_none() && target.ip == *ip
-                        }
-                        crate::FirewallRuleTarget::Network(network) => {
-                            target.hostname.is_none() && network.contains(&target.ip)
-                        }
-                    }
-            }) {
-                continue;
-            }
-            return action_decision(
-                rule.action,
-                Some(rule.id.clone()),
-                crate::FirewallDecisionSource::Rule,
-            );
-        }
-        default_decision(snapshot, crate::FirewallDecisionSource::Default)
     }
 
     fn report_decision(
@@ -373,29 +326,6 @@ fn action_decision(
     match action {
         crate::FirewallAction::Pass => FirewallDecision::Pass,
         crate::FirewallAction::Deny => FirewallDecision::Deny { rule_id, source },
-    }
-}
-
-fn default_decision(
-    snapshot: &crate::FirewallSnapshot,
-    source: crate::FirewallDecisionSource,
-) -> FirewallDecision {
-    action_decision(
-        snapshot
-            .default_action
-            .unwrap_or(crate::FirewallAction::Pass),
-        None,
-        source,
-    )
-}
-
-fn domain_matches(candidate: &str, configured: &str, wildcard: bool, include_apex: bool) -> bool {
-    let candidate = candidate.trim_end_matches('.').to_ascii_lowercase();
-    if wildcard {
-        (include_apex && candidate == configured)
-            || (candidate != configured && candidate.ends_with(&format!(".{configured}")))
-    } else {
-        candidate == configured
     }
 }
 

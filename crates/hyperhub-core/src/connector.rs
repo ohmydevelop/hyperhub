@@ -12,7 +12,7 @@ use tokio::time::timeout;
 
 const ENV_PROXY_TIMEOUT_MS: u64 = 10_000;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct EnvironmentProxy {
     https: Option<EnvironmentUpstream>,
     http: Option<EnvironmentUpstream>,
@@ -20,14 +20,14 @@ pub struct EnvironmentProxy {
     no_proxy: Vec<NoProxyRule>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct EnvironmentUpstream {
     upstream: Upstream,
     host: String,
     port: u16,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 enum NoProxyRule {
     Any,
     Host { value: String, port: Option<u16> },

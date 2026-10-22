@@ -2,7 +2,16 @@ use crate::contract::*;
 use std::net::IpAddr;
 
 pub(crate) fn execute(operation: u32, input: &[u8]) -> Result<Vec<u8>, i32> {
-    if input.len() > MAX_REQUEST {
+    if operation == TRUST_BUNDLE {
+        return crate::trust::execute(input);
+    }
+    if input.len()
+        > if operation <= VALIDATE_REPLY {
+            MAX_REQUEST
+        } else {
+            MAX_POLICY_REQUEST
+        }
+    {
         return Err(INVALID);
     }
     match operation {
@@ -98,6 +107,31 @@ pub(crate) fn execute(operation: u32, input: &[u8]) -> Result<Vec<u8>, i32> {
             } else {
                 Err(PROTOCOL)
             }
+        }
+        FILE_POLICY | PROCESS_POLICY => crate::policy::execute(operation, input),
+        FIREWALL_POLICY => crate::policy::firewall(input),
+        CHILD_PLAN => {
+            let value: ChildInput = serde_json::from_slice(input).map_err(|_| INVALID)?;
+            serde_json::to_vec(&ChildPlan {
+                inject: value.hook,
+                creation_flags: if value.hook {
+                    value.creation_flags | value.suspended_flag | value.unicode_environment_flag
+                } else {
+                    value.creation_flags
+                },
+                resume_after_ready: value.hook && !value.caller_suspended,
+            })
+            .map_err(|_| INVALID)
+        }
+        SANITIZE_ACTION => crate::sanitizer::execute(input),
+        MODULE_RETAIN if input.is_empty() => Ok(crate::policy::retain()?.to_le_bytes().to_vec()),
+        MODULE_RELEASE if input.len() == 8 => {
+            crate::policy::release(u64::from_le_bytes(input.try_into().map_err(|_| INVALID)?))?;
+            Ok(Vec::new())
+        }
+        FORK_RESET if input.is_empty() => {
+            crate::policy::reset_after_fork();
+            Ok(Vec::new())
         }
         _ => Err(hyperhub_runtime::abi::UNSUPPORTED),
     }

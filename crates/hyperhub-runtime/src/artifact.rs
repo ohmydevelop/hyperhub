@@ -149,6 +149,26 @@ impl Artifact {
         })
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn duplicate_after_fork(&self) -> Result<Self, Error> {
+        Ok(Self {
+            manifest: self.manifest.clone(),
+            path: self.path.clone(),
+            file: self
+                .file
+                .try_clone()
+                .map_err(|e| Error::Artifact(e.to_string()))?,
+        })
+    }
+    /// The old object is deliberately leaked after this child-only ownership
+    /// transfer, so its File destructor can never close a reused descriptor.
+    #[cfg(target_os = "linux")]
+    pub(crate) unsafe fn release_after_fork(&self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::close(self.file.as_raw_fd());
+        }
+    }
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }

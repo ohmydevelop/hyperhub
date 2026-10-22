@@ -1,3 +1,4 @@
+use rand::TryRng;
 use std::env;
 use std::net::SocketAddr;
 use std::ptr::null_mut;
@@ -31,7 +32,7 @@ pub(crate) fn state() -> &'static Mutex<AgentRuntime> {
     unsafe { &*pointer }
 }
 
-#[cfg(all(windows, feature = "gum-agent"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn replace_state_after_fork(runtime: AgentRuntime) {
     let _ = state();
     crate::engine_call::reset_after_fork();
@@ -152,12 +153,21 @@ impl AgentRuntime {
             })
             .transpose()?;
 
+        // Read directly from the OS before Hook installation, without a
+        // destructible ThreadRng TLS slot or an infallible RNG panic path.
+        let connection_id_seed = rand::rngs::SysRng
+            .try_next_u64()
+            .map_err(|_| HH_ERR_PROTOCOL)?;
         self.session.initialized = true;
         self.session.session_id = session_id;
         self.session.token = token;
         self.gateway.proxy = Some(proxy);
         self.session.control_endpoint = control_endpoint;
-        self.gateway.next_connection_id = 1;
+        // Initialization runs before Hook installation. A new exec image must
+        // not reuse claims belonging to inherited, still-open TCP streams.
+        // Leave at least half the u64 space available for monotonic allocation;
+        // no RNG or new thread-local state is needed on the Hook path.
+        self.gateway.next_connection_id = 1 + (connection_id_seed & (u64::MAX >> 1));
         self.gateway.dns.clear();
         self.gateway.sockets.clear();
         self.gateway.nonblocking_sockets.clear();
@@ -174,10 +184,6 @@ impl AgentRuntime {
             self.sandbox
                 .version
                 .store(version, std::sync::atomic::Ordering::Release);
-        }
-        #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
-        if _subscribe {
-            crate::subscribe_sandbox();
         }
         Ok(())
     }
@@ -222,7 +228,14 @@ impl AgentRuntime {
         }
         let target = decision.target;
         let connection_id = self.gateway.next_connection_id;
-        self.gateway.next_connection_id = self.gateway.next_connection_id.saturating_add(1);
+        if connection_id == 0 {
+            return Err(HH_ERR_PROTOCOL);
+        }
+        self.gateway.next_connection_id = self
+            .gateway
+            .next_connection_id
+            .checked_add(1)
+            .ok_or(HH_ERR_PROTOCOL)?;
         self.gateway.sockets.insert(
             socket,
             SocketState {

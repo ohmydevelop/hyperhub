@@ -5,10 +5,10 @@
 
 use crate::audit::AuditWriter;
 use crate::config::Config;
+use crate::forward::authority::NameService;
 use crate::http::TlsMitm;
 use crate::policy::{ConnectionContext, PolicySnapshot, RouteDecision};
 use crate::protection::ProtectionSnapshot;
-use crate::session::SessionRegistry;
 use std::io;
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ pub(crate) struct HandlerContext {
     pub audit: AuditWriter,
     pub context: ConnectionContext,
     pub decision: RouteDecision,
-    pub sessions: SessionRegistry,
+    pub sessions: NameService,
     pub trust: Option<Arc<crate::trust::TrustStore>>,
     /// true 时 upstream 已是到真实目标的隧道，HTTP 层应把 absolute-form 转 origin-form。
     pub upstream_tunneled: bool,

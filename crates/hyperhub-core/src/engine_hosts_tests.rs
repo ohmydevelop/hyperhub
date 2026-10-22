@@ -5,11 +5,13 @@ fn register(registry: &EngineHosts) -> Registration {
     registry
         .register(
             "test".into(),
+            String::new(),
             Backend::LinuxPtrace,
             1,
             2,
             3,
             Some(4),
+            Some(5),
             host::report(&hyperhub_engine::resident()).unwrap(),
         )
         .unwrap()
@@ -86,17 +88,24 @@ fn acknowledgement_is_not_inferred_from_delivery_and_lost_results_are_unknown() 
 fn queue_and_registration_limits_reject_without_consuming_new_ids() {
     let registry = EngineHosts::default();
     let mut host = register(&registry);
-    assert!(registry
-        .register(
-            "test".into(),
-            Backend::LinuxPtrace,
-            1,
-            2,
-            3,
-            Some(4),
-            host::report(&hyperhub_engine::resident()).unwrap()
-        )
-        .is_err());
+    assert_eq!(
+        registry
+            .register(
+                "test".into(),
+                String::new(),
+                Backend::LinuxPtrace,
+                1,
+                2,
+                3,
+                Some(4),
+                Some(5),
+                host::report(&hyperhub_engine::resident()).unwrap()
+            )
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
     for n in 0..16 {
         registry
             .dispatch(request(&host, &format!("q-{n}")))

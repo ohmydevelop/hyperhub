@@ -64,6 +64,20 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_connection_identity_does_not_reuse_claim_or_insert_socket() {
+        for next in [0, u64::MAX] {
+            let mut core = configured_core();
+            core.gateway.next_connection_id = next;
+            assert!(matches!(
+                core.prepare_connect(42, 2, &[203, 0, 113, 9], 443),
+                Err(HH_ERR_PROTOCOL)
+            ));
+            assert_eq!(core.gateway.next_connection_id, next);
+            assert!(core.gateway.sockets.is_empty());
+        }
+    }
+
+    #[test]
     fn accepts_resolved_name_control_response() {
         let response: AgentControlResponse = serde_json::from_str(
             r#"{"type":"resolved_name","address":"198.18.0.1","ttl_secs":60}"#,
@@ -193,7 +207,7 @@ mod tests {
         let mut core = configured_core();
         let replacement = core
             .trust
-            .redirect_ca_bundle(&source.to_string_lossy())
+            .redirect_ca_bundle(&source.to_string_lossy(), &core.engine.acquire())
             .unwrap();
         let merged = std::fs::read(&replacement).unwrap();
         assert!(merged
@@ -286,3 +300,9 @@ mod tests {
 
 #[cfg(test)]
 mod engine_tests;
+
+/// CLI packaging verifies the exact resident Hook Base before injection.
+#[used]
+#[no_mangle]
+pub static HH_AGENT_NATIVE_BASE_FINGERPRINT_V1: [u8; hyperhub_engine::NATIVE_BASE_MARKER.len()] =
+    hyperhub_engine::NATIVE_BASE_MARKER;

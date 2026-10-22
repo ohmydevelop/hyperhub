@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "hyperhub"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "base64",
  "crossterm",
@@ -1320,6 +1320,8 @@ dependencies = [
  "hyperhub-runtime",
  "ipnet",
  "libc",
+ "proc-macro2",
+ "quote",
  "rand",
  "ratatui",
  "rcgen",
@@ -1329,6 +1331,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syn 2.0.119",
  "tar",
  "tokio",
  "windows-sys 0.61.2",
@@ -1338,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "hyperhub-agent-core"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "base64",
  "hyperhub-engine",
@@ -1355,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "hyperhub-core"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "argon2 0.5.3",
  "base64",
@@ -1394,19 +1397,25 @@ dependencies = [
 
 [[package]]
 name = "hyperhub-engine"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "hmac 0.12.1",
  "hyperhub-runtime",
+ "ipnet",
+ "libloading",
+ "proc-macro2",
+ "quote",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syn 2.0.119",
 ]
 
 [[package]]
 name = "hyperhub-runtime"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "libc",
  "libloading",

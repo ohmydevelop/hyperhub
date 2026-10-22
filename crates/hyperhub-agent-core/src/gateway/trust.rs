@@ -204,18 +204,6 @@ fn is_ca_bundle_data(data: &[u8]) -> bool {
             .any(|window| window == b"PRIVATE KEY-----")
 }
 
-pub(crate) fn is_ca_bundle_candidate(path: &Path, data: &[u8]) -> bool {
-    if !is_ca_bundle_data(data) {
-        return false;
-    }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(extension.as_str(), "pem" | "crt" | "cer")
-}
-
 pub(crate) fn set_private_file(_path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -265,7 +253,7 @@ pub(crate) fn normalize_path(value: &str) -> String {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct TrustState {
     pub(crate) tls_ca_pem: Vec<u8>,
     pub(crate) tls_ca_der: Vec<u8>,
@@ -274,42 +262,42 @@ pub(crate) struct TrustState {
 }
 
 impl TrustState {
-    pub(crate) fn redirect_ca_bundle(&mut self, input: &str) -> Option<String> {
+    pub(crate) fn redirect_ca_bundle(
+        &mut self,
+        input: &str,
+        engine: &hyperhub_runtime::Lease,
+    ) -> Option<String> {
         let input = normalize_path(input);
-        if let Some(replacement) = self.bundle_mappings.get(&input) {
+        let cache_key = format!("{}:{input}", engine.generation());
+        if let Some(replacement) = self.bundle_mappings.get(&cache_key) {
             return Some(replacement.clone());
         }
         if self.tls_ca_pem.is_empty() {
             return None;
         }
         let path = Path::new(&input);
-        let mut source = std::fs::read(path).ok()?;
-        if !is_ca_bundle_candidate(path, &source) {
+        let source = std::fs::read(path).ok()?;
+        let extension = path.extension()?.to_str()?;
+        let output_data =
+            hyperhub_engine::trust_bundle(engine, extension, &source, &self.tls_ca_pem).ok()?;
+        if output_data.is_empty() || output_data == source {
             return None;
-        }
-        if source
-            .windows(self.tls_ca_pem.len())
-            .any(|window| window == self.tls_ca_pem.as_slice())
-        {
-            return None;
-        }
-        if !source.ends_with(b"\n") {
-            source.push(b'\n');
-        }
-        source.extend_from_slice(&self.tls_ca_pem);
-        if !source.ends_with(b"\n") {
-            source.push(b'\n');
         }
         let root = agent_ca_directory()?;
         std::fs::create_dir_all(&root).ok()?;
-        let identity = format!("{}:{}", input, stable_hash(&self.tls_ca_pem));
+        let identity = format!(
+            "{}:{}:{}",
+            input,
+            engine.generation(),
+            stable_hash(&output_data)
+        );
         let output = root.join(format!(
             "bundle-{:016x}.pem",
             stable_hash(identity.as_bytes())
         ));
         if !output.is_file() {
             let temporary = output.with_extension("tmp");
-            std::fs::write(&temporary, source).ok()?;
+            std::fs::write(&temporary, output_data).ok()?;
             set_private_file(&temporary).ok()?;
             if std::fs::rename(&temporary, &output).is_err() {
                 let _ = std::fs::remove_file(&temporary);
@@ -319,7 +307,7 @@ impl TrustState {
             }
         }
         let replacement = normalize_path(&output.to_string_lossy());
-        self.bundle_mappings.insert(input, replacement.clone());
+        self.bundle_mappings.insert(cache_key, replacement.clone());
         Some(replacement)
     }
 }

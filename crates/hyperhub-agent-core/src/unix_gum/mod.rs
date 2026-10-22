@@ -1,4 +1,5 @@
 mod adapters;
+pub(crate) mod fork;
 pub(crate) mod gum;
 mod manager;
 
@@ -24,7 +25,26 @@ pub unsafe extern "C" fn frida_agent_main(data: *const libc::c_char, stay_reside
     signal_ready(data, &status);
 }
 
+/// Frida calls this entry while the fork child remains gated. Child atfork
+/// callbacks performed no allocation, IO, logging or module loading.
+#[no_mangle]
+pub unsafe extern "C" fn frida_fork_agent_main(data: *const libc::c_char, stay_resident: *mut u32) {
+    let result = fork::rebuild();
+    let status = match result {
+        Ok(()) => {
+            if !stay_resident.is_null() {
+                stay_resident.write(1);
+            }
+            "ok".to_owned()
+        }
+        Err(e) => format!("error:{e}"),
+    };
+    signal_ready(data, &status);
+}
+
 fn initialize() -> Result<(), String> {
+    crate::engine_call::initialize_thread_slots()
+        .map_err(|code| format!("cannot initialize native TLS slots: {code}"))?;
     if crate::hh_agent_abi_version() != crate::ABI_VERSION {
         return Err("Agent ABI version mismatch".into());
     }
@@ -33,6 +53,8 @@ fn initialize() -> Result<(), String> {
         return Err(format!("Agent bootstrap failed with status {status}"));
     }
     let report = manager::install()?;
+    adapters::native::warm_originals();
+    fork::install()?;
     adapters::native::install_hook_report();
     if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
         eprintln!(

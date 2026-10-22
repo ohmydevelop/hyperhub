@@ -113,6 +113,8 @@ pub(in crate::windows_gum) fn rebuild_after_msys_fork(lease_id: &str) -> Result<
         return Err(error);
     }
     crate::runtime::replace_state_after_fork(rebuilt);
+    crate::engine_call::initialize_thread_slots()?;
+    crate::control::initialize_engine_control()?;
     if rebuild_builtin_plugins_after_fork().is_err() {
         crate::report_child_injection_failure(
             current_pid,
@@ -213,6 +215,9 @@ unsafe fn signal_inherited_child_event() {
 
 unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
     initialization_log("worker_started");
+    if crate::engine_call::initialize_thread_slots().is_err() {
+        return ERROR_DLL_INIT_FAILED;
+    }
     if crate::hh_agent_abi_version() != crate::ABI_VERSION {
         initialization_log("abi_failed");
         return ERROR_DLL_INIT_FAILED;

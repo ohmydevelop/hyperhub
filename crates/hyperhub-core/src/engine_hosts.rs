@@ -72,9 +72,14 @@ pub struct CommandStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HostStatus {
+    pub session_id: String,
+    #[serde(default)]
+    pub native_base_sha256: String,
     pub host_id: String,
     pub backend: Backend,
     pub host_pid: u32,
+    #[serde(default)]
+    pub host_start_time: Option<u64>,
     pub root_pid: u32,
     pub root_start_time: Option<u64>,
     pub member_instance: u64,
@@ -83,7 +88,13 @@ pub struct HostStatus {
     pub snapshot: Snapshot,
 }
 
+#[path = "engine_host_exit.rs"]
+mod exits;
+pub use exits::ProcessExit;
+
 struct Host {
+    reporters: BTreeMap<u32, u64>,
+    last_exit: Option<(u32, u64)>,
     status: HostStatus,
     session_id: String,
     sender: mpsc::Sender<Delivery>,
@@ -94,6 +105,9 @@ struct State {
     hosts: BTreeMap<String, Host>,
     requests: BTreeMap<String, (Vec<u8>, CommandStatus)>,
     coordinated_high_water: BTreeMap<String, u64>,
+    exits: BTreeMap<(String, u32, u64), exits::ExitState>,
+    births: BTreeMap<(String, u32, u64), Option<std::time::Instant>>,
+    last_birth_scan: Option<std::time::Instant>,
 }
 #[derive(Clone, Default)]
 pub struct EngineHosts(Arc<Mutex<State>>);
@@ -108,6 +122,7 @@ impl Drop for Registration {
         if let Ok(mut state) = self.registry.0.lock() {
             if let Some(host) = state.hosts.get_mut(&self.id) {
                 host.status.online = false;
+                host.status.last_seen_ms = unix_timestamp_ms();
             }
             for (_, request) in state.requests.values_mut() {
                 if request.host_id == self.id && request.state != DeliveryState::Acknowledged {
@@ -122,11 +137,13 @@ impl EngineHosts {
     pub(crate) fn register(
         &self,
         session_id: String,
+        native_base_sha256: String,
         backend: Backend,
         host_pid: u32,
         root_pid: u32,
         member_instance: u64,
         root_start_time: Option<u64>,
+        host_start_time: Option<u64>,
         snapshot: Snapshot,
     ) -> io::Result<Registration> {
         snapshot.host.validate().map_err(io::Error::other)?;
@@ -141,13 +158,19 @@ impl EngineHosts {
                 && h.status.root_pid == root_pid
                 && h.status.member_instance == member_instance
         }) {
-            return Err(io::Error::other("engine Host already registered"));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "engine Host already registered",
+            ));
         }
         if state.hosts.len() >= MAX_HOSTS {
             let stale = state
                 .hosts
                 .iter()
-                .find(|(_, h)| !h.status.online)
+                .find(|(_, h)| {
+                    !h.status.online
+                        && unix_timestamp_ms().saturating_sub(h.status.last_seen_ms) >= 2000
+                })
                 .map(|(id, _)| id.clone());
             if let Some(id) = stale {
                 state.hosts.remove(&id);
@@ -155,18 +178,26 @@ impl EngineHosts {
                 return Err(io::Error::other("engine Host limit reached"));
             }
         }
+        if let Some(start) = root_start_time {
+            Self::record_birth(&mut state, &session_id, root_pid, start)?;
+        }
         let random: [u8; 32] = rand::random();
         let id = hyperhub_runtime::artifact::hex(&random);
         let (sender, receiver) = mpsc::channel(16);
         state.hosts.insert(
             id.clone(),
             Host {
-                session_id,
+                reporters: BTreeMap::new(),
+                last_exit: None,
+                session_id: session_id.clone(),
                 sender,
                 status: HostStatus {
+                    session_id,
+                    native_base_sha256,
                     host_id: id.clone(),
                     backend,
                     host_pid,
+                    host_start_time,
                     root_pid,
                     root_start_time,
                     member_instance,
@@ -181,6 +212,28 @@ impl EngineHosts {
             receiver,
             registry: self.clone(),
         })
+    }
+
+    pub(crate) fn known_ptrace(
+        &self,
+        session: &str,
+        host_pid: u32,
+        host_start: u64,
+        root_pid: u32,
+    ) -> Option<HostStatus> {
+        self.0
+            .lock()
+            .ok()?
+            .hosts
+            .values()
+            .find(|h| {
+                h.session_id == session
+                    && h.status.backend == Backend::LinuxPtrace
+                    && h.status.host_pid == host_pid
+                    && h.status.host_start_time == Some(host_start)
+                    && h.status.root_pid == root_pid
+            })
+            .map(|h| h.status.clone())
     }
 
     /// Authentication must precede this method. Request IDs have bounded,

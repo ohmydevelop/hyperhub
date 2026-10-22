@@ -82,6 +82,9 @@ struct SessionState {
     api_key: Option<Zeroizing<Vec<u8>>>,
     descriptor: KdfDescriptor,
     sessions: HashMap<String, SessionRecord>,
+    // An authenticated ptrace manager owns the whole tree, including descendants
+    // that have not made their first control request when the original root exits.
+    engine_managers: HashMap<String, HashMap<u32, u64>>,
     challenges: HashMap<String, ChallengeRecord>,
     password_authorized: bool,
     failed_attempts: u8,
@@ -234,7 +237,10 @@ pub struct ConnectionSnapshot {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ConnectionRegistry(Arc<Mutex<HashMap<(String, u32, u64), ConnectionSnapshot>>>);
+pub struct ConnectionRegistry(
+    Arc<Mutex<HashMap<(String, u32, u64), ConnectionSnapshot>>>,
+    Option<crate::forward::authority::Client>,
+);
 
 pub struct ActiveConnection {
     registry: ConnectionRegistry,
@@ -242,6 +248,20 @@ pub struct ActiveConnection {
 }
 
 impl ConnectionRegistry {
+    pub(crate) fn remote(client: crate::forward::authority::Client) -> Self {
+        Self(Default::default(), Some(client))
+    }
+    pub(crate) fn try_track(
+        &self,
+        snapshot: ConnectionSnapshot,
+    ) -> std::io::Result<ActiveConnection> {
+        if let Some(client) = &self.1 {
+            client.expect_ok(crate::forward::authority::Request::Connection {
+                snapshot: snapshot.clone(),
+            })?;
+        }
+        Ok(self.track(snapshot))
+    }
     pub fn track(&self, snapshot: ConnectionSnapshot) -> ActiveConnection {
         let key = (
             snapshot.session_id.clone(),
@@ -274,6 +294,26 @@ impl ConnectionRegistry {
 }
 
 impl ActiveConnection {
+    pub(crate) fn replace_snapshot(&self, snapshot: ConnectionSnapshot) -> std::io::Result<()> {
+        if (
+            snapshot.session_id.clone(),
+            snapshot.pid,
+            snapshot.connection_id,
+        ) != self.key
+        {
+            return Err(std::io::Error::other("connection identity changed"));
+        }
+        let mut connections = self
+            .registry
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("connection registry poisoned"))?;
+        let previous = connections
+            .get_mut(&self.key)
+            .ok_or_else(|| std::io::Error::other("connection is closed"))?;
+        *previous = snapshot;
+        Ok(())
+    }
     pub fn update(
         &self,
         destination: &Destination,
@@ -284,6 +324,7 @@ impl ActiveConnection {
         client_proxy: Option<ClientProxySnapshot>,
         phase: &str,
     ) {
+        let mut changed = None;
         if let Ok(mut connections) = self.registry.0.lock() {
             if let Some(snapshot) = connections.get_mut(&self.key) {
                 snapshot.destination = destination.clone();
@@ -294,7 +335,13 @@ impl ActiveConnection {
                 snapshot.client_proxy = client_proxy;
                 snapshot.phase = phase.to_owned();
                 snapshot.updated_at_ms = unix_timestamp_ms();
+                if self.registry.1.is_some() {
+                    changed = Some(snapshot.clone());
+                }
             }
+        }
+        if let (Some(client), Some(snapshot)) = (&self.registry.1, changed) {
+            let _ = client.expect_ok(crate::forward::authority::Request::Connection { snapshot });
         }
     }
 }
@@ -303,6 +350,13 @@ impl Drop for ActiveConnection {
     fn drop(&mut self) {
         if let Ok(mut connections) = self.registry.0.lock() {
             connections.remove(&self.key);
+        }
+        if let Some(client) = &self.registry.1 {
+            let _ = client.expect_ok(crate::forward::authority::Request::ConnectionClosed {
+                session_id: self.key.0.clone(),
+                pid: self.key.1,
+                connection_id: self.key.2,
+            });
         }
     }
 }
@@ -323,6 +377,7 @@ impl SessionRegistry {
             api_key: None,
             descriptor,
             sessions: HashMap::new(),
+            engine_managers: HashMap::new(),
             challenges: HashMap::new(),
             password_authorized: false,
             failed_attempts: 0,
@@ -880,7 +935,7 @@ impl SessionRegistry {
         let Ok(mut state) = self.0.lock() else {
             return false;
         };
-        let remove_session = {
+        {
             let Some(record) = state.sessions.get_mut(session_id) else {
                 return false;
             };
@@ -891,13 +946,105 @@ impl SessionRegistry {
             record.member_instances.remove(&pid);
             record.process_policies.remove(&pid);
             record.agent_heartbeats.remove(&pid);
-            record.members.is_empty() && record.fork_leases.is_empty()
-        };
-        if remove_session {
-            if let Some(record) = state.sessions.remove(session_id) {
-                record.cancellation.cancel();
-            }
         }
+        cleanup(&mut state, Instant::now());
+        true
+    }
+
+    pub(crate) fn retain_engine_manager(
+        &self,
+        session_id: &str,
+        token: &str,
+        pid: u32,
+        start: u64,
+    ) -> bool {
+        if process_start_time(pid) != Some(start) || start == 0 {
+            return false;
+        }
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        let Some(record) = state.sessions.get(session_id) else {
+            return false;
+        };
+        if record.lifecycle != SessionLifecycle::RootProcess
+            || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
+        {
+            return false;
+        }
+        state
+            .engine_managers
+            .entry(session_id.into())
+            .or_default()
+            .insert(pid, start);
+        true
+    }
+
+    pub(crate) fn release_engine_manager(&self, session_id: &str, pid: u32, start: u64) {
+        if let Ok(mut state) = self.0.lock() {
+            if let Some(managers) = state.engine_managers.get_mut(session_id) {
+                if managers.get(&pid) == Some(&start) {
+                    managers.remove(&pid);
+                }
+            }
+            cleanup(&mut state, Instant::now());
+        }
+    }
+
+    pub(crate) fn engine_manager_start(
+        &self,
+        session_id: &str,
+        token: &str,
+        pid: u32,
+    ) -> Option<u64> {
+        let mut state = self.0.lock().ok()?;
+        cleanup(&mut state, Instant::now());
+        let record = state.sessions.get(session_id)?;
+        if !constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
+            return None;
+        }
+        state.engine_managers.get(session_id)?.get(&pid).copied()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn register_engine_managed_child(
+        &self,
+        session_id: &str,
+        token: &str,
+        manager: u32,
+        start: u64,
+        child: u32,
+        executable: String,
+        policy: ProcessHookMetadata,
+    ) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        cleanup(&mut state, Instant::now());
+        if state
+            .engine_managers
+            .get(session_id)
+            .and_then(|m| m.get(&manager))
+            != Some(&start)
+        {
+            return false;
+        }
+        let instance = next_member_instance(&mut state);
+        let Some(record) = state.sessions.get_mut(session_id) else {
+            return false;
+        };
+        if record.lifecycle != SessionLifecycle::RootProcess
+            || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
+            || record
+                .members
+                .get(&child)
+                .is_some_and(|old| old != &executable)
+        {
+            return false;
+        }
+        record.members.insert(child, executable);
+        record.member_instances.insert(child, instance);
+        record.process_policies.insert(child, policy);
         true
     }
 
@@ -953,6 +1100,7 @@ impl SessionRegistry {
         self.0
             .lock()
             .map(|mut state| {
+                state.engine_managers.remove(session_id);
                 state.sessions.remove(session_id).is_some_and(|record| {
                     record.cancellation.cancel();
                     true
@@ -1251,6 +1399,7 @@ impl SessionRegistry {
                 record.cancellation.cancel();
             }
             state.sessions.clear();
+            state.engine_managers.clear();
         }
     }
 
@@ -1434,6 +1583,11 @@ fn next_member_instance(state: &mut SessionState) -> u64 {
 
 fn cleanup(state: &mut SessionState, now: Instant) {
     state.challenges.retain(|_, value| value.expires_at > now);
+    state.engine_managers.retain(|session, managers| {
+        managers
+            .retain(|pid, start| !crate::engine_hosts::EngineHosts::process_is_gone(*pid, *start));
+        state.sessions.contains_key(session) && !managers.is_empty()
+    });
     for record in state.sessions.values_mut() {
         record
             .fork_leases
@@ -1442,18 +1596,20 @@ fn cleanup(state: &mut SessionState, now: Instant) {
     let expired = state
         .sessions
         .iter()
-        .filter(|(_, value)| {
+        .filter(|(id, value)| {
             (value.lifecycle == SessionLifecycle::Pending
                 && value
                     .pending_expires_at
                     .is_some_and(|expires| expires <= now))
                 || (value.lifecycle == SessionLifecycle::RootProcess
                     && value.members.is_empty()
-                    && value.fork_leases.is_empty())
+                    && value.fork_leases.is_empty()
+                    && !state.engine_managers.contains_key(*id))
         })
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     for id in expired {
+        state.engine_managers.remove(&id);
         if let Some(record) = state.sessions.remove(&id) {
             record.cancellation.cancel();
         }
@@ -1512,6 +1668,36 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
+    RetainEngineTree {
+        session_id: String,
+        token: String,
+        root_pid: u32,
+    },
+    ReportEngineProcessExit {
+        event: crate::engine_hosts::ProcessExit,
+        proof: Vec<u8>,
+    },
+    ReleaseUpgrade {
+        request: crate::release::Request,
+        proof: Vec<u8>,
+    },
+    GetReleaseUpgrades {
+        id: Option<String>,
+    },
+    ReleaseHelperAck {
+        ack: crate::release::installer::Acknowledgement,
+        proof: Vec<u8>,
+    },
+    GetEngineBootstrap {
+        session_id: String,
+        #[serde(default)]
+        native_base_sha256: String,
+        token: String,
+        pid: u32,
+        root_pid: u32,
+        nonce: [u8; 32],
+        host: hyperhub_runtime::Manifest,
+    },
     EngineUpgrade {
         request: crate::upgrade::Request,
         proof: Vec<u8>,
@@ -1521,6 +1707,8 @@ pub enum ControlRequest {
     },
     SubscribeEngineHost {
         session_id: String,
+        #[serde(default)]
+        native_base_sha256: String,
         token: String,
         root_pid: u32,
         backend: hyperhub_engine::host::Backend,
@@ -1714,6 +1902,18 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlResponse {
+    ReleaseUpgrade {
+        record: crate::release::RecordView,
+    },
+    ReleaseUpgrades {
+        status: Option<crate::release::Status>,
+    },
+    ReleaseHelperAck {
+        record: crate::release::RecordView,
+    },
+    EngineBootstrap {
+        bootstrap: hyperhub_engine::bootstrap::Bootstrap,
+    },
     EngineUpgrade {
         record: crate::upgrade::RecordView,
     },
@@ -1812,6 +2012,10 @@ pub enum ControlResponse {
         engine_hosts: Vec<crate::engine_hosts::HostStatus>,
         #[serde(default)]
         engine_upgrades: Option<crate::upgrade::Status>,
+        #[serde(default)]
+        release_upgrades: Option<crate::release::Status>,
+        #[serde(default)]
+        forward_workers: Option<crate::socks::WorkerGroupStatus>,
     },
     SmartProtectionDecision {
         action: crate::config::SandboxAction,
@@ -1896,6 +2100,70 @@ mod tests {
         assert!(registry.member_exited("s", 8, child_instance));
         assert!(auth.cancellation.is_cancelled());
         assert!(registry.authenticate("hh2:s:8:3", &record.token).is_none());
+    }
+
+    #[test]
+    fn authenticated_engine_manager_keeps_rootless_session_until_tree_exit() {
+        let (registry, record) = authenticated_registry();
+        let pid = std::process::id();
+        let Some(start) = process_start_time(pid) else {
+            return;
+        };
+        assert!(!registry.retain_engine_manager("s", "wrong", pid, start));
+        assert!(!registry.retain_engine_manager("s", &record.token, pid, start + 1));
+        assert!(registry.retain_engine_manager("s", &record.token, pid, start));
+        let root = registry.member_instance("s", &record.token, 7).unwrap();
+        assert!(registry.member_exited("s", 7, root));
+        assert!(registry.authenticate_control("s", &record.token));
+        assert_eq!(registry.engine_manager_start("s", "wrong", pid), None);
+        assert!(!registry.register_engine_managed_child(
+            "s",
+            &record.token,
+            pid,
+            start + 1,
+            8,
+            "child".into(),
+            ProcessHookMetadata::default()
+        ));
+        assert!(registry.register_engine_managed_child(
+            "s",
+            &record.token,
+            pid,
+            start,
+            8,
+            "child".into(),
+            ProcessHookMetadata::default()
+        ));
+        assert!(registry.authenticate("hh2:s:8:1", &record.token).is_some());
+        let child = registry.member_instance("s", &record.token, 8).unwrap();
+        assert!(registry.member_exited("s", 8, child));
+        registry.release_engine_manager("s", pid, start + 1);
+        assert!(registry.authenticate_control("s", &record.token));
+        registry.release_engine_manager("s", pid, start);
+        assert!(!registry.authenticate_control("s", &record.token));
+    }
+
+    #[test]
+    fn reused_manager_incarnation_cannot_keep_an_empty_session_alive() {
+        let (registry, record) = authenticated_registry();
+        let pid = std::process::id();
+        let Some(start) = process_start_time(pid) else {
+            return;
+        };
+        assert!(registry.retain_engine_manager("s", &record.token, pid, start));
+        // Model a recorded manager whose PID now belongs to another incarnation.
+        registry
+            .0
+            .lock()
+            .unwrap()
+            .engine_managers
+            .get_mut("s")
+            .unwrap()
+            .insert(pid, start + 1);
+        let root = registry.member_instance("s", &record.token, 7).unwrap();
+        assert!(registry.member_exited("s", 7, root));
+        assert!(!registry.authenticate_control("s", &record.token));
+        assert!(registry.0.lock().unwrap().engine_managers.is_empty());
     }
 
     #[test]

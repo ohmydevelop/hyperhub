@@ -32,6 +32,31 @@ impl std::error::Error for Error {}
 pub trait Engine: Send + Sync {
     fn manifest(&self) -> &Manifest;
     fn health(&self) -> bool;
+    /// Rebuild process-local ownership in a suspended fork child. Production
+    /// native Engines implement this; arbitrary Host-service implementations
+    /// must supply their own explicit fork contract.
+    /// # Safety
+    /// Call only in the sole child rebuild thread before target resumption.
+    #[cfg(target_os = "linux")]
+    unsafe fn fork_copy(&self) -> Result<Arc<dyn Engine>, Error> {
+        Err(Error::RequiresRestart)
+    }
+    #[cfg(target_os = "linux")]
+    fn fork_module_key(&self) -> usize {
+        0
+    }
+    /// # Safety
+    /// Same suspended-child requirements as `fork_copy`. Once per actual DSO.
+    #[cfg(target_os = "linux")]
+    unsafe fn fork_reset(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Release the original copied OS ownership after `fork_copy`. The old
+    /// object must remain leaked and can never be used or dropped in this child.
+    /// # Safety
+    /// Same child-only requirements as `fork_copy`; exactly once per object.
+    #[cfg(target_os = "linux")]
+    unsafe fn fork_release(&self) {}
     fn invoke(
         &self,
         calling: &Lease,
@@ -204,6 +229,137 @@ pub struct Runtime {
     state: Mutex<State>,
 }
 
+#[cfg(target_os = "linux")]
+pub struct ForkGuard<'a> {
+    _guard: MutexGuard<'a, State>,
+    pub image: ForkImage,
+}
+#[cfg(target_os = "linux")]
+impl ForkGuard<'_> {
+    pub fn into_image(self) -> ForkImage {
+        let Self { _guard, image } = self;
+        drop(_guard);
+        image
+    }
+    /// # Safety
+    /// Invoke only in the fork child. A Frida rebuild thread may differ from
+    /// the thread that acquired the inherited guard. Never unlock or drop it.
+    pub unsafe fn into_child_image(self) -> ForkImage {
+        let Self { _guard, image } = self;
+        std::mem::forget(_guard);
+        image
+    }
+}
+#[cfg(target_os = "linux")]
+pub struct ForkImage {
+    host: Manifest,
+    settings: Settings,
+    next: u64,
+    active: Arc<Generation>,
+    retired: Vec<Arc<Generation>>,
+    transactions: BTreeMap<String, Transaction>,
+    observation: Option<(String, u64, Option<Instant>)>,
+    discarded: Vec<Arc<Generation>>,
+}
+#[cfg(target_os = "linux")]
+pub struct ForkedRuntime {
+    pub runtime: Arc<Runtime>,
+    generations: BTreeMap<u64, Arc<Generation>>,
+}
+#[cfg(target_os = "linux")]
+impl ForkedRuntime {
+    pub fn rebind(&self, inherited: &Lease) -> Result<Lease, Error> {
+        self.generations
+            .get(&inherited.generation())
+            .cloned()
+            .map(Lease)
+            .ok_or(Error::NotPrepared)
+    }
+}
+#[cfg(target_os = "linux")]
+impl ForkImage {
+    /// # Safety
+    /// This image was frozen before the fork and is now used only by the
+    /// suspended child's rebuild thread. Forget every original Runtime/Lease
+    /// copied from the parent; no inherited mutex or Arc counter is reusable.
+    pub unsafe fn rebuild(self) -> Result<ForkedRuntime, Error> {
+        let this = std::mem::ManuallyDrop::new(self);
+        let mut engines: BTreeMap<usize, Arc<dyn Engine>> = BTreeMap::new();
+        let mut originals: BTreeMap<usize, Arc<dyn Engine>> = BTreeMap::new();
+        let mut generations = BTreeMap::new();
+        let mut reset_modules = std::collections::BTreeSet::new();
+        for original in std::iter::once(&this.active).chain(this.retired.iter()) {
+            let key = Arc::as_ptr(&original.engine) as *const () as usize;
+            if let std::collections::btree_map::Entry::Vacant(entry) = engines.entry(key) {
+                if reset_modules.insert(original.engine.fork_module_key()) {
+                    unsafe { original.engine.fork_reset()? };
+                }
+                entry.insert(unsafe { original.engine.fork_copy()? });
+                originals.insert(key, original.engine.clone());
+            }
+            generations.insert(
+                original.id,
+                Arc::new(Generation {
+                    id: original.id,
+                    engine: engines[&key].clone(),
+                }),
+            );
+        }
+        let mut transactions = this.transactions.clone();
+        for tx in transactions.values_mut() {
+            if matches!(
+                tx.stage,
+                Stage::Preparing | Stage::Prepared | Stage::Switching
+            ) {
+                tx.stage = Stage::Aborted;
+                tx.reason = Some("preparation belonged to the parent process".into());
+            }
+        }
+        let runtime = Arc::new(Runtime {
+            host: this.host.clone(),
+            settings: this.settings,
+            active: ActiveGeneration(RwLock::new(generations[&this.active.id].clone())),
+            state: Mutex::new(State {
+                next: this.next,
+                pending: None,
+                observation: this.observation.as_ref().map(|(id, previous, deadline)| {
+                    Observation {
+                        id: id.clone(),
+                        previous: *previous,
+                        deadline: *deadline,
+                    }
+                }),
+                retired: this
+                    .retired
+                    .iter()
+                    .map(|g| generations[&g.id].clone())
+                    .collect(),
+                transactions,
+                garbage: Vec::new(),
+            }),
+        });
+        for original in &this.discarded {
+            let key = Arc::as_ptr(&original.engine) as *const () as usize;
+            originals
+                .entry(key)
+                .or_insert_with(|| original.engine.clone());
+        }
+        // Copied Rust objects have parent-only reference counts. Keep one leaked
+        // reference permanently so their Drop cannot close a reassigned fd or
+        // dlopen handle. Native OS resources transfer explicitly, exactly once.
+        for (_, original) in originals {
+            unsafe {
+                original.fork_release();
+            }
+            std::mem::forget(original);
+        }
+        Ok(ForkedRuntime {
+            runtime,
+            generations,
+        })
+    }
+}
+
 impl Runtime {
     pub fn new(initial: Arc<dyn Engine>, settings: Settings) -> Result<Self, Error> {
         initial.manifest().validate()?;
@@ -228,6 +384,46 @@ impl Runtime {
         })
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn freeze_fork(&self) -> Result<ForkGuard<'_>, Error> {
+        let started = Instant::now();
+        let guard = loop {
+            let guard = self.state.lock().map_err(|_| Error::Poisoned)?;
+            if !guard
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.generation.is_none())
+            {
+                break guard;
+            }
+            drop(guard);
+            if started.elapsed() >= self.settings.prepare_timeout {
+                return Err(Error::TimedOut);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let mut discarded = guard.garbage.clone();
+        if let Some(generation) = guard.pending.as_ref().and_then(|p| p.generation.clone()) {
+            discarded.push(generation);
+        }
+        let image = ForkImage {
+            host: self.host.clone(),
+            settings: self.settings,
+            next: guard.next,
+            active: self.active.load_full(),
+            retired: guard.retired.clone(),
+            transactions: guard.transactions.clone(),
+            observation: guard
+                .observation
+                .as_ref()
+                .map(|o| (o.id.clone(), o.previous, o.deadline)),
+            discarded,
+        };
+        Ok(ForkGuard {
+            _guard: guard,
+            image,
+        })
+    }
     /// Does not take the transaction mutex. IO and callbacks can hold leases
     /// while another thread prepares or commits a generation.
     pub fn acquire(&self) -> Lease {

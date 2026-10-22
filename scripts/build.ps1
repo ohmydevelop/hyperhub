@@ -121,6 +121,7 @@ if (-not $IsWindows) {
 Push-Location $repoRoot
 $previousGumRoot = $env:HYPERHUB_FRIDA_GUM_ROOT
 $previousEmbeddedAgent = $env:HYPERHUB_EMBEDDED_AGENT_PATH
+$previousEmbeddedEngine = $env:HYPERHUB_EMBEDDED_ENGINE_PATH
 try {
   $resolvedGumRoot = Resolve-FridaGumRoot
   Install-FridaGum $resolvedGumRoot
@@ -155,6 +156,8 @@ try {
     '-p', 'hyperhub-agent-core', '--features', 'gum-agent'
   )
   $env:HYPERHUB_EMBEDDED_AGENT_PATH = $agent
+  Invoke-Checked 'cargo' @('build', '--release', '--locked', '-p', 'hyperhub-engine')
+  $env:HYPERHUB_EMBEDDED_ENGINE_PATH = Join-Path $repoRoot 'target/release/hyperhub_engine.dll'
   if (-not $SkipTests) {
     Write-Host 'Testing embedded Agent build...'
     Invoke-Checked 'cargo' @(
@@ -181,5 +184,6 @@ try {
 finally {
   $env:HYPERHUB_FRIDA_GUM_ROOT = $previousGumRoot
   $env:HYPERHUB_EMBEDDED_AGENT_PATH = $previousEmbeddedAgent
+  $env:HYPERHUB_EMBEDDED_ENGINE_PATH = $previousEmbeddedEngine
   Pop-Location
 }

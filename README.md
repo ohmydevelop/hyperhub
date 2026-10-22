@@ -47,6 +47,18 @@ hyperhub start
 
 Windows 使用 `hyperhub.exe start`。
 
+兼容版本支持在线升级：
+
+```text
+hyperhub upgrade
+hyperhub upgrade status
+hyperhub status --json
+```
+
+常驻 Serve 在发起命令退出后继续协调 Engine、转发 worker 和安装 helper。旧连接保留原代次，新调用使用新代次；安装确认与旧连接排空分别显示。最多保留四个旧代次，达到上限时拒绝后续升级。失败事务可用 `hyperhub upgrade recover <id>` 查询并恢复；全局完成决定之前可用 `hyperhub upgrade abort <id>` 中止。
+
+首次从旧版本迁移需要在维护窗口安装常驻基座并重启受管理程序。之后只有基座、Hook 集合和状态契约兼容的更新可以在线切换；不兼容时明确返回 `requires_restart`，不会自动重启目标。Linux 支持 ptrace 和 Gum，Windows 支持 Gum。详细边界和验证入口见[平滑升级记录](docs/features/2026-10-22.md)。
+
 启动后，在你的 Agent 中输入：
 
 ```text

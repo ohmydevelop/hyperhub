@@ -1,7 +1,7 @@
 //! Durable Engine participant transactions in resident Serve. The release
 //! coordinator will combine this component with workers and installer helpers.
 mod driver;
-mod store;
+pub(crate) mod store;
 
 use crate::engine_hosts::{HostStatus, OwnerCommand};
 use crate::session::unix_timestamp_ms;
@@ -24,12 +24,21 @@ pub enum Action {
         cache: PathBuf,
         hosts: Vec<String>,
     },
+    PrepareAll {
+        native_base_sha256: String,
+        manifest: Manifest,
+        source: PathBuf,
+        cache: PathBuf,
+        hosts: Vec<String>,
+    },
     Commit,
     Abort,
     Rollback {
         reason: String,
     },
     Observe,
+    ObserveHeld,
+    Finalize,
     Recover,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -98,32 +107,52 @@ impl Phase {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Identity {
+    #[serde(default)]
+    pub session_id: String,
     pub backend: Backend,
     pub host_pid: u32,
+    #[serde(default)]
+    pub host_start_time: u64,
+    #[serde(default)]
+    pub member_instance: u64,
     pub root_pid: u32,
     pub root_start_time: u64,
 }
 impl Identity {
     fn from_host(host: &HostStatus) -> io::Result<Self> {
-        let root_start_time = host
-            .root_start_time
+        let host_start_time = host
+            .host_start_time
             .filter(|time| *time != 0)
             .ok_or_else(|| {
                 io::Error::other("Host process creation time is unavailable; requires_restart")
             })?;
+        let root_start_time = host
+            .root_start_time
+            .filter(|time| *time != 0)
+            .or((host.backend == Backend::LinuxPtrace).then_some(host_start_time))
+            .ok_or_else(|| {
+                io::Error::other("Host process creation time is unavailable; requires_restart")
+            })?;
         Ok(Self {
+            session_id: host.session_id.clone(),
             backend: host.backend,
             host_pid: host.host_pid,
+            host_start_time,
+            member_instance: host.member_instance,
             root_pid: host.root_pid,
             root_start_time,
         })
     }
     fn matches(&self, host: &HostStatus) -> bool {
         host.online
+            && host.session_id == self.session_id
             && host.backend == self.backend
             && host.host_pid == self.host_pid
+            && host.host_start_time == Some(self.host_start_time)
+            && host.member_instance == self.member_instance
             && host.root_pid == self.root_pid
-            && host.root_start_time == Some(self.root_start_time)
+            && (self.backend == Backend::LinuxPtrace
+                || host.root_start_time == Some(self.root_start_time))
     }
 }
 
@@ -140,9 +169,13 @@ pub struct Participant {
     pub finalized: bool,
     pub cleanup_done: bool,
     pub exited: bool,
+    #[serde(default)]
+    pub exit_clean: bool,
     pub(crate) sequence: u64,
     pub(crate) pending: Option<Pending>,
     pub(crate) recovering: bool,
+    #[serde(default)]
+    pub(crate) exit_wait_started_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +198,8 @@ pub(crate) enum Purpose {
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub id: String,
+    #[serde(default)]
+    pub native_base_sha256: String,
     pub manifest: Manifest,
     pub phase: Phase,
     pub reason: Option<String>,
@@ -172,6 +207,14 @@ pub struct Record {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub health_started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) finalize_decided: bool,
+    #[serde(default)]
+    pub(crate) all_sessions: bool,
+    #[serde(default)]
+    pub(crate) defer_finalize: bool,
+    #[serde(default)]
+    pub(crate) finalize_order: u64,
     pub(crate) source: PathBuf,
     pub(crate) cache: PathBuf,
     pub(crate) rollback_requested: bool,
@@ -212,6 +255,8 @@ pub struct ParticipantView {
     pub finalized: bool,
     pub cleanup_done: bool,
     pub exited: bool,
+    #[serde(default)]
+    pub exit_clean: bool,
     pub awaiting: Option<String>,
     pub recovering: bool,
 }
@@ -232,6 +277,7 @@ impl RecordView {
                     finalized: p.finalized,
                     cleanup_done: p.cleanup_done,
                     exited: p.exited,
+                    exit_clean: p.exit_clean,
                     awaiting: p
                         .pending
                         .as_ref()
@@ -261,4 +307,27 @@ fn short_reason(reason: &str) -> String {
         text.push_str(" [truncated]");
     }
     text
+}
+
+// Product deployments are stable numeric releases; build metadata does not
+// change precedence. Unknown/prerelease versions never authorize a downgrade.
+pub(crate) fn stable_version(version: &str) -> Option<[u64; 3]> {
+    let version = version.split('+').next()?;
+    let mut result = [0; 3];
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    for (index, part) in parts.into_iter().enumerate() {
+        if part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        result[index] = part.parse().ok()?;
+    }
+    Some(result)
+}
+fn not_older(candidate: &Manifest, host: &Manifest) -> bool {
+    stable_version(&candidate.version)
+        .zip(stable_version(&host.version))
+        .is_some_and(|(candidate, host)| candidate >= host)
 }

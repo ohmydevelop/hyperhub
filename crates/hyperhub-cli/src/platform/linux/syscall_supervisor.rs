@@ -7,10 +7,9 @@ use std::time::{Duration, Instant};
 use hyperhub_core::config::{FileSandboxOperation, SandboxAction};
 use hyperhub_core::control::control_request;
 use hyperhub_core::sandbox::{
-    compile_runtime_snapshot, decide_file, decide_process, file_error_decision,
-    file_protection_binding, process_error_decision, process_protection_binding, sanitize_action,
-    CompiledSandboxSnapshot, ProtectionContext, SandboxAuditEvent, SandboxAuditKind,
-    SandboxDecision,
+    compile_runtime_snapshot, file_error_decision, process_error_decision, CompiledSandboxSnapshot,
+    FileProtectionBinding, ProcessProtectionBinding, ProtectionContext, SandboxAuditEvent,
+    SandboxAuditKind, SandboxDecision,
 };
 use hyperhub_core::session::{ControlRequest, ControlResponse};
 
@@ -177,6 +176,7 @@ struct Supervisor {
     next_socket_id: u64,
     control: tokio::runtime::Runtime,
     sandbox: Option<CompiledSandboxSnapshot>,
+    sandbox_raw: Option<hyperhub_core::sandbox::SandboxSnapshot>,
     next_sandbox_refresh: Instant,
     last_sandbox_refresh_error: Option<String>,
     hook_counts: HashMap<&'static str, u64>,
@@ -198,6 +198,9 @@ struct Supervisor {
     dns_addresses: HashMap<(u64, IpAddr), (String, Instant)>,
     dns_ports: HashSet<u16>,
     root_status: Option<i32>,
+    process_starts: HashMap<libc::pid_t, u64>,
+    tree_failure: Option<(Option<i32>, Option<i32>)>,
+    last_exit: Option<(u32, u64)>,
 }
 
 pub fn run<F>(
@@ -211,6 +214,7 @@ pub fn run<F>(
 where
     F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
 {
+    let sandbox_raw = sandbox.clone();
     let sandbox = sandbox
         .map(compile_runtime_snapshot)
         .transpose()
@@ -276,6 +280,7 @@ where
         next_socket_id: 1,
         control,
         sandbox,
+        sandbox_raw,
         next_sandbox_refresh: Instant::now() + SANDBOX_REFRESH_INTERVAL,
         last_sandbox_refresh_error: None,
         hook_counts: HashMap::new(),
@@ -297,7 +302,20 @@ where
         dns_addresses: HashMap::new(),
         dns_ports,
         root_status: None,
+        process_starts: process_birth(child)
+            .map(|start| HashMap::from([(child, start)]))
+            .unwrap_or_default(),
+        tree_failure: None,
+        last_exit: None,
     };
+    super::engine_control::bootstrap(
+        &supervisor.engine,
+        &supervisor.endpoint,
+        &supervisor.session_id,
+        &String::from_utf8(supervisor.password.clone()).map_err(|_| "invalid session token")?,
+        child as u32,
+    )
+    .inspect_err(|_| terminate(child))?;
     let _engine_control = super::engine_control::start(
         supervisor.engine.clone(),
         supervisor.endpoint.clone(),
@@ -314,6 +332,66 @@ where
     }
     supervisor.write_hook_report()?;
     result
+}
+
+fn engine_policy(
+    engine: &hyperhub_runtime::Lease,
+    operation: u32,
+    snapshot: serde_json::Value,
+    target: &str,
+    file_op: &str,
+    command_line: &str,
+) -> Result<hyperhub_engine::contract::PolicyDecision, i32> {
+    hyperhub_engine::policy(
+        engine,
+        operation,
+        &hyperhub_engine::contract::PolicyInput {
+            snapshot,
+            target: target.into(),
+            operation: file_op.into(),
+            command_line: command_line.into(),
+        },
+    )
+}
+fn policy_decision(result: &hyperhub_engine::contract::PolicyDecision) -> SandboxDecision {
+    SandboxDecision {
+        action: if result.action == "pass" {
+            SandboxAction::Pass
+        } else {
+            SandboxAction::Deny
+        },
+        rule_id: result.rule_id.clone(),
+        source: match result.source.as_str() {
+            "rule" => "rule",
+            "default" => "default",
+            _ => "error",
+        },
+    }
+}
+#[derive(serde::Deserialize)]
+struct EngineSanitizedAction {
+    local_deny: bool,
+    features: Vec<String>,
+    redacted_argv: Vec<String>,
+}
+fn engine_sanitize(
+    engine: &hyperhub_runtime::Lease,
+    executable: &str,
+    argv: &[String],
+    context: &ProtectionContext,
+) -> EngineSanitizedAction {
+    hyperhub_engine::call(
+        engine,
+        hyperhub_engine::contract::SANITIZE_ACTION,
+        &serde_json::json!({"executable":executable,"argv":argv,"context":context}),
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    .unwrap_or_else(|| EngineSanitizedAction {
+        local_deny: true,
+        features: vec!["engine_error".into()],
+        redacted_argv: vec!["<redacted>".into(); argv.len()],
+    })
 }
 
 impl Supervisor {
@@ -439,6 +517,46 @@ impl Supervisor {
         self.file_tables.insert(tid, new);
     }
 
+    fn report_exit(
+        &self,
+        pid: u32,
+        start: u64,
+        code: Option<i32>,
+        signal: Option<i32>,
+        source: &str,
+    ) {
+        if let Err(error) = super::engine_control::report_exit(
+            &self.endpoint,
+            &self.session_id,
+            pid,
+            start,
+            code,
+            signal,
+            source,
+        ) {
+            if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                eprintln!("hyperhub: {error}");
+            }
+        }
+    }
+    fn observe_exit(&mut self, tid: libc::pid_t, code: Option<i32>, signal: Option<i32>) {
+        let group = self.thread_groups.get(&tid).copied().unwrap_or(tid);
+        if !super::engine_control::completed_normally(code, signal) {
+            self.tree_failure = Some((code, signal));
+        }
+        if self
+            .thread_groups
+            .iter()
+            .any(|(&other, &owner)| other != tid && owner == group)
+        {
+            return;
+        }
+        if let Some(start) = self.process_starts.remove(&group) {
+            self.last_exit = Some((group as u32, start));
+            self.report_exit(group as u32, start, code, signal, "ptrace_process");
+        }
+    }
+
     fn cleanup_exited_thread(&mut self, tid: libc::pid_t) {
         self.thread_groups.remove(&tid);
         self.clone_flags.remove(&tid);
@@ -468,6 +586,7 @@ impl Supervisor {
                 if tid == self.root_pid {
                     self.root_status = Some(libc::WEXITSTATUS(status));
                 }
+                self.observe_exit(tid, Some(libc::WEXITSTATUS(status)), None);
                 self.threads.remove(&tid);
                 self.cleanup_exited_thread(tid);
                 continue;
@@ -476,6 +595,7 @@ impl Supervisor {
                 if tid == self.root_pid {
                     self.root_status = Some(128 + libc::WTERMSIG(status));
                 }
+                self.observe_exit(tid, None, Some(libc::WTERMSIG(status)));
                 self.threads.remove(&tid);
                 self.cleanup_exited_thread(tid);
                 continue;
@@ -511,6 +631,10 @@ impl Supervisor {
             };
             resume_syscall(tid, deliver)?;
         }
+        if let Some((pid, start)) = self.last_exit {
+            let (code, signal) = self.tree_failure.unwrap_or((Some(0), None));
+            self.report_exit(pid, start, code, signal, "ptrace_tree");
+        }
         Ok(self.root_status.unwrap_or_default())
     }
 
@@ -530,6 +654,9 @@ impl Supervisor {
                     let parent_group = thread_group(tid);
                     let child_group = thread_group(child);
                     self.thread_groups.insert(child, child_group);
+                    if let Some(start) = process_birth(child_group) {
+                        self.process_starts.entry(child_group).or_insert(start);
+                    }
                     let parent_table = self.descriptor_table(tid);
                     let table = if self.clone_flags.get(&tid).copied().unwrap_or(0)
                         & libc::CLONE_FILES as u64
@@ -543,11 +670,15 @@ impl Supervisor {
                         table
                     };
                     self.file_tables.insert(child, table);
-                    if self.pending_child_stops.remove(&child) {
-                        resume_syscall(child, 0)?;
-                    }
                     if child_group != parent_group {
                         self.parents.entry(child_group).or_insert(parent_group);
+                        // Register every new process before either task resumes.
+                        // Even a child that only exits or faults must have a
+                        // registered birth for authenticated health reporting.
+                        self.ensure_member(child)?;
+                    }
+                    if self.pending_child_stops.remove(&child) {
+                        resume_syscall(child, 0)?;
                     }
                 }
             }
@@ -571,6 +702,7 @@ impl Supervisor {
                     }
                 }
                 self.threads.entry(tid).or_default().pending = None;
+                self.threads.entry(tid).or_default().engine = None;
                 let process_pid = thread_group(tid);
                 self.thread_groups.insert(tid, process_pid);
                 self.detach_file_table(tid);
@@ -618,9 +750,10 @@ impl Supervisor {
                             snapshot.version
                         ));
                     }
-                    let compiled = compile_runtime_snapshot(snapshot)
+                    let compiled = compile_runtime_snapshot(snapshot.clone())
                         .map_err(|error| format!("cannot compile refreshed sandbox: {error}"))?;
                     self.sandbox = Some(compiled);
+                    self.sandbox_raw = Some(snapshot);
                     Ok(())
                 }
                 Ok(ControlResponse::Error { message }) => Err(message),
@@ -712,7 +845,7 @@ impl Supervisor {
         if flags & libc::MSG_FASTOPEN as u64 != 0 {
             return Ok(Some(deny_syscall(registers, libc::EOPNOTSUPP)));
         }
-        if let Some(pending) = self.intent_enter(tid, number, registers)? {
+        if let Some(pending) = self.intent_enter(tid, number, registers, engine)? {
             return Ok(Some(pending));
         }
         // Observation must not turn a native EFAULT/partial batch into supervisor failure.
@@ -1258,6 +1391,7 @@ impl Supervisor {
         tid: libc::pid_t,
         number: i64,
         registers: &mut Registers,
+        engine: &hyperhub_runtime::Lease,
     ) -> Result<Option<PendingSyscall>, String> {
         if number == syscall::UNSHARE && registers.argument(0) & libc::CLONE_FILES as u64 != 0 {
             return Ok(Some(PendingSyscall::UnshareFiles));
@@ -1281,7 +1415,7 @@ impl Supervisor {
         }
 
         match self.file_intent(tid, number, registers) {
-            Ok(Some(intent)) if self.file_denied(tid, &intent)? => {
+            Ok(Some(intent)) if self.file_denied(tid, &intent, engine)? => {
                 return Ok(Some(deny_syscall(registers, libc::EACCES)));
             }
             Err(error) if self.file_error_denied(tid, &error) => {
@@ -1291,7 +1425,7 @@ impl Supervisor {
         }
 
         match self.process_intent(tid, number, registers) {
-            Ok(Some(intent)) if self.process_denied(tid, &intent)? => {
+            Ok(Some(intent)) if self.process_denied(tid, &intent, engine)? => {
                 return Ok(Some(deny_syscall(registers, libc::EACCES)));
             }
             Err(error) if self.process_error_denied(tid, &error) => {
@@ -1513,11 +1647,16 @@ impl Supervisor {
         Ok(Some(ProcessIntent { executable, argv }))
     }
 
-    fn file_denied(&mut self, tid: libc::pid_t, intent: &FileIntent) -> Result<bool, String> {
+    fn file_denied(
+        &mut self,
+        tid: libc::pid_t,
+        intent: &FileIntent,
+        engine: &hyperhub_runtime::Lease,
+    ) -> Result<bool, String> {
         for target in &intent.targets {
             for (operation, operation_name) in &intent.operations {
                 let context = ProtectionContext::default();
-                let sanitized = sanitize_action(target, &[target.clone()], &context);
+                let sanitized = engine_sanitize(engine, target, &[target.clone()], &context);
                 let (decision, binding) = {
                     let Some(snapshot) = self
                         .sandbox
@@ -1526,10 +1665,36 @@ impl Supervisor {
                     else {
                         return Ok(false);
                     };
-                    (
-                        decide_file(snapshot, target, *operation),
-                        file_protection_binding(snapshot, target, *operation),
-                    )
+                    let wire = self
+                        .sandbox_raw
+                        .as_ref()
+                        .and_then(|s| s.file.as_ref())
+                        .ok_or("missing file policy wire snapshot")?;
+                    match engine_policy(
+                        engine,
+                        hyperhub_engine::contract::FILE_POLICY,
+                        serde_json::to_value(wire).map_err(|e| e.to_string())?,
+                        target,
+                        serde_json::to_value(operation)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .as_deref()
+                            .unwrap_or(""),
+                        "",
+                    ) {
+                        Ok(result) => {
+                            let binding = result
+                                .protection_rule_id
+                                .clone()
+                                .zip(result.protection.clone())
+                                .map(|(rule_id, protection_id)| FileProtectionBinding {
+                                    rule_id,
+                                    protection_id,
+                                });
+                            (policy_decision(&result), binding)
+                        }
+                        Err(_) => (file_error_decision(snapshot), None),
+                    }
                 };
                 if decision.action == SandboxAction::Deny {
                     self.report_sandbox(
@@ -1669,7 +1834,12 @@ impl Supervisor {
         self.enforce
     }
 
-    fn process_denied(&mut self, tid: libc::pid_t, intent: &ProcessIntent) -> Result<bool, String> {
+    fn process_denied(
+        &mut self,
+        tid: libc::pid_t,
+        intent: &ProcessIntent,
+        engine: &hyperhub_runtime::Lease,
+    ) -> Result<bool, String> {
         let Some(snapshot) = self
             .sandbox
             .as_ref()
@@ -1679,8 +1849,24 @@ impl Supervisor {
         };
         let command_line = intent.command_line();
         let context = ProtectionContext::default();
-        let sanitized = sanitize_action(&intent.executable, &intent.argv, &context);
-        let decision = decide_process(snapshot, &intent.executable, &command_line);
+        let sanitized = engine_sanitize(engine, &intent.executable, &intent.argv, &context);
+        let wire = self
+            .sandbox_raw
+            .as_ref()
+            .and_then(|s| s.process.as_ref())
+            .ok_or("missing process policy wire snapshot")?;
+        let result = engine_policy(
+            engine,
+            hyperhub_engine::contract::PROCESS_POLICY,
+            serde_json::to_value(wire).map_err(|e| e.to_string())?,
+            &intent.executable,
+            "",
+            &command_line,
+        );
+        let decision = result
+            .as_ref()
+            .map(policy_decision)
+            .unwrap_or_else(|_| process_error_decision(snapshot));
         if decision.action == SandboxAction::Deny {
             self.report_sandbox(
                 tid,
@@ -1693,8 +1879,14 @@ impl Supervisor {
             );
             return Ok(self.enforce);
         }
-        let Some(binding) = process_protection_binding(snapshot, &intent.executable, &command_line)
-        else {
+        let binding = result
+            .ok()
+            .and_then(|r| r.protection_rule_id.zip(r.protection))
+            .map(|(rule_id, protection_id)| ProcessProtectionBinding {
+                rule_id,
+                protection_id,
+            });
+        let Some(binding) = binding else {
             return Ok(false);
         };
         let process_pid = self.ensure_member(tid)? as u32;
@@ -1816,7 +2008,13 @@ impl Supervisor {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| target.to_owned());
         let process_argv_redacted = read_process_argv(process_pid as libc::pid_t).map(|argv| {
-            sanitize_action(&process_executable, &argv, &ProtectionContext::default()).redacted_argv
+            engine_sanitize(
+                &self.engine.acquire(),
+                &process_executable,
+                &argv,
+                &ProtectionContext::default(),
+            )
+            .redacted_argv
         });
         let event = SandboxAuditEvent {
             kind,
@@ -1887,7 +2085,10 @@ impl Supervisor {
 
             let process_pid = self.ensure_member(tid)?;
             let connection_id = self.next_connection_id;
-            self.next_connection_id = self.next_connection_id.saturating_add(1);
+            self.next_connection_id = self
+                .next_connection_id
+                .checked_add(1)
+                .ok_or("connection identity space is exhausted")?;
             input.phase = 1;
             input.username = format!("hh2:{}:{}:{}", self.session_id, process_pid, connection_id);
             input.password.clone_from(&self.password);
@@ -2973,4 +3174,14 @@ mod tests {
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
         );
     }
+}
+
+fn process_birth(pid: libc::pid_t) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }

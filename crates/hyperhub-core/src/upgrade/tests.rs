@@ -54,6 +54,9 @@ struct Actor {
     runtime: Arc<Runtime>,
     registration: Option<Registration>,
     root_start: u64,
+    host_start: u64,
+    session: String,
+    native_base: String,
     number: u32,
     log: Vec<String>,
     fail_commit: bool,
@@ -62,6 +65,9 @@ struct Actor {
 }
 impl Actor {
     fn new(registry: &EngineHosts, number: u32) -> Self {
+        Self::new_in(registry, number, "unit")
+    }
+    fn new_in(registry: &EngineHosts, number: u32, session: &str) -> Self {
         let runtime = Arc::new(
             Runtime::new(
                 Arc::new(TestEngine {
@@ -77,14 +83,18 @@ impl Actor {
             .unwrap(),
         );
         let root_start = crate::session::process_start_time(std::process::id()).unwrap_or(1);
+        let host_start =
+            crate::session::process_start_time(std::process::id()).unwrap_or(root_start);
         let registration = registry
             .register(
-                "unit".into(),
+                session.into(),
+                String::new(),
                 Backend::LinuxPtrace,
-                number,
+                std::process::id(),
                 std::process::id(),
                 u64::from(number),
                 Some(root_start),
+                Some(host_start),
                 host::report(&runtime).unwrap(),
             )
             .unwrap();
@@ -92,6 +102,9 @@ impl Actor {
             runtime,
             registration: Some(registration),
             root_start,
+            host_start,
+            session: session.into(),
+            native_base: String::new(),
             number,
             log: vec![],
             fail_commit: false,
@@ -104,12 +117,14 @@ impl Actor {
         self.registration = Some(
             registry
                 .register(
-                    "unit".into(),
+                    self.session.clone(),
+                    self.native_base.clone(),
                     Backend::LinuxPtrace,
-                    self.number,
+                    std::process::id(),
                     std::process::id(),
                     u64::from(self.number),
                     Some(self.root_start),
+                    Some(self.host_start),
                     host::report(&self.runtime).unwrap(),
                 )
                 .unwrap(),
@@ -643,7 +658,7 @@ fn reconnected_host_with_a_different_process_incarnation_is_not_selected() {
     let mut rig = Rig::new(1);
     rig.prepared();
     let before = rig.actors[0].log.len();
-    rig.actors[0].root_start += 1;
+    rig.actors[0].host_start += 1;
     rig.actors[0].reconnect(&rig.registry);
     rig.submit(Action::Commit);
     for _ in 0..4 {
@@ -653,7 +668,7 @@ fn reconnected_host_with_a_different_process_incarnation_is_not_selected() {
     assert_eq!(rig.actors[0].log.len(), before);
     assert_eq!(value(&rig.actors[0].runtime.acquire()), 0);
     // The original process can reconnect and complete; never retarget by PID.
-    rig.actors[0].root_start -= 1;
+    rig.actors[0].host_start -= 1;
     rig.actors[0].reconnect(&rig.registry);
     rig.until(Phase::Committed);
 }
@@ -702,3 +717,6 @@ fn bounded_summary_retains_the_active_transaction_ahead_of_old_ids() {
     assert_eq!(status.records[0].phase, Phase::Preparing);
     assert_eq!(status.records[0].participants_omitted, 1);
 }
+
+#[path = "admission_tests.rs"]
+mod admission_tests;

@@ -274,6 +274,9 @@ where
         );
     }
 
+    // Keep the managed orphan subtree under this live launcher. This preserves
+    // Linux's normal ptrace ancestor relationship without widening target access.
+    let _subreaper = ChildSubreaper::new()?;
     let exit_directory = GumExitDirectory::new()?;
     environment.retain(|(name, _)| name != "HYPERHUB_GUM_EXIT_DIRECTORY");
     environment.push((
@@ -337,8 +340,24 @@ where
         format!("Frida Core child gating failed: {error}")
     })?;
     let credentials = SessionCredentials::from_environment(env)?;
+    super::engine_control::retain_tree(
+        &credentials.endpoint,
+        &credentials.session_id,
+        &credentials.token,
+        pid,
+    )
+    .inspect_err(|_| terminate_process(pid))?;
     let enforce = environment_value(env, "HYPERHUB_ENFORCEMENT_MODE").as_deref() != Some("observe");
-    let monitor = ChildMonitor::start(frida.clone(), runtime, enforce, credentials, integrity)?;
+    let monitor = ChildMonitor::start(
+        frida.clone(),
+        runtime,
+        enforce,
+        credentials,
+        integrity,
+        pid,
+        process_start_time,
+        exit_directory.0.clone(),
+    )?;
     frida.resume(process).map_err(|error| {
         terminate_process(pid);
         format!("Frida Core resume failed: {error}")
@@ -349,6 +368,31 @@ where
     };
     monitor.stop();
     result
+}
+
+struct ChildSubreaper {
+    previous: libc::c_int,
+}
+impl ChildSubreaper {
+    fn new() -> Result<Self, String> {
+        let mut previous = 0;
+        if unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut previous, 0, 0, 0) } != 0
+            || unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0
+        {
+            return Err(format!(
+                "cannot retain the managed Linux process subtree: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self { previous })
+    }
+}
+impl Drop for ChildSubreaper {
+    fn drop(&mut self) {
+        unsafe {
+            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, self.previous, 0, 0, 0);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -453,6 +497,9 @@ impl ChildMonitor {
         enforce: bool,
         credentials: SessionCredentials,
         integrity: RuntimeIntegrity,
+        root_pid: u32,
+        root_start: Option<u64>,
+        exit_directory: PathBuf,
     ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -466,6 +513,9 @@ impl ChildMonitor {
                     &credentials,
                     &integrity,
                     &worker_stop,
+                    root_pid,
+                    root_start,
+                    &exit_directory,
                 )
             })
             .map_err(|error| format!("cannot start Frida child monitor: {error}"))?;
@@ -496,14 +546,28 @@ fn monitor_children(
     credentials: &SessionCredentials,
     integrity: &RuntimeIntegrity,
     stop: &AtomicBool,
+    root_pid: u32,
+    root_start: Option<u64>,
+    exit_directory: &Path,
 ) {
-    while !stop.load(Ordering::Acquire) {
+    let mut tracked = std::collections::HashMap::new();
+    if let Some(start) = root_start {
+        tracked.insert(root_pid, start);
+    }
+    let mut last_exit = None;
+    let mut tree_failed = false;
+    // The launcher remains the observer while any gated descendant survives.
+    // Parent exit does not terminate child gating or the authenticated reporter.
+    while !stop.load(Ordering::Acquire) || !tracked.is_empty() {
         match frida.pending_children() {
             Ok(children) => {
                 for child in children {
                     if child.skip_agent {
                         let _ = frida.resume(child.process);
                         continue;
+                    }
+                    if let Some(start) = process_start_time(child.process.pid() as u32) {
+                        tracked.insert(child.process.pid() as u32, start);
                     }
                     if child.origin == ChildOrigin::Fork {
                         let result = register_fork_child(
@@ -512,9 +576,13 @@ fn monitor_children(
                             child.process,
                         )
                         .and_then(|_| {
-                            frida
-                                .resume(child.process)
-                                .map_err(|error| format!("Frida Core fork resume failed: {error}"))
+                            inject_child_entrypoint(
+                                frida,
+                                child.process,
+                                runtime,
+                                integrity,
+                                "frida_fork_agent_main",
+                            )
                         });
                         if let Err(error) = result {
                             handle_child_failure(frida, child, enforce, error);
@@ -537,7 +605,73 @@ fn monitor_children(
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
+        tracked.retain(|&pid, &mut start| {
+            if process_exists(pid, Some(start)) {
+                return true;
+            }
+            // The exit file is accepted only for the exact captured OS birth.
+            // An absent or damaged file never converts a crash to success.
+            let evidence = read_exit_evidence(exit_directory, pid);
+            // With subreaping, adopted descendants have an actual wait status.
+            // Preserve signal failures even if an earlier exit callback wrote 0.
+            let mut wait_status = 0;
+            let observed = if unsafe { libc::waitpid(pid as i32, &mut wait_status, libc::WNOHANG) }
+                == pid as i32
+            {
+                if libc::WIFEXITED(wait_status) {
+                    Some((Some(libc::WEXITSTATUS(wait_status)), None))
+                } else if libc::WIFSIGNALED(wait_status) {
+                    Some((None, Some(libc::WTERMSIG(wait_status))))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let result = observed.or_else(|| {
+                evidence
+                    .filter(|(_, recorded)| *recorded == start)
+                    .map(|(code, _)| (Some(code), None))
+            });
+            last_exit = Some((pid, start));
+            if !result.is_some_and(|(code, signal)| {
+                super::engine_control::completed_normally(code, signal)
+            }) {
+                tree_failed = true;
+            }
+            if let Some((code, signal)) = result {
+                if let Err(error) = super::engine_control::report_exit(
+                    &credentials.endpoint,
+                    &credentials.session_id,
+                    pid,
+                    start,
+                    code,
+                    signal,
+                    "gum_launcher",
+                ) {
+                    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                        eprintln!("hyperhub: {error}");
+                    }
+                }
+            }
+            false
+        });
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if let Some((pid, start)) = last_exit {
+        if let Err(error) = super::engine_control::report_exit(
+            &credentials.endpoint,
+            &credentials.session_id,
+            pid,
+            start,
+            if tree_failed { None } else { Some(0) },
+            None,
+            "gum_tree",
+        ) {
+            if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                eprintln!("hyperhub: {error}");
+            }
+        }
     }
 }
 
@@ -798,6 +932,9 @@ fn wait_for_process(
 }
 
 fn read_reported_exit(directory: &Path, pid: u32) -> Option<i32> {
+    read_exit_evidence(directory, pid).map(|(code, _)| code)
+}
+fn read_exit_evidence(directory: &Path, pid: u32) -> Option<(i32, u64)> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
@@ -809,8 +946,11 @@ fn read_reported_exit(directory: &Path, pid: u32) -> Option<i32> {
         return None;
     }
     let mut value = String::new();
-    file.take(4).read_to_string(&mut value).ok()?;
-    value.parse::<u8>().ok().map(i32::from)
+    file.take(64).read_to_string(&mut value).ok()?;
+    let mut fields = value.split_whitespace();
+    let code = i32::from(fields.next()?.parse::<u8>().ok()?);
+    let start = fields.next()?.parse::<u64>().ok()?;
+    (start != 0 && fields.next().is_none()).then_some((code, start))
 }
 
 fn wait_pidfd_status(pid: u32) -> Option<i32> {
@@ -932,9 +1072,9 @@ mod tests {
         use std::os::unix::fs::symlink;
         let directory = GumExitDirectory::new().unwrap();
         let path = directory.0.join("42.exit");
-        std::fs::write(&path, "7").unwrap();
+        std::fs::write(&path, "7 123").unwrap();
         assert_eq!(read_reported_exit(&directory.0, 42), Some(7));
-        std::fs::write(&path, "256").unwrap();
+        std::fs::write(&path, "256 123").unwrap();
         assert_eq!(read_reported_exit(&directory.0, 42), None);
         std::fs::remove_file(&path).unwrap();
         let other = directory.0.join("other");

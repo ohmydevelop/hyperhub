@@ -1,23 +1,39 @@
-//! Resident, thread-bound generation context. Never access destroyed TLS from a
-//! native Hook: thread teardown can call intercepted file/socket functions.
+//! Thread-bound generation context with explicit OS TLS ownership. Hooks can run
+//! while the dynamic loader owns its lock and during other TLS destructors.
 use hyperhub_runtime::{Lease, Runtime};
 use std::cell::{Cell, RefCell};
-#[cfg(any(test, all(any(windows, target_os = "linux"), feature = "gum-agent")))]
 use std::sync::atomic::{AtomicU64, Ordering};
+mod slots;
 
+struct Slot {
+    calling: RefCell<Option<Lease>>,
+    epoch: u64,
+    #[cfg(test)]
+    destroyed: RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+}
+#[cfg(test)]
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Some(flag) = self.destroyed.get_mut().take() {
+            flag.store(true, Ordering::Release);
+        }
+    }
+}
 thread_local! {
-    static CALLING: RefCell<Option<Lease>> = const { RefCell::new(None) };
-    // No destructor: this flag remains readable after CALLING is destroyed.
-    // Do not initialize CALLING just to probe it.
-    static INITIALIZED: Cell<bool> = const { Cell::new(false) };
+    // These Cells have no destructor and never register with the loader.
     static HOST_BACKGROUND: Cell<bool> = const { Cell::new(false) };
+    static CLEANED: Cell<bool> = const { Cell::new(false) };
+    static DESTROYING: Cell<bool> = const { Cell::new(false) };
+}
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
+pub(crate) fn initialize_thread_slots() -> Result<(), i32> {
+    slots::initialize()
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn host_background() -> bool {
     HOST_BACKGROUND.with(Cell::get)
 }
-/// Only dedicated resident-control threads use this guard. Blocking control IO
-/// must bypass target hooks without pinning an Engine generation while idle.
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn background<T>(call: impl FnOnce() -> T) -> T {
     struct Reset(bool);
@@ -29,15 +45,49 @@ pub(crate) fn background<T>(call: impl FnOnce() -> T) -> T {
     let _reset = Reset(HOST_BACKGROUND.with(|flag| flag.replace(true)));
     call()
 }
-fn alive() -> bool {
-    !INITIALIZED.with(Cell::get) || CALLING.try_with(|_| ()).is_ok()
+fn current_slot() -> *mut Slot {
+    let pointer = slots::get().cast::<Slot>();
+    if !pointer.is_null() && unsafe { (*pointer).epoch } != EPOCH.load(Ordering::Acquire) {
+        // Only a fork child changes epoch. Parent Arc counters are copied, not
+        // owned by this child; neither Drop nor unlock an inherited object.
+        let _ = slots::set(std::ptr::null_mut());
+        CLEANED.with(|flag| flag.set(false));
+        std::ptr::null_mut()
+    } else {
+        pointer
+    }
 }
-#[cfg(any(test, all(any(windows, target_os = "linux"), feature = "gum-agent")))]
-static EPOCH: AtomicU64 = AtomicU64::new(0);
+unsafe fn destroy_slot(value: *mut std::ffi::c_void) {
+    if value.is_null() {
+        return;
+    }
+    let pointer = value.cast::<Slot>();
+    if slots::get() == value {
+        let _ = slots::set(std::ptr::null_mut());
+    }
+    CLEANED.with(|flag| flag.set(true));
+    if unsafe { (*pointer).epoch } != EPOCH.load(Ordering::Acquire) {
+        return;
+    }
+    // Detach before freeing, and suppress only cleanup's own allocator reentry.
+    // Other late destructors still receive a temporary scoped policy slot.
+    let previous = HOST_BACKGROUND.with(|flag| flag.replace(true));
+    DESTROYING.with(|flag| flag.set(true));
+    unsafe {
+        drop(Box::from_raw(pointer));
+    }
+    DESTROYING.with(|flag| flag.set(false));
+    HOST_BACKGROUND.with(|flag| flag.set(previous));
+}
+fn alive() -> bool {
+    !DESTROYING.with(Cell::get)
+}
 #[cfg(any(test, all(any(windows, target_os = "linux"), feature = "gum-agent")))]
 pub(crate) struct EngineCallGuard {
     previous: Option<Lease>,
+    slot: *mut Slot,
     epoch: u64,
+    temporary: bool,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 #[cfg(any(test, all(any(windows, target_os = "linux"), feature = "gum-agent")))]
@@ -49,33 +99,51 @@ impl EngineCallGuard {
         if !alive() {
             return None;
         }
-        // Release the Agent-state lock BEFORE initializing CALLING: registering
-        // a TLS destructor can acquire the native loader lock.
         let engine = crate::state().lock().ok()?.engine.clone();
-        let lease = engine.acquire();
-        Self::with_lease(lease)
+        Self::with_lease(engine.acquire())
     }
-    /// Call after entering the Host Hook guard. Async completions replace its
-    /// active lease with theirs. The caller must not hold Agent-state locks.
     pub(crate) fn with_lease(lease: Lease) -> Option<Self> {
-        let guard = CALLING
-            .try_with(|slot| Self {
-                previous: slot.replace(Some(lease)),
+        if !alive() {
+            return None;
+        }
+        let mut pointer = current_slot();
+        let mut temporary = false;
+        if pointer.is_null() {
+            pointer = Box::into_raw(Box::new(Slot {
+                calling: RefCell::new(None),
                 epoch: EPOCH.load(Ordering::Acquire),
-                _thread: std::marker::PhantomData,
-            })
-            .ok()?;
-        INITIALIZED.with(|value| value.set(true));
-        Some(guard)
+                #[cfg(test)]
+                destroyed: RefCell::new(None),
+            }));
+            temporary = CLEANED.with(Cell::get);
+            if slots::set(pointer.cast()).is_err() {
+                unsafe {
+                    drop(Box::from_raw(pointer));
+                }
+                return None;
+            }
+        }
+        let previous = unsafe { &*pointer }.calling.replace(Some(lease));
+        Some(Self {
+            previous,
+            slot: pointer,
+            epoch: EPOCH.load(Ordering::Acquire),
+            temporary,
+            _thread: std::marker::PhantomData,
+        })
     }
 }
 #[cfg(any(test, all(any(windows, target_os = "linux"), feature = "gum-agent")))]
 impl Drop for EngineCallGuard {
     fn drop(&mut self) {
-        if self.epoch == EPOCH.load(Ordering::Acquire) {
-            let _ = CALLING.try_with(|slot| {
-                slot.replace(self.previous.take());
-            });
+        if self.epoch == EPOCH.load(Ordering::Acquire) && slots::get().cast::<Slot>() == self.slot {
+            unsafe { &*self.slot }.calling.replace(self.previous.take());
+            if self.temporary {
+                let _ = slots::set(std::ptr::null_mut());
+                unsafe {
+                    drop(Box::from_raw(self.slot));
+                }
+            }
         } else {
             std::mem::forget(self.previous.take());
         }
@@ -85,24 +153,23 @@ pub(crate) fn calling(runtime: &Runtime) -> Result<Lease, i32> {
     if !alive() {
         return Err(crate::HH_ERR_INVALID);
     }
-    if INITIALIZED.with(Cell::get) {
-        if let Some(lease) = CALLING
-            .try_with(|slot| slot.borrow().clone())
-            .ok()
-            .flatten()
-        {
+    let pointer = current_slot();
+    if !pointer.is_null() {
+        if let Some(lease) = unsafe { &*pointer }.calling.borrow().clone() {
             return Ok(lease);
         }
     }
-    // Direct ABI callers do not need a thread-local calling context. In
-    // particular, do not register a destructor while they own process state.
     Ok(runtime.acquire())
 }
-#[cfg(all(windows, feature = "gum-agent"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn reset_after_fork() {
     EPOCH.fetch_add(1, Ordering::AcqRel);
-    let _ = CALLING.try_with(|slot| std::mem::forget(slot.take()));
-    INITIALIZED.with(|value| value.set(false));
+    #[cfg(windows)]
+    slots::reset_after_fork();
+    let _ = current_slot();
+    // The safe rebuild worker may be a new thread; original target threads
+    // discard their copied slots lazily on their own first subsequent call.
+    CLEANED.with(|flag| flag.set(false));
 }
 pub(crate) fn trusted_io<T>(call: impl FnOnce() -> T) -> T {
     #[cfg(all(windows, feature = "gum-agent"))]
@@ -124,37 +191,45 @@ mod tests {
     use super::*;
     use std::sync::{atomic::AtomicBool, Arc};
     #[test]
-    fn native_hooks_decline_generation_access_after_thread_local_destruction() {
-        struct Late {
-            runtime: Arc<Runtime>,
-            observed: Arc<AtomicBool>,
-        }
-        impl Drop for Late {
-            fn drop(&mut self) {
-                assert!(EngineCallGuard::enter().is_none());
-                assert!(calling(&self.runtime).is_err());
-                self.observed.store(true, Ordering::Release);
-            }
-        }
-        thread_local! { static LATE: RefCell<Option<Late>> = const { RefCell::new(None) }; }
-        let observed = Arc::new(AtomicBool::new(false));
-        let done = observed.clone();
+    fn native_slots_are_freed_at_thread_exit_and_late_destructors_keep_policy_context() {
+        let destroyed = Arc::new(AtomicBool::new(false));
+        let report = destroyed.clone();
         std::thread::spawn(move || {
             let runtime = hyperhub_engine::resident();
-            // Destructors run in reverse registration order. This destructor
-            // runs after the calling slot.
-            LATE.with(|slot| {
-                slot.replace(Some(Late {
-                    runtime: runtime.clone(),
-                    observed: done,
-                }));
-            });
-            let lease = calling(&runtime).unwrap();
-            let guard = EngineCallGuard::with_lease(lease).unwrap();
+            let guard = EngineCallGuard::with_lease(runtime.acquire()).unwrap();
+            let pointer = current_slot();
+            unsafe { &*pointer }.destroyed.replace(Some(report.clone()));
             drop(guard);
+            assert!(!report.load(Ordering::Acquire));
         })
         .join()
         .unwrap();
-        assert!(observed.load(Ordering::Acquire));
+        assert!(
+            destroyed.load(Ordering::Acquire),
+            "OS TLS must free the actual Slot"
+        );
+        std::thread::spawn(|| {
+            let runtime = hyperhub_engine::resident();
+            let guard = EngineCallGuard::with_lease(runtime.acquire()).unwrap();
+            drop(guard);
+            unsafe {
+                destroy_slot(current_slot().cast());
+            }
+            assert!(CLEANED.with(Cell::get));
+            let guard = EngineCallGuard::with_lease(runtime.acquire()).unwrap();
+            assert!(guard.temporary);
+            assert_eq!(
+                calling(&runtime).unwrap().generation(),
+                runtime.acquire().generation()
+            );
+            drop(guard);
+            assert!(
+                current_slot().is_null(),
+                "late destructor's scoped Slot must be freed immediately"
+            );
+            assert_eq!(runtime.snapshot().unwrap().active.references, 0);
+        })
+        .join()
+        .unwrap();
     }
 }

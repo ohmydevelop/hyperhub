@@ -276,7 +276,7 @@ mod tests {
             audit: AuditWriter::open(None).unwrap(),
             context,
             decision,
-            sessions: SessionRegistry::default(),
+            sessions: SessionRegistry::default().into(),
             trust: None,
             upstream_tunneled: false,
         }

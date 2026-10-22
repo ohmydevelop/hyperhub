@@ -17,6 +17,7 @@ pub(crate) struct SocketState {
     pub(crate) handshake_complete: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct GatewayState {
     pub(crate) proxy: Option<SocketAddr>,
     pub(crate) next_connection_id: u64,
@@ -29,7 +30,7 @@ impl Default for GatewayState {
     fn default() -> Self {
         Self {
             proxy: None,
-            next_connection_id: 1,
+            next_connection_id: 0,
             dns: HashMap::new(),
             sockets: HashMap::new(),
             nonblocking_sockets: HashSet::new(),

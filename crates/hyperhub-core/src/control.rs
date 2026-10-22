@@ -148,6 +148,8 @@ pub struct ControlService {
     engine_hosts: crate::engine_hosts::EngineHosts,
     engine_owner_key: Zeroizing<Vec<u8>>,
     engine_upgrades: Option<crate::upgrade::Coordinator>,
+    release_upgrades: Option<crate::release::Coordinator>,
+    forward_workers: Option<crate::socks::WorkerManager>,
 }
 
 impl ControlService {
@@ -176,6 +178,8 @@ impl ControlService {
             session_state_key: None,
             engine_hosts: Default::default(),
             engine_upgrades: None,
+            release_upgrades: None,
+            forward_workers: None,
         }
     }
 
@@ -197,9 +201,35 @@ impl ControlService {
         self.engine_owner_key = api_key;
         Ok(self)
     }
+    pub fn with_release_upgrades(
+        mut self,
+        directory: &std::path::Path,
+        key: Zeroizing<Vec<u8>>,
+        workers: crate::socks::WorkerManager,
+        target: &std::path::Path,
+    ) -> io::Result<Self> {
+        let engine = self.engine_upgrades.clone().ok_or_else(|| {
+            io::Error::other("Engine coordinator is required before release coordination")
+        })?;
+        self.release_upgrades = Some(crate::release::Coordinator::open(
+            directory,
+            key.clone(),
+            engine,
+            self.engine_hosts.clone(),
+            workers.clone(),
+            target,
+            self.sessions.clone(),
+        )?);
+        self.engine_owner_key = key;
+        self.forward_workers = Some(workers);
+        Ok(self)
+    }
     fn start_engine_upgrades(&self) {
         if let Some(coordinator) = &self.engine_upgrades {
             let _ = coordinator.spawn();
+        }
+        if let Some(coordinator) = &self.release_upgrades {
+            coordinator.spawn();
         }
     }
     pub fn engine_upgrade_coordinator(&self) -> Option<crate::upgrade::Coordinator> {
@@ -220,6 +250,29 @@ impl ControlService {
         self.session_state_path = Some(path);
         self.session_state_key = Some(key);
         self
+    }
+
+    // A ptrace Host owns the entire registered tree. Its original tracee root
+    // can exit while descendants continue; authorize that same manager by its
+    // retained OS incarnation and original Host/root binding, never ancestry
+    // inferred after the original root has disappeared.
+    fn authenticated_ptrace_manager(
+        &self,
+        session: &str,
+        token: &str,
+        peer_pid: Option<u32>,
+        root_pid: u32,
+    ) -> bool {
+        let Some((pid, start)) = peer_pid
+            .and_then(|pid| crate::session::process_start_time(pid).map(|start| (pid, start)))
+        else {
+            return false;
+        };
+        self.sessions.engine_manager_start(session, token, pid) == Some(start)
+            && self
+                .engine_hosts
+                .known_ptrace(session, pid, start, root_pid)
+                .is_some()
     }
 
     fn socks_address(&self, runtime: &RuntimeSnapshot) -> String {
@@ -285,6 +338,7 @@ impl ControlService {
         let request: ControlRequest = read_frame(&mut stream).await?;
         if let ControlRequest::SubscribeEngineHost {
             session_id,
+            native_base_sha256,
             token,
             root_pid,
             backend,
@@ -294,7 +348,15 @@ impl ControlService {
         {
             return self
                 .subscribe_engine_host(
-                    stream, peer_pid, session_id, token, root_pid, backend, snapshot, nonce,
+                    stream,
+                    peer_pid,
+                    session_id,
+                    native_base_sha256,
+                    token,
+                    root_pid,
+                    backend,
+                    snapshot,
+                    nonce,
                 )
                 .await;
         }
@@ -311,6 +373,174 @@ impl ControlService {
         let runtime = self.runtime.snapshot();
         let mut shutdown_requested = false;
         let response = match request {
+            ControlRequest::RetainEngineTree {
+                session_id,
+                token,
+                root_pid,
+            } => {
+                let retained = peer_pid
+                    .filter(|peer| process_ancestors(root_pid).contains(peer))
+                    .zip(peer_pid.and_then(crate::session::process_start_time))
+                    .is_some_and(|(peer, start)| {
+                        self.sessions
+                            .authenticate_member(&session_id, &token, root_pid)
+                            && self
+                                .sessions
+                                .retain_engine_manager(&session_id, &token, peer, start)
+                    });
+                if retained {
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error {
+                        message: "invalid Engine tree manager".into(),
+                    }
+                }
+            }
+            ControlRequest::ReportEngineProcessExit { event, proof } => {
+                if !event.authenticate(&self.engine_owner_key, &proof) {
+                    ControlResponse::Error {
+                        message: "invalid Engine process exit owner proof".into(),
+                    }
+                } else if let Some(peer) = peer_pid {
+                    let manager =
+                        matches!(event.source.as_str(), "ptrace_tree" | "gum_tree").then(|| {
+                            (
+                                event.session_id.clone(),
+                                crate::session::process_start_time(peer),
+                            )
+                        });
+                    match self.engine_hosts.report_exit(event, peer) {
+                        Ok(()) => {
+                            if let Some((session, Some(start))) = manager {
+                                self.sessions.release_engine_manager(&session, peer, start);
+                            }
+                            ControlResponse::Ok
+                        }
+                        Err(error) => ControlResponse::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                } else {
+                    ControlResponse::Error {
+                        message: "Engine process exit requires an OS peer identity".into(),
+                    }
+                }
+            }
+            ControlRequest::ReleaseUpgrade { request, proof } => {
+                if !request.authenticate(&self.engine_owner_key, &proof) {
+                    ControlResponse::Error {
+                        message: "invalid release upgrade owner proof".into(),
+                    }
+                } else if let Some(coordinator) = &self.release_upgrades {
+                    match coordinator.submit(request).await {
+                        Ok(record) => {
+                            coordinator.spawn();
+                            ControlResponse::ReleaseUpgrade { record }
+                        }
+                        Err(error) => ControlResponse::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                } else {
+                    ControlResponse::Error {
+                        message: "release coordinator unavailable; requires_restart".into(),
+                    }
+                }
+            }
+            ControlRequest::GetReleaseUpgrades { id } => ControlResponse::ReleaseUpgrades {
+                status: self
+                    .release_upgrades
+                    .as_ref()
+                    .map(|coordinator| coordinator.status(id.as_deref())),
+            },
+            ControlRequest::ReleaseHelperAck { ack, proof } => {
+                if !ack.authenticate(&self.engine_owner_key, &proof) {
+                    ControlResponse::Error {
+                        message: "invalid release installation acknowledgement proof".into(),
+                    }
+                } else if let Some(coordinator) = &self.release_upgrades {
+                    match coordinator.acknowledge_installation(ack).await {
+                        Ok(record) => {
+                            coordinator.spawn();
+                            ControlResponse::ReleaseHelperAck { record }
+                        }
+                        Err(error) => ControlResponse::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                } else {
+                    ControlResponse::Error {
+                        message: "release coordinator unavailable; requires_restart".into(),
+                    }
+                }
+            }
+            ControlRequest::GetEngineBootstrap {
+                session_id,
+                native_base_sha256,
+                token,
+                pid,
+                root_pid,
+                nonce,
+                host,
+            } => {
+                let peer_matches = peer_pid == Some(pid)
+                    && (pid == root_pid
+                        || (cfg!(target_os = "linux")
+                            && process_ancestors(root_pid).contains(&pid)));
+                let known_tracer = peer_pid == Some(pid)
+                    && crate::session::process_start_time(pid)
+                        .and_then(|start| {
+                            self.engine_hosts
+                                .known_ptrace(&session_id, pid, start, root_pid)
+                        })
+                        .is_some()
+                    && self.sessions.authenticate_control(&session_id, &token);
+                if !(peer_matches
+                    && self
+                        .sessions
+                        .authenticate_member(&session_id, &token, root_pid))
+                    && !known_tracer
+                {
+                    ControlResponse::Error {
+                        message: "invalid Engine bootstrap member".into(),
+                    }
+                } else {
+                    let selected = if let Some(coordinator) = self.engine_upgrades.clone() {
+                        let session = session_id.clone();
+                        let manifest = host.clone();
+                        let native_base_sha256 = native_base_sha256.clone();
+                        tokio::task::spawn_blocking(move || {
+                            coordinator.bootstrap(&session, &manifest, &native_base_sha256)
+                        })
+                        .await
+                        .map_err(io::Error::other)
+                        .and_then(|r| r)
+                    } else {
+                        host.validate()
+                            .map_err(io::Error::other)
+                            .map(|_| (None, None))
+                    };
+                    match selected.and_then(|(stable, candidate)| {
+                        hyperhub_engine::bootstrap::Bootstrap::sign(
+                            hyperhub_engine::bootstrap::Selection {
+                                pid,
+                                root_pid,
+                                nonce,
+                                host,
+                                native_base_sha256,
+                                stable,
+                                candidate,
+                            },
+                            &token,
+                        )
+                    }) {
+                        Ok(bootstrap) => ControlResponse::EngineBootstrap { bootstrap },
+                        Err(error) => ControlResponse::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                }
+            }
             ControlRequest::EngineHostCommand { request, proof } => {
                 if !request.authenticate(&self.engine_owner_key, &proof, unix_timestamp_ms()) {
                     ControlResponse::Error {
@@ -495,6 +725,7 @@ impl ControlService {
                     Some((record, child_pid, executable)) => {
                         if let Err(error) = monitor_new_session_member(
                             &self.sessions,
+                            &self.engine_hosts,
                             &record.session_id,
                             &record.token,
                             child_pid,
@@ -793,6 +1024,7 @@ impl ControlService {
                                 root_pid,
                                 instance,
                                 self.sessions.clone(),
+                                self.engine_hosts.clone(),
                             ) {
                                 Ok(()) => ControlResponse::Ok,
                                 Err(error) => {
@@ -841,7 +1073,21 @@ impl ControlService {
                     && self
                         .sessions
                         .authenticate_member(&session_id, &token, child_pid);
-                let valid_process = if refreshing {
+                let manager = peer_pid.and_then(|peer| {
+                    self.sessions
+                        .engine_manager_start(&session_id, &token, peer)
+                        .filter(|start| {
+                            process_traced_by(child_pid, peer)
+                                || self.engine_hosts.owns_gum_parent(
+                                    &session_id,
+                                    parent_pid,
+                                    peer,
+                                    *start,
+                                )
+                        })
+                        .map(|start| (peer, start))
+                });
+                let valid_process = if refreshing || manager.is_some() {
                     validate_process_path(child_pid, &executable)
                 } else {
                     validate_child_process(parent_pid, child_pid, &executable)
@@ -851,6 +1097,16 @@ impl ControlService {
                         self.sessions.refresh_member_with_policy(
                             &session_id,
                             &token,
+                            child_pid,
+                            executable.clone(),
+                            policy,
+                        )
+                    } else if let Some((manager, start)) = manager {
+                        self.sessions.register_engine_managed_child(
+                            &session_id,
+                            &token,
+                            manager,
+                            start,
                             child_pid,
                             executable.clone(),
                             policy,
@@ -871,6 +1127,7 @@ impl ControlService {
                     } else {
                         match monitor_new_session_member(
                             &self.sessions,
+                            &self.engine_hosts,
                             &session_id,
                             &token,
                             child_pid,
@@ -948,6 +1205,7 @@ impl ControlService {
                 } else {
                     match monitor_new_session_member(
                         &self.sessions,
+                        &self.engine_hosts,
                         &session_id,
                         &token,
                         child_pid,
@@ -1254,6 +1512,7 @@ impl ControlService {
                                 }
                                 monitor_new_session_member(
                                     &self.sessions,
+                                    &self.engine_hosts,
                                     &session_id,
                                     &token,
                                     pid,
@@ -1342,6 +1601,7 @@ impl ControlService {
                 if !self
                     .sessions
                     .authenticate_member(&session_id, &token, root_pid)
+                    && !self.authenticated_ptrace_manager(&session_id, &token, peer_pid, root_pid)
                 {
                     ControlResponse::Error {
                         message: "invalid sandbox refresh session".into(),
@@ -1435,15 +1695,17 @@ impl ControlService {
                 root_pid,
                 event,
             } => {
-                let authenticated = peer_pid.is_some_and(|reporter| {
+                let original_root = peer_pid.is_some_and(|reporter| {
                     process_ancestors(root_pid).contains(&reporter)
                         && self
                             .sessions
                             .authenticate_member(&session_id, &token, root_pid)
-                        && self
-                            .sessions
-                            .authenticate_member(&session_id, &token, event.process_pid)
                 });
+                let authenticated = (original_root
+                    || self.authenticated_ptrace_manager(&session_id, &token, peer_pid, root_pid))
+                    && self
+                        .sessions
+                        .authenticate_member(&session_id, &token, event.process_pid);
                 if authenticated {
                     let diagnostic = event.decision == crate::config::SandboxAction::Pass
                         && !event.source.contains("error")
@@ -1532,15 +1794,17 @@ impl ControlService {
                 features,
                 context,
             } => {
-                let authenticated = peer_pid.is_some_and(|reporter| {
+                let original_root = peer_pid.is_some_and(|reporter| {
                     process_ancestors(root_pid).contains(&reporter)
                         && self
                             .sessions
                             .authenticate_member(&session_id, &token, root_pid)
-                        && self
-                            .sessions
-                            .authenticate_member(&session_id, &token, process_pid)
                 });
+                let authenticated = (original_root
+                    || self.authenticated_ptrace_manager(&session_id, &token, peer_pid, root_pid))
+                    && self
+                        .sessions
+                        .authenticate_member(&session_id, &token, process_pid);
                 if !authenticated {
                     ControlResponse::Error {
                         message: "invalid static smart protection reporter".into(),
@@ -1677,6 +1941,14 @@ impl ControlService {
                     .engine_upgrades
                     .as_ref()
                     .map(|coordinator| coordinator.status(None)),
+                release_upgrades: self
+                    .release_upgrades
+                    .as_ref()
+                    .map(|coordinator| coordinator.status(None)),
+                forward_workers: self
+                    .forward_workers
+                    .as_ref()
+                    .map(|workers| workers.status()),
             },
             ControlRequest::SubscribeSandbox { .. } => {
                 unreachable!("subscription handled before request dispatch")
@@ -1733,6 +2005,7 @@ impl ControlService {
         mut stream: S,
         peer_pid: Option<u32>,
         session_id: String,
+        native_base_sha256: String,
         token: String,
         root_pid: u32,
         backend: hyperhub_engine::host::Backend,
@@ -1745,15 +2018,27 @@ impl ControlService {
             Backend::LinuxPtrace | Backend::LinuxGum => cfg!(target_os = "linux"),
             Backend::WindowsGum => cfg!(windows),
         };
-        let authenticated = platform_matches
-            && peer_pid.is_some_and(|pid| match backend {
-                Backend::LinuxGum | Backend::WindowsGum => pid == root_pid,
-                Backend::LinuxPtrace => process_ancestors(root_pid).contains(&pid),
-            })
-            && self
-                .sessions
-                .authenticate_member(&session_id, &token, root_pid);
-        let instance = self.sessions.member_instance(&session_id, &token, root_pid);
+        let host_start_time = peer_pid.and_then(crate::session::process_start_time);
+        let known = peer_pid.zip(host_start_time).and_then(|(pid, start)| {
+            (backend == Backend::LinuxPtrace)
+                .then(|| {
+                    self.engine_hosts
+                        .known_ptrace(&session_id, pid, start, root_pid)
+                })
+                .flatten()
+        });
+        let initial = peer_pid.is_some_and(|pid| match backend {
+            Backend::LinuxGum | Backend::WindowsGum => pid == root_pid,
+            Backend::LinuxPtrace => process_ancestors(root_pid).contains(&pid),
+        }) && self
+            .sessions
+            .authenticate_member(&session_id, &token, root_pid);
+        let recovered = known.is_some() && self.sessions.authenticate_control(&session_id, &token);
+        let authenticated = platform_matches && host_start_time.is_some() && (initial || recovered);
+        let instance = self
+            .sessions
+            .member_instance(&session_id, &token, root_pid)
+            .or_else(|| recovered.then(|| known.as_ref().unwrap().member_instance));
         if !authenticated || instance.is_none() {
             return write_frame(
                 &mut stream,
@@ -1763,25 +2048,96 @@ impl ControlService {
             )
             .await;
         }
-        let mut registration = self.engine_hosts.register(
-            session_id.clone(),
-            backend,
-            peer_pid.unwrap(),
-            root_pid,
-            instance.unwrap(),
-            crate::session::process_start_time(root_pid),
-            snapshot,
-        )?;
+        if backend == Backend::LinuxPtrace
+            && !self.sessions.retain_engine_manager(
+                &session_id,
+                &token,
+                peer_pid.unwrap(),
+                host_start_time.unwrap(),
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "engine manager session expired",
+            ));
+        }
+        // exec preserves PID and process birth, but closes the previous image's
+        // control socket. Wait for that connection to actually leave instead of
+        // replacing a live subscriber or rejecting the new image prematurely.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let valid = || {
+            peer_pid.and_then(crate::session::process_start_time) == host_start_time
+                && if backend == Backend::LinuxPtrace {
+                    self.sessions.authenticate_control(&session_id, &token)
+                } else {
+                    self.sessions.member_instance(&session_id, &token, root_pid) == instance
+                }
+        };
+        let mut registration = loop {
+            if !valid() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "engine Host session expired",
+                ));
+            }
+            match self.engine_hosts.register(
+                session_id.clone(),
+                native_base_sha256.clone(),
+                backend,
+                peer_pid.unwrap(),
+                root_pid,
+                instance.unwrap(),
+                crate::session::process_start_time(root_pid)
+                    .or_else(|| known.as_ref().and_then(|host| host.root_start_time)),
+                host_start_time,
+                snapshot.clone(),
+            ) {
+                Ok(registration) => break registration,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "Engine startup admission timed out",
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        for reporter in process_ancestors(root_pid) {
+            if let Some(start) = crate::session::process_start_time(reporter) {
+                self.engine_hosts
+                    .authorize_exit_reporter(&registration.id, reporter, start)?;
+            }
+        }
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+        let mut admission = tokio::time::interval(Duration::from_millis(25));
+        let mut admitted = false;
         let mut sequence = 0u64;
         loop {
-            if self.sessions.member_instance(&session_id, &token, root_pid) != instance {
+            if !valid() {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "engine Host session expired",
                 ));
             }
             let (mut delivery, is_heartbeat) = tokio::select! {
+                _ = admission.tick(), if !admitted => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "Engine startup admission timed out"));
+                    }
+                    let ready = if let Some(coordinator) = self.engine_upgrades.clone() {
+                        let id = registration.id.clone();
+                        tokio::task::spawn_blocking(move || coordinator.admit(&id)).await.map_err(io::Error::other)??
+                    } else { true };
+                    if ready {
+                        let enrolled = hyperhub_engine::host::Enrolled::sign(registration.id.clone(), nonce, &token)?;
+                        write_frame(&mut stream, &enrolled).await?;
+                        admitted = true;
+                    }
+                    continue;
+                }
                 command = registration.receiver.recv() => (command.ok_or_else(|| io::Error::other("engine Host queue closed"))?, false),
                 _ = heartbeat.tick() => {
                     sequence = sequence.checked_add(1).ok_or_else(|| io::Error::other("engine heartbeat exhausted"))?;
@@ -1793,7 +2149,12 @@ impl ControlService {
                     .delivered(&registration.id, &delivery.request_id)?;
             }
             crate::engine_hosts::sign_delivery(&mut delivery, &token, &nonce)?;
-            let acknowledgement = tokio::time::timeout(Duration::from_secs(35), async {
+            let acknowledgement_timeout = if admitted {
+                Duration::from_secs(35)
+            } else {
+                deadline.saturating_duration_since(tokio::time::Instant::now())
+            };
+            let acknowledgement = tokio::time::timeout(acknowledgement_timeout, async {
                 write_frame(&mut stream, &delivery).await?;
                 read_frame::<_, Acknowledgement>(&mut stream).await
             })
@@ -1949,11 +2310,15 @@ fn open_validated_root_process(pid: u32, executable: &str) -> io::Result<usize> 
 
 fn monitor_new_session_member(
     sessions: &SessionRegistry,
+    engine_hosts: &crate::engine_hosts::EngineHosts,
     session_id: &str,
     token: &str,
     pid: u32,
     executable: &str,
 ) -> io::Result<()> {
+    if let Some(start) = crate::session::process_start_time(pid) {
+        engine_hosts.note_member_birth(session_id, pid, start)?;
+    }
     let instance = sessions
         .member_instance(session_id, token, pid)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "session member disappeared"))?;
@@ -1970,6 +2335,7 @@ fn monitor_new_session_member(
         pid,
         instance,
         sessions.clone(),
+        engine_hosts.clone(),
     ) {
         sessions.member_exited(session_id, pid, instance);
         return Err(error);
@@ -1984,16 +2350,30 @@ fn monitor_session_member(
     pid: u32,
     instance: u64,
     sessions: SessionRegistry,
+    engine_hosts: crate::engine_hosts::EngineHosts,
 ) -> io::Result<()> {
     let result = std::thread::Builder::new()
         .name(format!("hyperhub-session-{session_id}-{pid}"))
         .spawn(move || {
             let handle = handle as windows_sys::Win32::Foundation::HANDLE;
             unsafe {
+                use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes};
+                let mut creation: windows_sys::Win32::Foundation::FILETIME = std::mem::zeroed();
+                let mut ended = creation;
+                let mut kernel = creation;
+                let mut user = creation;
+                let birth_known =
+                    GetProcessTimes(handle, &mut creation, &mut ended, &mut kernel, &mut user) != 0;
                 windows_sys::Win32::System::Threading::WaitForSingleObject(
                     handle,
                     windows_sys::Win32::System::Threading::INFINITE,
                 );
+                let mut code = 0u32;
+                if birth_known && GetExitCodeProcess(handle, &mut code) != 0 {
+                    let start =
+                        ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+                    engine_hosts.windows_process_exit(&session_id, pid, start, code);
+                }
                 windows_sys::Win32::Foundation::CloseHandle(handle);
             }
             sessions.member_exited(&session_id, pid, instance);
@@ -2122,6 +2502,7 @@ fn monitor_session_member(
     pid: u32,
     instance: u64,
     sessions: SessionRegistry,
+    _engine_hosts: crate::engine_hosts::EngineHosts,
 ) -> io::Result<()> {
     let handle = unsafe { Box::from_raw(handle as *mut LinuxProcessHandle) };
     std::thread::Builder::new()
@@ -2142,6 +2523,7 @@ fn monitor_session_member(
     _pid: u32,
     _instance: u64,
     _sessions: SessionRegistry,
+    _engine_hosts: crate::engine_hosts::EngineHosts,
 ) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -2236,6 +2618,29 @@ fn process_ancestors(client_pid: u32) -> Vec<u32> {
         current = parent;
     }
     ancestors
+}
+
+// Kernel ptrace ownership remains authoritative after a target is reparented.
+// TracerPid can name a thread; authenticate its TGID against the OS control peer.
+fn process_traced_by(child: u32, manager: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        fn field(pid: u32, key: &str) -> Option<u32> {
+            std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .ok()?
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.trim().parse().ok())
+        }
+        field(child, "TracerPid:")
+            .filter(|tracer| *tracer != 0)
+            .and_then(|tracer| field(tracer, "Tgid:"))
+            == Some(manager)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (child, manager);
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3490,3 +3895,7 @@ mod tests {
         let _ = socks_task.await;
     }
 }
+
+#[cfg(test)]
+#[path = "engine_bootstrap_tests.rs"]
+mod engine_bootstrap_tests;

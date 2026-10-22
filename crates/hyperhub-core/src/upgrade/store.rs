@@ -15,13 +15,13 @@ struct Envelope {
     proof: Vec<u8>,
 }
 
-pub(super) struct Store {
+pub(crate) struct Store {
     path: PathBuf,
     key: Zeroizing<Vec<u8>>,
     _lock: File,
 }
 impl Store {
-    pub(super) fn open(directory: &Path, key: Zeroizing<Vec<u8>>) -> io::Result<Self> {
+    pub(crate) fn open(directory: &Path, key: Zeroizing<Vec<u8>>) -> io::Result<Self> {
         private_directory(directory)?;
         let lock_path = directory.join("coordinator.lock");
         let lock = match open(&lock_path, true) {
@@ -51,7 +51,7 @@ impl Store {
         mac.update(bytes);
         Ok(mac)
     }
-    pub(super) fn load<T: DeserializeOwned>(&self) -> io::Result<Option<T>> {
+    pub(crate) fn load<T: DeserializeOwned>(&self) -> io::Result<Option<T>> {
         let file = match open(&self.path, false) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -82,7 +82,7 @@ impl Store {
             .map(Some)
             .map_err(io::Error::other)
     }
-    pub(super) fn save(&self, value: &impl Serialize) -> io::Result<()> {
+    pub(crate) fn save(&self, value: &impl Serialize) -> io::Result<()> {
         let value = serde_json::to_string(value).map_err(io::Error::other)?;
         let proof = self.mac(value.as_bytes())?.finalize().into_bytes().to_vec();
         let bytes = serde_json::to_vec(&Envelope {

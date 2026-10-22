@@ -1,6 +1,8 @@
 //! Shared network Host regression. Compiles a native module from source and
 //! exercises the same exported C ABI used by the Gum socket adapters.
 use crate::*;
+#[path = "../../../tests/fixtures/engine_fixture_build.rs"]
+mod engine_fixture_build;
 use hyperhub_engine::management::{Command, Reply, MIN_REPLY};
 use hyperhub_runtime::{Settings, Stage};
 use sha2::{Digest, Sha256};
@@ -97,6 +99,78 @@ fn packet(socket: u64, phase: u32) -> Vec<u8> {
     bytes
 }
 
+fn check_capabilities(lease: &hyperhub_runtime::Lease, upgraded: bool) {
+    use hyperhub_engine::contract::*;
+    for id in ["rule-".repeat(2048), "规则标识".repeat(1024)] {
+        let protection = format!("profile-{id}");
+        for operation in [FILE_POLICY, PROCESS_POLICY] {
+            let patterns = if operation == FILE_POLICY {
+                serde_json::json!(["vault"])
+            } else {
+                serde_json::json!([{"executable":"vault", "command_line":""}])
+            };
+            let request = PolicyInput {
+                snapshot: serde_json::json!({"default_action":"deny", "rules":[{
+                "id":id,"action":"pass", "patterns":patterns,"operations":["read"],"protection":protection}]}),
+                target: "/vault/key".into(),
+                operation: "read".into(),
+                command_line: String::new(),
+            };
+            let decision = hyperhub_engine::policy(lease, operation, &request).unwrap();
+            assert_eq!(decision.action, "pass");
+            assert_eq!(decision.rule_id.as_deref(), Some(id.as_str()));
+            assert_eq!(decision.protection_rule_id.as_deref(), Some(id.as_str()));
+            assert_eq!(decision.protection.as_deref(), Some(protection.as_str()));
+        }
+        let request = FirewallInput {
+            snapshot: serde_json::json!({"default_action":"deny", "rules":[{
+            "id":id,"action":"pass","protection":protection,"endpoints":[{
+                "target":{"kind":"domain","value":{"host":"example.test","wildcard":false}},"port":443}]}]}),
+            hostname: Some("example.test".into()),
+            ip: "198.18.0.1".parse().unwrap(),
+            port: 443,
+            bypass: false,
+            dns: false,
+        };
+        let decision = hyperhub_engine::firewall(lease, &request).unwrap();
+        assert_eq!(decision.action, "pass");
+        assert_eq!(decision.rule_id.as_deref(), Some(id.as_str()));
+        assert_eq!(decision.protection_rule_id.as_deref(), Some(id.as_str()));
+        assert_eq!(decision.protection.as_deref(), Some(protection.as_str()));
+    }
+
+    for operation in [FILE_POLICY, PROCESS_POLICY] {
+        let decision=hyperhub_engine::policy(lease,operation,&PolicyInput { snapshot:serde_json::json!({"default_action":"pass","error_action":"deny","rules":[]}),target:"/isolated/engine-policy-deny".into(),operation:"read".into(),command_line:"ignored".into() }).unwrap();
+        assert_eq!(decision.action, if upgraded { "deny" } else { "pass" });
+    }
+    let decision=hyperhub_engine::firewall(lease,&FirewallInput { snapshot:serde_json::json!({"default_action":"pass","rules":[{"id":"network","action":"deny","endpoints":[{"target":{"kind":"network","value":"10.0.0.0/8"},"port":443}]}]}),hostname:None,ip:"10.1.2.3".parse().unwrap(),port:443,bypass:false,dns:false }).unwrap();
+    assert_eq!(decision.action, "deny");
+    assert_eq!(decision.rule_id.as_deref(), Some("network"));
+    let plan = hyperhub_engine::child_plan(
+        lease,
+        &ChildInput {
+            hook: true,
+            caller_suspended: false,
+            creation_flags: 0x100,
+            suspended_flag: 2,
+            unicode_environment_flag: 4,
+        },
+    )
+    .unwrap();
+    assert!(plan.inject && plan.resume_after_ready);
+    assert_eq!(plan.creation_flags, 0x106);
+    let pem = b"-----BEGIN CERTIFICATE-----\nexisting\n-----END CERTIFICATE-----\n";
+    let bundle = hyperhub_engine::trust_bundle(lease, "pem", pem, b"test-root").unwrap();
+    assert_eq!(
+        bundle.ends_with(b"# upgraded Engine trust bundle\n"),
+        upgraded
+    );
+    let output=hyperhub_engine::call(lease,SANITIZE_ACTION,&serde_json::json!({"executable":"curl","argv":["curl","--token","private-test-value"],"context":{"sensitive_files_read":0,"sensitive_bytes_read":0,"external_input_seen":false,"prompt_injection_seen":false,"destination_authorized":null,"managed_secret_match":false,"static_sandbox_deny":false}})).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("private-test-value"));
+    assert!(text.contains("<redacted>"));
+}
+
 #[test]
 fn native_upgrade_preserves_host_state_and_pins_all_socket_handshake_phases() {
     let root = Root::new();
@@ -110,7 +184,9 @@ fn native_upgrade_preserves_host_state_and_pins_all_socket_handshake_phases() {
         .0
         .join(format!("network-upgrade{}", std::env::consts::DLL_SUFFIX));
     let version = "fixture-upgraded";
-    let output = std::process::Command::new("rustc")
+    let mut command = std::process::Command::new("rustc");
+    engine_fixture_build::configure(&mut command);
+    let output = command
         .arg("--edition=2021")
         .arg("--crate-type=cdylib")
         .arg(&fixture)
@@ -127,6 +203,69 @@ fn native_upgrade_preserves_host_state_and_pins_all_socket_handshake_phases() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    {
+        let helper = root.0.join(format!(
+            "native-module-lifetime{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        let mut compiler = std::process::Command::new("rustc");
+        engine_fixture_build::configure(&mut compiler);
+        let output = compiler
+            .arg("--edition=2021")
+            .arg(fixture.with_file_name("native_module_lifetime.rs"))
+            .arg("-o")
+            .arg(&helper)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new(helper)
+            .arg(&module)
+            .arg(root.0.join("lifecycle-cache"))
+            .arg(version)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "native module lifecycle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("NATIVE_MODULE_LIFETIME_OK"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let helper = root.0.join("native-fork-runtime");
+        let source = fixture.with_file_name("native_fork_runtime.rs");
+        let mut compiler = std::process::Command::new("rustc");
+        engine_fixture_build::configure(&mut compiler);
+        let output = compiler
+            .arg("--edition=2021")
+            .arg(source)
+            .arg("-o")
+            .arg(&helper)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new(helper)
+            .arg(&module)
+            .arg(root.0.join("fork-cache"))
+            .arg(version)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "native fork helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("NATIVE_FORK_OK"));
+    }
     let bytes = fs::read(&module).unwrap();
     let manifest = hyperhub_engine::manifest(&bytes, version);
     let mut core = crate::tests::configured_core();
@@ -135,6 +274,8 @@ fn native_upgrade_preserves_host_state_and_pins_all_socket_handshake_phases() {
         ..Settings::default()
     });
     let _restore = Restore(Some(std::mem::replace(&mut *state().lock().unwrap(), core)));
+    let old_engine = state().lock().unwrap().engine.acquire();
+    check_capabilities(&old_engine, false);
     let host_pointer = state() as *const _;
     let pid = std::process::id();
     let name = std::ffi::CString::new("Original.Example.").unwrap();
@@ -179,6 +320,11 @@ fn native_upgrade_preserves_host_state_and_pins_all_socket_handshake_phases() {
     );
     assert!(matches!(control(Command::Observe), Reply::Ok));
     assert_eq!(snapshot().active.version, version);
+    check_capabilities(&old_engine, false);
+    let current_engine = state().lock().unwrap().engine.acquire();
+    check_capabilities(&current_engine, true);
+    drop(current_engine);
+    drop(old_engine);
     assert_eq!(
         {
             let core = state().lock().unwrap();

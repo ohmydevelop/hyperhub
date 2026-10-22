@@ -45,6 +45,7 @@ description: Use for HyperHub CLI configuration and runtime operations, includin
 | 配置智能防护 | 参考“智能防护 Profile”“路由与智能防护绑定”“沙盒与智能防护”，确认 observe/enforce 与失败动作 | Proposal + 审批后 Provider/引用验证 |
 | 配置 SSH 审计 | 同时核对 SSH 凭证、SSH 审计 Profile、路由绑定与 transcript 语义 | Proposal + 审批后结构化事件验证 |
 | 启停 Serve | `start`、`stop`、`restart`、`status --json`；冷启动和重启使用 API Key | 实际运行态 |
+| 升级 HyperHub | `upgrade`、`upgrade status [id]`，按发布事务和安装确认判断结果 | 实际升级阶段 |
 | 测试目标程序 | Serve 运行后使用 `hyperhub run -- program args...` | `runtime_tested` |
 | 排查操作失败 | 保留原错，按错误表收集 `status`、`doctor`、`logs` 与版本 | 可操作诊断或实现调试入口 |
 | 调试实现 | 按仓库开发流程检查源码、测试与构建；仍以 CLI 实测验证用户可见结果 | 根因、修复与回归 |
@@ -283,6 +284,15 @@ hyperhub run -- program args...
 - 普通配置保存保持现有密钥代次，并在保存时刷新运行封套，无需等编辑器退出；只有明确修改管理员密码才轮换配置密钥。遇到 `runtime configuration key is out of date` 时，请用户在真实终端运行 `hyperhub config`，验证管理员密码后不作修改、正常退出，或使用上述管理员密码文件修复路径；不要删除或重建原配置。
 - Linux 默认使用 ptrace；只有用户明确要求 Gum 时才加 `--backend gum`。
 - 目标测试使用 `--` 分隔 HyperHub 参数和目标程序参数。
+
+## 在线升级
+
+- 用户要求升级时使用 `hyperhub upgrade`；随后通过 `hyperhub upgrade status [id]` 或 `hyperhub status --json` 跟踪常驻 Serve 内的发布事务。认证自动使用当前 Home 的运行时 API Key。
+- `Upgrade accepted` 只代表受理。CLI 退出后事务继续；健康观察、全局完成决定、安装确认与旧连接排空分别显示。仅 `installation_confirmed: true` 能说明安装文件已确认，`draining` 表示旧连接仍使用旧代次，`complete` 才代表事务排空完成。
+- 旧连接可能长期保留；不要为了尽快得到 `complete` 重启 Serve、重启目标或关闭连接。最多四个旧代次，达到上限时报告容量原因。
+- 失败或确认丢失时先查询具体 ID；用户已授权恢复该事务时使用 `hyperhub upgrade recover <id>`。用户要求中止时使用 `hyperhub upgrade abort <id>`；全局完成决定持久化后不能再回滚安装，CLI 会明确拒绝中止。
+- `installation_pending` 表示无法确认安装成功；保留事务 ID 和实际错误，不把它报告为升级完成。`requires_restart` 表示基座、Hook 集合或状态契约不兼容，报告对应进程和维护要求，不自动采取重启替代。
+- 首次从 v0.2.12 或更早版本迁移需要在维护窗口安装新基座并重启受管理程序；后续兼容版本才保留目标 PID、启动时间和旧连接。macOS 尚无受管理后端，不能宣称其在线 Hook 升级可用。
 
 ## 错误处理与升级判断
 

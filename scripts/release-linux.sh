@@ -41,6 +41,9 @@ cargo build --release --locked \
 
 export HYPERHUB_EMBEDDED_AGENT_PATH="$CARGO_TARGET_DIR/$target/release/libhyperhub_gum_agent.so"
 test -f "$HYPERHUB_EMBEDDED_AGENT_PATH"
+cargo build --release --locked -p hyperhub-engine --target "$target"
+export HYPERHUB_EMBEDDED_ENGINE_PATH="$CARGO_TARGET_DIR/$target/release/libhyperhub_engine.so"
+test -f "$HYPERHUB_EMBEDDED_ENGINE_PATH"
 
 cargo build --release --locked \
   -p hyperhub \

@@ -89,9 +89,15 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
                 context.policy_version = decision.version;
                 context.rule_id = decision.rule_id;
                 context.decision_source = decision.source;
-                if context.should_hook {
-                    context.effective_thread_flags |= THREAD_CREATE_FLAGS_CREATE_SUSPENDED;
-                }
+                let plan = engine_child_plan(
+                    context.should_hook,
+                    context.effective_thread_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED != 0,
+                    context.effective_thread_flags,
+                    THREAD_CREATE_FLAGS_CREATE_SUSPENDED,
+                    0,
+                )?;
+                context.should_hook = plan.inject;
+                context.effective_thread_flags = plan.creation_flags;
                 Ok(HookDecision::Continue)
             }
         },
@@ -106,10 +112,46 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
     registrar.retain_plugin(plugin)
 }
 
+fn engine_child_plan(
+    hook: bool,
+    caller_suspended: bool,
+    flags: u32,
+    suspended: u32,
+    unicode: u32,
+) -> Result<hyperhub_engine::contract::ChildPlan, HookError> {
+    let engine = crate::state()
+        .lock()
+        .map_err(|_| HookError::new("child-process: Agent state unavailable"))?
+        .engine
+        .clone();
+    let lease = crate::engine_call::calling(&engine)
+        .map_err(|_| HookError::new("child-process: Engine lease unavailable"))?;
+    hyperhub_engine::child_plan(
+        &lease,
+        &hyperhub_engine::contract::ChildInput {
+            hook,
+            caller_suspended,
+            creation_flags: flags,
+            suspended_flag: suspended,
+            unicode_environment_flag: unicode,
+        },
+    )
+    .map_err(|_| HookError::new("child-process: Engine child plan failed"))
+}
+
 fn prepare_win32_child(context: &mut ChildProcessContext) -> HookCallbackResult<i32> {
+    let plan = engine_child_plan(
+        context.should_hook,
+        context.caller_requested_suspended,
+        context.creation_flags,
+        CREATE_SUSPENDED,
+        CREATE_UNICODE_ENVIRONMENT,
+    )?;
+    context.should_hook = plan.inject;
     if !context.should_hook {
         return Ok(HookDecision::Continue);
     }
+    context.caller_requested_suspended = !plan.resume_after_ready;
     let event_name = super::windows::child_event_name();
     let Some(ready_event) = (unsafe { super::windows::create_child_event(&event_name) }) else {
         return if super::windows::observe_child_failures() {
@@ -137,7 +179,7 @@ fn prepare_win32_child(context: &mut ChildProcessContext) -> HookCallbackResult<
             };
         }
     };
-    context.creation_flags |= CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+    context.creation_flags = plan.creation_flags;
     context.environment_block = Some(block);
     context.environment = context
         .environment_block

@@ -44,9 +44,12 @@ use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{timeout, Duration};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+mod authority;
+pub(crate) use authority::TlsAuthority;
 
 static NEXT_UPGRADE_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_BODY_CAPTURE_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -63,6 +66,8 @@ pub struct TlsMitm {
     issuer: Issuer<'static, KeyPair>,
     ca_pem: String,
     ca_der: CertificateDer<'static>,
+    ca_key_pem: zeroize::Zeroizing<String>,
+    extra_roots: Vec<CertificateDer<'static>>,
     cache: Mutex<HashMap<String, Arc<ServerConfig>>>,
     outbound: Arc<ClientConfig>,
     outbound_http1: Arc<ClientConfig>,
@@ -92,32 +97,9 @@ impl TlsMitm {
         let certificate = params.self_signed(&key).map_err(io::Error::other)?;
         let ca_pem = certificate.pem();
         let ca_der = certificate.der().clone();
+        let ca_key_pem = zeroize::Zeroizing::new(key.serialize_pem());
         let issuer = Issuer::from_ca_cert_pem(&ca_pem, key).map_err(io::Error::other)?;
-
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        for certificate in root_certificates {
-            roots.add(certificate).map_err(|error| {
-                io::Error::other(format!("root certificate could not be trusted: {error}"))
-            })?;
-        }
-        let mut outbound = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        outbound.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let mut outbound_http1 = outbound.clone();
-        outbound_http1.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let mut outbound_raw = outbound.clone();
-        outbound_raw.alpn_protocols.clear();
-        Ok(Arc::new(Self {
-            issuer,
-            ca_pem,
-            ca_der,
-            cache: Mutex::new(HashMap::new()),
-            outbound: Arc::new(outbound),
-            outbound_http1: Arc::new(outbound_http1),
-            outbound_raw: Arc::new(outbound_raw),
-        }))
+        Self::with_identity(issuer, ca_pem, ca_der, ca_key_pem, root_certificates)
     }
 
     pub fn ca_pem(&self) -> &str {
@@ -1343,6 +1325,11 @@ where
     let service_context = context.clone();
     let protection_state = protection.connection_state();
     let service_body_capture = body_capture.clone();
+    // Hyper completes its HTTP/1 connection future after a successful 101.
+    // Keep upgraded business IO in the original connection lifetime. Dropping
+    // this future also drops the JoinSet and cancels every upgraded stream.
+    let upgrades = Arc::new(Mutex::new(JoinSet::new()));
+    let service_upgrades = upgrades.clone();
     let origin_form = outbound_origin_form;
     let service = service_fn(move |request: Request<Incoming>| {
         let sender = sender.clone();
@@ -1353,6 +1340,7 @@ where
         let audit = service_audit.clone();
         let context = service_context.clone();
         let body_capture = service_body_capture.clone();
+        let upgrades = service_upgrades.clone();
         let origin_form = origin_form;
         async move {
             let mut request_context = derive_request_context(&context, &request);
@@ -1803,7 +1791,9 @@ where
                             Some(json!({"protocol": protocol})),
                         );
                     }
-                    tokio::spawn(forward_http_upgrade(
+                    let mut tasks = upgrades.lock().unwrap_or_else(|error| error.into_inner());
+                    while tasks.try_join_next().is_some() {}
+                    tasks.spawn(forward_http_upgrade(
                         client_upgrade,
                         upstream_upgrade,
                         audit.clone(),
@@ -1819,7 +1809,7 @@ where
             Ok(response.map(|body| body.boxed_unsync()))
         }
     });
-    let result = if h2 {
+    let mut result = if h2 {
         let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
         builder.enable_connect_protocol();
         builder
@@ -1835,6 +1825,15 @@ where
             .await
             .map_err(|error| io::Error::other(error.to_string()))
     };
+    let mut tasks =
+        std::mem::take(&mut *upgrades.lock().unwrap_or_else(|error| error.into_inner()));
+    while let Some(completed) = tasks.join_next().await {
+        if let Err(error) = completed {
+            if result.is_ok() {
+                result = Err(io::Error::other(error));
+            }
+        }
+    }
     // 连接结束：等待 body 捕获写盘任务完成后汇总一次审计事件。
     if let Some(capture) = body_capture.lock().await.take() {
         let writes = capture.writes.lock().unwrap().drain(..).collect::<Vec<_>>();
@@ -2421,7 +2420,7 @@ mod tests {
             audit: AuditWriter::open(None).unwrap(),
             context,
             decision,
-            sessions: SessionRegistry::default(),
+            sessions: SessionRegistry::default().into(),
             trust: None,
             upstream_tunneled: false,
         }

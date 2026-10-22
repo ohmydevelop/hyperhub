@@ -54,6 +54,9 @@ windows-sys = { version = "0.61", features = [
 
 [build-dependencies]
 sha2 = "0.10"
+quote = "1"
+proc-macro2 = "1"
+syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
 rcgen = "0.14"

@@ -1,5 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
+#[path = "../../build_support/native_base.rs"]
+#[allow(dead_code)] // The Engine build also uses the shared Serve fingerprint.
+mod native_base;
 
 const FRIDA_VERSION: &str = "17.17.0";
 const NEEDLE3_REVISION: &str = "c1fc4d4cb32993156a880ceb8ff171b03b1f166a";
@@ -7,13 +10,16 @@ const NEEDLE3_MODEL_SHA256: &str =
     "c9d915eca282ed42d1a09b143b592adb4cc6744ffe2d294adf5cfc5548170c38";
 
 fn main() {
+    println!("cargo:rerun-if-changed=../../build_support/native_base.rs");
     println!("cargo:rerun-if-env-changed=HYPERHUB_FRIDA_CORE_ROOT");
     println!("cargo:rerun-if-env-changed=HYPERHUB_EMBEDDED_AGENT_PATH");
+    println!("cargo:rerun-if-env-changed=HYPERHUB_EMBEDDED_ENGINE_PATH");
     println!("cargo:rerun-if-env-changed=HYPERHUB_NEEDLE3_MODEL");
     println!("cargo:rerun-if-env-changed=HYPERHUB_NEEDLE3_RUNNER");
     prepare_embedded_skill();
     prepare_needle3();
     prepare_embedded_agent();
+    prepare_embedded_engine();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }
@@ -293,6 +299,57 @@ fn file_sha256(path: &std::path::Path) -> Option<String> {
     )
 }
 
+fn prepare_embedded_engine() {
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is required"));
+    let metadata = output.join("embedded_engine.rs");
+    if std::env::var_os("CARGO_FEATURE_EMBEDDED_AGENT").is_none() {
+        std::fs::write(metadata, "const EMBEDDED_ENGINE: &[u8] = &[];\n")
+            .expect("cannot write empty Engine metadata");
+        return;
+    }
+    let source = std::env::var_os("HYPERHUB_EMBEDDED_ENGINE_PATH")
+        .map(PathBuf::from)
+        .expect("HYPERHUB_EMBEDDED_ENGINE_PATH is required with embedded-agent");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let bytes = std::fs::read(&source).unwrap_or_else(|error| {
+        panic!("cannot read embedded Engine {}: {error}", source.display())
+    });
+    validate_embedded_agent(
+        &bytes,
+        &std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default(),
+        &std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default(),
+    )
+    .unwrap_or_else(|error| panic!("invalid embedded Engine {}: {error}", source.display()));
+    validate_native_base_marker(&bytes, "Engine");
+    let destination = output.join("embedded-engine.bin");
+    std::fs::write(&destination, &bytes).expect("cannot copy embedded Engine");
+    std::fs::write(
+        metadata,
+        format!(
+            "const EMBEDDED_ENGINE: &[u8] = include_bytes!({:?});\n",
+            destination
+        ),
+    )
+    .expect("cannot write embedded Engine metadata");
+}
+
+fn validate_native_base_marker(bytes: &[u8], component: &str) {
+    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    let expected = native_base::fingerprint(
+        &root,
+        &std::env::var("TARGET").unwrap(),
+        &std::env::var("CARGO_CFG_TARGET_OS").unwrap(),
+    )
+    .expect("cannot fingerprint resident native Base");
+    let marker = format!("{}{expected}\0", native_base::MARKER_PREFIX);
+    if !bytes
+        .windows(marker.len())
+        .any(|bytes| bytes == marker.as_bytes())
+    {
+        panic!("embedded {component} was built for a different native Base; rebuild the {component} before embedding");
+    }
+}
+
 fn prepare_embedded_agent() {
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is required"));
     let metadata = output.join("embedded_agent_meta.rs");
@@ -317,6 +374,7 @@ fn prepare_embedded_agent() {
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     validate_embedded_agent(&bytes, &target_os, &target_arch)
         .unwrap_or_else(|error| panic!("invalid embedded Agent {}: {error}", source.display()));
+    validate_native_base_marker(&bytes, "Agent");
     let name = match target_os.as_str() {
         "windows" => "hyperhub_gum_agent.dll",
         "linux" => "libhyperhub_gum_agent.so",

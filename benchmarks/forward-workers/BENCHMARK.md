@@ -1,0 +1,4549 @@
+# HyperHub forwarding\-worker local component benchmark 测试报告
+
+**报告状态：所选阶段门槛满足。** 所选阶段：implemented。
+
+阶段、条件假设和缺口分别列出；本报告不认证真实执行或模型完备性。
+
+- schema_version: 1\.1
+- target: HyperHub forwarding\-worker local component
+- version_or_revision: 0\.2\.13 working tree; content\-fingerprinted component snapshot
+- model_digest: 6ec4c18b1e24d970e0d92e61c788a834d5d2e4a79205f630c2c210ad7df4dfe9
+- plan_digest: 51e1a8ae5261a9fe2fb92557df70450084d5f8b88195f1faeac1f6ef0c9b1eda
+
+导航：[准备](#准备) · [可靠性场景](#可靠性场景) · [性能场景](#性能场景) · [覆盖映射](#覆盖映射) · [未覆盖与后续](#未覆盖与后续)
+
+## 不变量
+
+- 正确性 preflight 与性能计时分开；性能 case 必须关联 preflight。
+- 覆盖分母来自冻结模型；条件假设、未决项与排除项保持可见。
+- 未运行阶段不写通过结论；测量有效和性能验收分别报告。
+
+## 准备
+
+### 环境
+
+待记录；本次未提交执行环境或运行证据。
+
+### 配置
+
+```json
+{
+  "constraints": [],
+  "factors": [
+    {
+      "id": "state",
+      "values": [
+        "baseline",
+        "upgrade-0",
+        "upgrade-1",
+        "upgrade-4"
+      ]
+    }
+  ]
+}
+```
+
+### 共用前提与清理
+
+```json
+{
+  "cleanup": [
+    "Close clients; mark workers draining and wait for confirmed child OS exit; remove only task-owned fixture directories."
+  ],
+  "generation_notes": [
+    "Sub-agent owns forwarding component; main agent reviews and publishes full project.",
+    "The checker validates declarations and evidence hashes, not execution authenticity or semantic completeness."
+  ],
+  "preconditions": [
+    "Built final CLI or source worker probe matching frozen sources; Rust/Cargo and local compiler available.",
+    "Native resource collection on Linux or Windows; task-owned files and loopback sockets only."
+  ]
+}
+```
+
+### 目标范围与工作负载
+
+```json
+{
+  "scope": {
+    "delivered_level": "component",
+    "goal": "Evaluate accepted forwarding worker budgets and retained-generation overhead.",
+    "rationale": "Parent project release/hook tests remain separate. This is exactly the requested worker component performance task, not project completion.",
+    "requested_level": "component"
+  },
+  "workloads": [
+    {
+      "applicability": "required",
+      "goal": "Measure prepare and commit separately under retained-generation states.",
+      "id": "W-switch",
+      "obligation_ids": [
+        "O-flows",
+        "O-control"
+      ],
+      "rationale": "Accepted 30s and100ms budgets bind actual API completion.",
+      "role": "primary",
+      "source_refs": [
+        {
+          "first": 1,
+          "last": 84,
+          "path": "benchmarks/forward-workers/CONTRACT.md"
+        },
+        {
+          "first": 117,
+          "last": 341,
+          "path": "crates/hyperhub-core/src/forward/manager.rs"
+        },
+        {
+          "first": 1,
+          "last": 316,
+          "path": "crates/hyperhub-core/src/forward/manager/resident.rs"
+        }
+      ]
+    },
+    {
+      "applicability": "required",
+      "goal": "Compare valid closed-loop echo and concurrent admission overhead at baseline and retention boundaries.",
+      "id": "W-business",
+      "obligation_ids": [
+        "O-flows",
+        "O-oracle",
+        "O-echo",
+        "O-admission"
+      ],
+      "rationale": "Same local byte semantics and supplied work across four process-group states.",
+      "role": "primary",
+      "source_refs": [
+        {
+          "first": 1,
+          "last": 84,
+          "path": "benchmarks/forward-workers/CONTRACT.md"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 故障类别审查
+
+目录版本：1\.0；目录摘要：6213ed21d151dabcd89b020d2e38a9388f7de8c832099fe78446c563dc3b1f4f。
+
+类别审查完成与适用类别覆盖分别统计；审查全部类别不代表穷尽真实故障。
+
+| 类别 | 适用性 | 关联义务 | 理由 | 源码依据 |
+|---|---|---|---|---|
+| F01 | required | O\-flows, O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F02 | not\_applicable | 无 | Production numerical algorithms are not the requested worker switch/transport workload; benchmark duration and accounting checks are measurement quality, not a claim about all application arithmetic\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F03 | not\_applicable | 无 | Malformed frame/parser fuzzing is covered by separate Wire unit tests and excluded from this fixed valid\-work performance comparison\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F04 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F05 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F06 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F07 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F08 | required | O\-admission, O\-echo, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F09 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F10 | required | O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F11 | not\_applicable | 无 | Resident durable release journal, installer publication and power\-loss recovery are owned by project coordinator tests; this worker component measurement does not time or claim those mechanisms\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F12 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F13 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F14 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F15 | not\_applicable | 无 | Adversarial authorization/privacy and credential leakage validation remain independent project security obligations; this benchmark uses task\-owned sessions and no real secrets\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F16 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+
+### 基线
+
+各性能场景分别列出比较基线与验收依据；未声明的值不补写。
+
+### 审查记录
+
+```json
+{
+  "kind": "self",
+  "notes": "Second source pass reviewed interface timing, grant ownership, private IPC failure, WS completion, complete fault catalog, capacity boundary and independent byte oracle. Component scope preserves project release/hook obligations; no claim of independent or human review.",
+  "reviewer": "Codex worker component author"
+}
+```
+
+### 证据
+
+冻结源码：
+
+```json
+[
+  {
+    "path": "Cargo.lock",
+    "sha256": "b07289572b4637a0b02e161163cec09376a0a7fc76c431049f8d1ffb4a200922"
+  },
+  {
+    "path": "Cargo.toml",
+    "sha256": "ae520aa3ad69b534592df54e0f54c8c6e66ea54331b78b7f61f677db7b6f4404"
+  },
+  {
+    "path": "benchmarks/forward-workers/CONTRACT.md",
+    "sha256": "a58c3867d0e89f0467342c34390b00f79513fd5008a24cfae590b83333a13518"
+  },
+  {
+    "path": "build_support/native_base.rs",
+    "sha256": "34391c5e8857e2e4a4806f3d39aaf7440624cd75c2fb452871691035694d7460"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/Cargo.toml",
+    "sha256": "cacfac957daa16dcb91275921f71d4625ec59d6d5586a965401e3911ad1017d9"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/build.rs",
+    "sha256": "3363bf153406d02e5a3cf041071a1c5379311db2f95a878123b3684ad3c794ec"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/abi.rs",
+    "sha256": "fc4773c9c786c5c7f35a959bbbd81cf29158d3d9fcf66f8fdb355a745d8fc5dd"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/control.rs",
+    "sha256": "2df9a9ab2f5430f3cfa07744f2ebd5e6c385262801bf1b5091ed8aa4eb2458a8"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/engine_call.rs",
+    "sha256": "ce316140d08fef6d9d3302b90876359b4ab61b71a3f86232ac45719051c5f7f9"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/engine_call/slots.rs",
+    "sha256": "c603fc3474843c9c94de59c6c5dff628df07aca88f55f35ca71e6eb417930c04"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/engine_tests.rs",
+    "sha256": "a91846adb2a594dae42ebeed87576eb6c2f688df0178d33ea592b56b4331d8ae"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/gateway/mod.rs",
+    "sha256": "d59f0e2c35567a66ec7793b2ceff903f39e71944367d92f5f81149dddcfb4b29"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/gateway/network.rs",
+    "sha256": "f8ba0cfa0f180258f78f1915cc3a2f5af40c2346adde2488780b8d2d123a339a"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/gateway/trust.rs",
+    "sha256": "ccd6f307b26a5f47c6ff8bee6d8e0f4def59fe8d4e6e625741443faee8c868b9"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/hook_runtime.rs",
+    "sha256": "96ffb77e6ebf5dc5f9db35e6e8010a359b6eb662314aa4da41027601a50a04a7"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/integrity.rs",
+    "sha256": "d815015a7a61e767a3e174a7c12fe0a7c9ad198ff92365ced13dcee18a7332b1"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/lib.rs",
+    "sha256": "d1dc5150b985e5c64eb47679ed581c0dd9eba0222847cdae23c92e9d69e2d274"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/lifecycle.rs",
+    "sha256": "8da5282bc8fa60d5609e33fc17596a1c32ba98b8bb6a2af34c1f54a7d448b30a"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/platform.rs",
+    "sha256": "54a6294518fe05beba21f8fec7206c3faa330efd263b4c9d7fa989aa358a1a44"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/runtime.rs",
+    "sha256": "c4c5a3df24ea6a42decebf96fe9bc3481fb84ad0f17d41cfa1d4e1838de448f7"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/sandbox/mod.rs",
+    "sha256": "85399bc154331368f277d299424c52112868a238c5336de4f1474eab0e69235b"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/sandbox/network.rs",
+    "sha256": "3a101faa7bce38a995a62d8da8b6aab9092efeb5ab9e7102006bbb1ebabfb739"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/sandbox/sanitizer.rs",
+    "sha256": "4b32f5d89a7a384423f7fcfcf40dc3cf493d366577d6797df669198d6d6fb7b5"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/snapshot.rs",
+    "sha256": "e4736c2a63849cb3352482d85ef907ed33b7738591fd86273d5faf89be00f6ea"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/adapters/mod.rs",
+    "sha256": "f85123f69dff82d9695670bb011fabb6edf63778363b3cce8880b2ec3884ffd2"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/adapters/native.rs",
+    "sha256": "9714b6d22bfe29cc905e665ffe9aa4dd4d0ea9dab60925bd551f6cbe9660cfd6"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/fork.rs",
+    "sha256": "bb1cf8954c9760c3a9659cc1c74c35acae15bb9ec7eb19d6a586dfe1c6f19d67"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/gum.rs",
+    "sha256": "1ff18d9a3b452810ae78a9f3ca0ce1b95518d45f103e4fbe0b4385d09ebf0fe1"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/manager.rs",
+    "sha256": "67c4aa5ed29c4d5b0b5567f22eadc16d7e1d65138c65714f16c45c859c0ff46b"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/mod.rs",
+    "sha256": "a3ce92534cbba523a9d84c60b095a776413f71b3a0033efc6b414b727fcae3e7"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/adapters/async_dns.rs",
+    "sha256": "ef04bca82a08686b80c55b36da5b52c0ca2f33e2555a1435352653762e0b8e17"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/adapters/file.rs",
+    "sha256": "9fd9547166cbf644df4b7320429f4d5372c61c55ede7a3720827af292dc24fc3"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/adapters/mod.rs",
+    "sha256": "a71f314cd7a78436decac96a032c22cae590826837e1da1f8dd08f1d0de34710"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/adapters/network.rs",
+    "sha256": "0ef24193bf93c1c6cc82c4a157852f98430740f76ae59663acba344cdf23434c"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/adapters/process.rs",
+    "sha256": "05e6cbf43bcb98849ee9fbdb80ade9ad7dd152a3f2706e535a90aff5b305d0c9"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/adapters/trust.rs",
+    "sha256": "175f5e8a587d3bad064699c833459e2a0b32301e14225c52efe606780a25fd27"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/gateway/ca_trust.rs",
+    "sha256": "3159a45b96f2ecfe20597ea0b01cbb26f865e74bef90164d890e15aa5c3fda24"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/gateway/mod.rs",
+    "sha256": "564a40131d2eb160b3227a11d7dcb5433d3a78281cb6439b199ec6ceea5b8ec3"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/gateway/network.rs",
+    "sha256": "311e49f2c73b64bc4b04b406b345c4eb18d84f6484fc37e7e9346d5d05f6752e"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/gateway/network_redirect.rs",
+    "sha256": "b2826fbd24fd1f21dc37b773abb94112b1019f30ccd1431dc8420f3026d9b128"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/gateway/trust_service.rs",
+    "sha256": "390b2267f1b3cbdffe1b58b5c5c841bc66a2a3eda821a9027b3dd00fe3f8816e"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/lifecycle/child_process.rs",
+    "sha256": "5da04a3c5e4086a50431e6bad0cf7bb3bf2f51de1487fca37cc8ca845932e9fe"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/lifecycle/mod.rs",
+    "sha256": "67e6c41afc638f8a44b394365f7c919fd4801b1818c74080e05768a74478406b"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/lifecycle/windows.rs",
+    "sha256": "6106f71df4c7248bc772efc1c8a7ef8408b24bbd1fd52391d7627c9548db250b"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/mod.rs",
+    "sha256": "903fa8a8b5651c391946200cbbb3075e6fe4ea9ddf8a3d68d7a680f54d5a2b56"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/sandbox/file.rs",
+    "sha256": "1f99d281cd68dced68b6af954a078d1f237167317b9e15c12746d52d103dc70d"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/sandbox/mod.rs",
+    "sha256": "72a5a20abe50af763332969a802fac219580ae6dcce868a54945d12109e17d01"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/sandbox/network.rs",
+    "sha256": "72b408520715602e90dd8e598b7afa2aa4b03b6a5da42e53dbc2f4d6f8962605"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/capabilities/sandbox/process.rs",
+    "sha256": "27d2a1f6e0eb6dabb49aa51ecea5a9bf1a4792993f7d444850f41bbed1ff78c7"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/gum.rs",
+    "sha256": "693e0ff23c7c9bcc77d27db9f2cf2b64c7eb697f01bbbd6545ab320c494402c8"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/manager.rs",
+    "sha256": "343987d6730eabebe7b799dc1bef88610f4dce1a885d0cef56f92f1953586586"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/mod.rs",
+    "sha256": "45de992e26077a88cd1e17cf1ce7a433d5c6b65e65ad196fec4efe04a76487f7"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/runtime/contexts/file.rs",
+    "sha256": "a173db974c103e295ef07c96fa0c3c2323cafbf93e374aaf410f213fb53ec49a"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/runtime/contexts/mod.rs",
+    "sha256": "303f4a3c2b92fdf3354be864c447d56504ba919bd662862fa772c16221a040d3"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/runtime/contexts/network.rs",
+    "sha256": "1674e59979fd73814aa39158750ae538ff9cc17990fd3f484b60cb790f4b0ed4"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/runtime/contexts/process.rs",
+    "sha256": "3d2f4d0ad5be4db46add4ebbbaa1693ae0d8228444dbf198361b57cc58aac21a"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/runtime/contexts/trust.rs",
+    "sha256": "671d6d3d9a893dd6ffa5a066be1e5de58514e1acd0c3d9eb7e5ff96fd2f1e7af"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/runtime/mod.rs",
+    "sha256": "e0cb8eb2a5d2806a49448cebd4ace8af01332a50d598e5db5d67f4b6f02ca1da"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/runtime/registrar.rs",
+    "sha256": "1f1faa3802779832bef06e55cdc2645cf4ba957295a060fc563e539f4fb6ef2f"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/shared.rs",
+    "sha256": "f6c7cf8581048471b3dbddff24303cd540bf624a9eb1873040e0979d634eb855"
+  },
+  {
+    "path": "crates/hyperhub-cli/Cargo.toml",
+    "sha256": "62ab61cd851d05b3864b89b4d6c49a9ff87417de77561c1580efda7d79cb0617"
+  },
+  {
+    "path": "crates/hyperhub-cli/build.rs",
+    "sha256": "044fdac882522b4ceaae88d683455607d686b4867f7f197dc744aed6a1de2319"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/agent_runtime.rs",
+    "sha256": "76417596392d5ac28c6be972298c0aa8d529c1d3ffd461cbf61b37d386cdd114"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/chat.rs",
+    "sha256": "2a5da38904389169ffbc4231fe827bf9031f347044b369ba4c832dd4049c74aa"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/clipboard.rs",
+    "sha256": "df5bacc50d4d1bdf64f9f72b3ceab724e11a32e40f432d9a1bbb45367973cdb7"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/config_cli.rs",
+    "sha256": "cd2acf88c86bb59b6d132dcbe19c869d91bcb5bf936f95dc77eb502225901514"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/config_semantics.rs",
+    "sha256": "cb69ebdf96c8c53228bf31fea3d27cf4e4dcff3e654d26717e43973056f95d6e"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/config_tui.rs",
+    "sha256": "3dd61e17a9582d1ff40f4969cfa259d4e5a8fbd4f60ee84b6c4db979628dd43a"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/lifecycle.rs",
+    "sha256": "629f6f34b69b1bdb4dde755c560bcb2e9604ff16c11513310f0853c513d8b11a"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/main.rs",
+    "sha256": "d1e6d81582031ecfc287a45021c4e278874dd078fd1661de8ee35962e17c1d64"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/password.rs",
+    "sha256": "0eb7184d9c80cdf5a95d1959bdb50f3fad9e20cfbf2a7dcd30bf350d355d364e"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/common.rs",
+    "sha256": "89e90c50dbc15f74626aa5a7cef972ccdf1c53a3b175f609210404792f15bd09"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/dns_tracking.rs",
+    "sha256": "456d73b3ce5f4f39e83c28a9920d4cf890c2bee9d8c01e8eab3dd1f72da8aa2a"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/engine_control.rs",
+    "sha256": "386ee921da3a7ab3907660d1b2d3ed1a75e46a2223d0fc083c8736f2d2b2cb59"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/child_gating.rs",
+    "sha256": "db25e199b2e2125260803f810ed37453e66c51804957645a4c22c15a271d61b5"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/context.rs",
+    "sha256": "8d1f1c1a6b098f238045d31f409e454b262b90ba285e2f34851a8e66a54d69eb"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/injector.rs",
+    "sha256": "9810319052dc0de85bfb29d79d42af0a2213f4949483c01323cfd4f3bc54bb7f"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/mod.rs",
+    "sha256": "1cee8330fe1095c6f4ea930e23590121513dcc0b5c97343d3e1b732aa09e0948"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/hook_manifest.rs",
+    "sha256": "42bc3bedc16f17e8756b42fc5e6f11427a7a3d2e0f8fcc45855c95d1ccf68476"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/launcher.rs",
+    "sha256": "8bb1443b7db840efb2d902c4752319b5b2af0794fe0143801d07fd3945225842"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/mod.rs",
+    "sha256": "b8a617ea8efcf42949c1f4444047c49f764a58369d3a83762df5c65b8229b3be"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/pty.rs",
+    "sha256": "7dee577529eca4bfaffd22af19d4ac9df711dceea4fe05fced0aefc2021eb728"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/syscall_supervisor.rs",
+    "sha256": "55a2a24e186c93b9f8384e1911aaa936be9ae578c6d862a1f3c4627f4edbf3d6"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/mod.rs",
+    "sha256": "96802ce8dbd72ea18b2f39052f9726bd5023ce7c2ce2c0fe4bcdceec60432ef8"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/windows.rs",
+    "sha256": "906857d15960d95ae854b9a2d69d824ac4ba0142b271c4a652487c1e9cde1f8a"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/skill_installer.rs",
+    "sha256": "0bc83bc13fe4012f74a723ff40cf2a02ac6c7341125ba85748ebd609e6df5430"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/upgrade.rs",
+    "sha256": "dc404205b5a0a0950e366f7895e9b7b6427d40f124d78e6cf8ffdf33fa9b40b3"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/upgrade/bundle.rs",
+    "sha256": "1db8d0ae3d2e83a0bc0aeb2db122151e65c1a1ff05de05eb1c7924f71987fe6c"
+  },
+  {
+    "path": "crates/hyperhub-core/Cargo.toml",
+    "sha256": "31991391fa5c0fd88f5c46ebaa8d7b32fbc0b1074c3d8cf0418c57e3664dc539"
+  },
+  {
+    "path": "crates/hyperhub-core/src/audit.rs",
+    "sha256": "f97d6d862d3ee5fdee9d2ce894071ead00fed382aae3c5e14ccbdb8954aefa50"
+  },
+  {
+    "path": "crates/hyperhub-core/src/certificate.rs",
+    "sha256": "dd1ce3b00a88d30a60ba1339b409d8531771f7936864e463236fc0f16ed9a3e1"
+  },
+  {
+    "path": "crates/hyperhub-core/src/client_proxy.rs",
+    "sha256": "cd184927ff674f0d6012fb8518b6fbfb18857d1d26d086c9f4e81ae1d51797f9"
+  },
+  {
+    "path": "crates/hyperhub-core/src/config.rs",
+    "sha256": "aae7edf8dc2742d79f81910815b3c9adebebdef3c1faf6e6d6122a13d968ae7b"
+  },
+  {
+    "path": "crates/hyperhub-core/src/config_document.rs",
+    "sha256": "ebbe795f3615a77e6578fee9556d0d08b58d5b65c761e69583c145357b830862"
+  },
+  {
+    "path": "crates/hyperhub-core/src/config_store.rs",
+    "sha256": "7f44695f314d51063cd15e71df55759b32f1b6cea6f7f5406af57b889ef477a4"
+  },
+  {
+    "path": "crates/hyperhub-core/src/connector.rs",
+    "sha256": "bf1d5141822d84e84b4a5c88e0f1a5d79ee14f61591f805844d1cc86cdad82f9"
+  },
+  {
+    "path": "crates/hyperhub-core/src/control.rs",
+    "sha256": "0ffb78f92833f454d45b332aa1726c042a033c72108b557194eb62cbe8399c47"
+  },
+  {
+    "path": "crates/hyperhub-core/src/duplex.rs",
+    "sha256": "af56d186f1910eb297e0f4cdbb9da91eaf30a59931d82cd7f69200fc8b687732"
+  },
+  {
+    "path": "crates/hyperhub-core/src/engine_bootstrap_tests.rs",
+    "sha256": "0b772554d72a894d5ab5168d0b4729a46cab083aece9aa9fb13b2dd1211ea7a9"
+  },
+  {
+    "path": "crates/hyperhub-core/src/engine_host_control_tests.rs",
+    "sha256": "258684ea5ad670f1d8cc34dcf6455fb7187de1a9e5d036a45e9fb36a10ba999c"
+  },
+  {
+    "path": "crates/hyperhub-core/src/engine_host_exit.rs",
+    "sha256": "cd081be4d5c37899bde4fb8504255a3bcda3ad8222aea4c126760831cc94dbe3"
+  },
+  {
+    "path": "crates/hyperhub-core/src/engine_hosts.rs",
+    "sha256": "e00e9be0d0055fbbe9ce53e852443b6a4c074e44490f834eae7f064c9eff254c"
+  },
+  {
+    "path": "crates/hyperhub-core/src/engine_hosts_tests.rs",
+    "sha256": "1387ac81795fd307d2e85ae48b3993e4cb6a81693ba8c18590f4c540d380a3e3"
+  },
+  {
+    "path": "crates/hyperhub-core/src/firewall.rs",
+    "sha256": "fe5023e6b9c927809d7581a5f7654fe8e48a95cae64a2f7bd7ba3e8d5bff7c5b"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/authority.rs",
+    "sha256": "cd6e7c966ffac0fc17faa45f15249b8230f1379892d12023262929808666cf6a"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/cancellation.rs",
+    "sha256": "a0ae1ec210c7d6ed0b333eadfc28b66c632325787a3161d326ce0db5c2729455"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/deadline.rs",
+    "sha256": "1cfa14197f145b7284095de637b88fb2cea699849a753e47c4eda95a5c84a8a6"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/manager.rs",
+    "sha256": "91f79dec1c114520b9ebc8622238edc364838bacaf658883b9dd6d4b1cf68ce1"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/manager/artifact.rs",
+    "sha256": "078338242cd8ec1909cd68869b650b3f0621402d856b6ecd2fd375e43ff2d9c4"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/manager/dispatch.rs",
+    "sha256": "dba3dc4de054809de66c1a12c88f1fd7efebdb1135c5fcfefd6ce27a9a174b2f"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/manager/resident.rs",
+    "sha256": "d6e0ac2e8a0f90bd7a021ae534f012d5d710ef07148206da542e673cdde4672a"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "sha256": "afbd22ac9d807059375136e34592b1ffec06610f86cf057ef286f9454470c3a4"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/mod.rs",
+    "sha256": "06b0c0c8ed70ca5a5af6cdfe42ffe0980912c20b721fb5fdc2de365f8f896780"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/protocol.rs",
+    "sha256": "a948da3ee584a334f34fd3a14fccd00de400dd631e31a9d82b46b3e67490ecfe"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/rpc.rs",
+    "sha256": "6e45fe0adda3939a0eade3ae223d196a862f6c7975a25bb81aef6decafc9fc86"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/wire.rs",
+    "sha256": "5bbd9b7d62f4813c070ee7c0804ffa52208d5309e6f4a132b1a21361521ee4cf"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/wire/tests.rs",
+    "sha256": "6521b4179a3972f43f7b02c0c6d5b2628d38efbff376a09600cdb80b3366120e"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/wire/unix.rs",
+    "sha256": "caccb1f0ba26fbcb66b30ab9633af2f8ede1bfa4d692a0f5c2a3c2206d06ac63"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+    "sha256": "50e0a9659d0e29154c36597231f634be4f32c14c179dd6837573ca1d5fabbdd6"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/worker.rs",
+    "sha256": "8ec6323a630278d436aaaa75eaa0c9579ef9539c692b39746f9d62d3e80edc46"
+  },
+  {
+    "path": "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "sha256": "bc51d24dc90afa3a97fae44df652b892044c7c18d721c688b6947982f85bc12f"
+  },
+  {
+    "path": "crates/hyperhub-core/src/framing.rs",
+    "sha256": "bb7bd094b2db767c028fecbfc92598dfeb50464cc566e546bccdab640bf6f31c"
+  },
+  {
+    "path": "crates/hyperhub-core/src/http.rs",
+    "sha256": "8a043006cc684ef675e3f162126e7642a3097fba2b3b08d773d56f6be5fc5a3a"
+  },
+  {
+    "path": "crates/hyperhub-core/src/http/authority.rs",
+    "sha256": "f872f108c9c8873edc75e36b6fa169b13a3507f1e8f227fe2cc3d1016939a158"
+  },
+  {
+    "path": "crates/hyperhub-core/src/inspect.rs",
+    "sha256": "2f76e97567593caadefeab8b4d0537bdfa3b513163ca8ebac30110cc206a86f5"
+  },
+  {
+    "path": "crates/hyperhub-core/src/lib.rs",
+    "sha256": "802a32aa3aa0c172e7ce63027b69b53f344b37c80095a21b7ef734c434c44e8e"
+  },
+  {
+    "path": "crates/hyperhub-core/src/plugin/mod.rs",
+    "sha256": "fe1dea4c810acfc29f5bfc9a407a56b46f4a54e9bf8395c1a0bb6995978772b2"
+  },
+  {
+    "path": "crates/hyperhub-core/src/policy.rs",
+    "sha256": "cdb5a3dca31851fe5296a5050a8cb8f76b47eb91190dcc58468c2344d3f78cfe"
+  },
+  {
+    "path": "crates/hyperhub-core/src/process.rs",
+    "sha256": "d9e6a3844fab7b5bba5f3d86cc703a492fd8955ca85d4060bfba17fc9c4b39b4"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protection.rs",
+    "sha256": "6e305387acfdc55dc96628c69ce279fa0d7dbcb2bb8bff1ae4545dd9d46c1192"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/context.rs",
+    "sha256": "6ceffc229d617b9e04601e1b4bc188caa72a68839d82669dddb81d02484323f7"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/detect.rs",
+    "sha256": "95c7a096545a573ea4c3637ebd615765a5460c534eb3154d2db9d32a704177d4"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/git.rs",
+    "sha256": "92f7920aaf1feb29972d40425dee61643d00aee526d47b5fdf53eeacffbfa2df"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/http.rs",
+    "sha256": "e56c1fcabc8e427ce666ef4cc1bce7907fc57c36abfa0ce5cf67023784693af3"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/http_connect.rs",
+    "sha256": "c62bb0ab3aa87da3fe8e6ff2546d36e6de272475dbd5c3fb6f053aec573dc874"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/https.rs",
+    "sha256": "483eaceec6a3083fad8273cd7e089268dd4f00f3384057a52c3dc95d9d4e9e50"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/mod.rs",
+    "sha256": "7120c056998f1fda9488491106cf50b3da33e3427a8cc8dceece649895766d81"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/raw.rs",
+    "sha256": "14653f9d10b0cd028e4040e84a3917c4f19be66a0b16efcb13a993f02ec9b642"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/socks5.rs",
+    "sha256": "5903ca715a5edeec692e65e94ddc8fcbe32f58e0daadc84e6463b996cc7416d5"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/handlers/ssh.rs",
+    "sha256": "b38e3e5bf8d9b0c5035152739a3bdd1bf7608c9e5f507784783dd094c3b1b808"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/mod.rs",
+    "sha256": "323284555cdf9bdd0e9bb3849914b7551dd1338ec33c1dd46edf5a921e9eccb0"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/stack.rs",
+    "sha256": "9083f630b1fa084de2e08b21cb26b4b3bf8ffe2896b715b938e02f15f48067bc"
+  },
+  {
+    "path": "crates/hyperhub-core/src/protocol/transport.rs",
+    "sha256": "66122e53fa755fd42b34bf2dc593c53d2019f5c04b40d7df84ed5001d8effb56"
+  },
+  {
+    "path": "crates/hyperhub-core/src/release.rs",
+    "sha256": "c821690176b59fe671464357b74f3f0f21c2b822aebb39fd2d198a4ce8812ba8"
+  },
+  {
+    "path": "crates/hyperhub-core/src/release/coordinator.rs",
+    "sha256": "64f7827e27fec98b9e1d3043e0c552c479306b06eff1eba7ac02c54f1cbe287c"
+  },
+  {
+    "path": "crates/hyperhub-core/src/release/installer.rs",
+    "sha256": "8eb4c1b395b1b775adfea9ea7c7f3b809818cb66a802763b99a3f4fa8f2b5e9c"
+  },
+  {
+    "path": "crates/hyperhub-core/src/release/tests.rs",
+    "sha256": "209efc31b35b62725716a5c200a0ec57e8280d10f1e383bb145c7a1f24b86fec"
+  },
+  {
+    "path": "crates/hyperhub-core/src/retention.rs",
+    "sha256": "028802979dbeb4c84164eab5cd8aeb1086f8a6ee4a37d990198fa1180a6196aa"
+  },
+  {
+    "path": "crates/hyperhub-core/src/runtime.rs",
+    "sha256": "5117415b8d42d5ba3a35cb1966d0fa6c025931b308475cb07974ac280d1cb206"
+  },
+  {
+    "path": "crates/hyperhub-core/src/sandbox.rs",
+    "sha256": "38a931558cc2eef41319ccf8fdee33961b10bb401df7b5f0afa2a5edbb13ff52"
+  },
+  {
+    "path": "crates/hyperhub-core/src/session.rs",
+    "sha256": "1cf0e012497172ef70e2af0406ef35b02c0d00c4e917a216632878b2e6ea5568"
+  },
+  {
+    "path": "crates/hyperhub-core/src/socks.rs",
+    "sha256": "206f73673e40dbdb47b4e1f25f00a15354fc168bc5b57102fef62350d564b2f0"
+  },
+  {
+    "path": "crates/hyperhub-core/src/socks/forwarding.rs",
+    "sha256": "cef7e98e00414c7ac5434cef9b2e39d0d2c78799532750dbb55e38314664c9d4"
+  },
+  {
+    "path": "crates/hyperhub-core/src/ssh_keys.rs",
+    "sha256": "c8ca435e332d9669542ddfa4a09084bbda81585c1e2579cb4d6b8a757cc85de0"
+  },
+  {
+    "path": "crates/hyperhub-core/src/ssh_mitm.rs",
+    "sha256": "3532b1049f7da1920187155de0b0dccae9a1ad05cc63f1fbd9b158728d462074"
+  },
+  {
+    "path": "crates/hyperhub-core/src/trust.rs",
+    "sha256": "daa63285feb69360519233efc18390d80efe4ab29fa1ffc5b335a0987f26f1a7"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/actions.rs",
+    "sha256": "07f41b77a22880099f4a9c9cf7fdb140165ad20eaf45e401d745ecf2073a6f3e"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/admission.rs",
+    "sha256": "ff63d5cf904d325205513ef99eeb3b0fb618b651bb941e20a21f8adf563ea22f"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/admission_tests.rs",
+    "sha256": "ae19e6185ebdf8ad87b71c589ab3ef99870837de12b309bb8842ebf7fd4e9960"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/driver.rs",
+    "sha256": "f5a8e54a9fc0fe3bcc3783271735236e2519bb74ccc49e27090d0c76c0a37aaa"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/mod.rs",
+    "sha256": "b3ae51ab937bc4ddce178dd589a31387a48ed12b550702453c7196e3e070409e"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/participant.rs",
+    "sha256": "63f6f5b564c6291114d1edb87cd5dc94be8a29817602b427b3132762a86ca949"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/store.rs",
+    "sha256": "37f832b60742052e5d74747727289ad32fa22955fc19cf25042e06491ad493f9"
+  },
+  {
+    "path": "crates/hyperhub-core/src/upgrade/tests.rs",
+    "sha256": "c01bd9bcef36718d8ab23a740f7eb12c58cd1b63c4ce78a81bbdc8062a230917"
+  },
+  {
+    "path": "crates/hyperhub-core/src/websocket.rs",
+    "sha256": "ff93a8d43b06cb2b929176039ecb6719b85da0cd34f9f4944dead514844b2b94"
+  },
+  {
+    "path": "crates/hyperhub-core/tests/forward_workers.rs",
+    "sha256": "4b27bf60b8014a49c39fa4338f96d09d84120d091d2308e074333837dbcc2971"
+  },
+  {
+    "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "sha256": "cd95345fdadff01a0e1f0877e3b2a415b2ef314eb21a313e5428848526f5292f"
+  },
+  {
+    "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "sha256": "e59d202a26554f37efab0633e980b8074ab2ebd9bf5daf4ea3e079aa433a5ab2"
+  },
+  {
+    "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "sha256": "fc5afcba83f46745bca3eb628a3d9a4053775b3bc29e819ad6a4c4bb25d56a87"
+  },
+  {
+    "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "sha256": "a71dcd3fead887f1bc802ac34b1cb42cd1bee6afa18982069a74e5d659bbb828"
+  },
+  {
+    "path": "crates/hyperhub-engine/Cargo.toml",
+    "sha256": "6cd2f5e78f8c9e505498108a5216138f06f5a24a35ac34119a06cd223e0b2e63"
+  },
+  {
+    "path": "crates/hyperhub-engine/build.rs",
+    "sha256": "b33c3c6a66c6e890990855e494caa8b77db48d6867bf23da3bd3a80378655852"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/bootstrap.rs",
+    "sha256": "e7f948c0ecd934bce0bb0e85ee56baed8d693358852f11f600c355390592af45"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/contract.rs",
+    "sha256": "6cc99eb607f0307195079158782c7ea2f04001d8365c1c8694ff065bf4810724"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/host.rs",
+    "sha256": "e6ea51b86ac42a66d44657cf631dc2e1b10caffa69db5eae2f3041abf6ba935b"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/lib.rs",
+    "sha256": "c195335972a56640fc4cd82c29f420bb749bfc20ea2a84c8518d9db2179ace36"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/management.rs",
+    "sha256": "1f988bb39afbed1614757367d986ac79a69f4dde2ea7db4215c3c0a4da5fc54d"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/operations.rs",
+    "sha256": "100514cc0c7c277ff0f1b9ff957828c367c529fe5a6dee049b1cd711cc139ca9"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/policy.rs",
+    "sha256": "294dc09e25c3565ce0f3f698f888f5340a0d13cfa37a82700ac9f5dff9652c7b"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/sanitizer.rs",
+    "sha256": "eadf19774bb8ea4e21729f6f718ba7dd67e01923b627f19e1327381ce6f9a47a"
+  },
+  {
+    "path": "crates/hyperhub-engine/src/trust.rs",
+    "sha256": "a7a286477838cca5319402552fa5719f94fe374cda9a881077e5bba222bb4939"
+  },
+  {
+    "path": "crates/hyperhub-runtime/Cargo.toml",
+    "sha256": "dc2aa4549c6c6fa82a9bcaa2a78ed19c82035371fc25378fcc7489a9d5912f96"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/abi.rs",
+    "sha256": "ce2e02bd7ae6f0c62fa58fcd3f4fb6379ace88cdbdd65e8a676029d472dc833b"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/artifact.rs",
+    "sha256": "f33f68ccac6839730bb09745bd61c113a559d6518d170b8595f840696d594e13"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/generation.rs",
+    "sha256": "0c5237ca00c516d0570dd5639e7337faa5ec4cff38179baff7fb9a70f8897b8e"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/handoff.rs",
+    "sha256": "01b6fe1616a51c73e6b88778e701472c23eef8a2a82e40e66816cd0dce1aabf3"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/handoff/unix.rs",
+    "sha256": "3c056ee5da0e11223299437546c81e8c1fc63348941b990bab411771dd07a482"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/handoff/windows.rs",
+    "sha256": "bfcd7c80709510e892c8b20e9786f83aeb76d6c746a2e99f80a160785bfbb85a"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/lib.rs",
+    "sha256": "8acfc981e0be855b29d2df7700198a7046037e8de9295df96601999a99969b38"
+  },
+  {
+    "path": "crates/hyperhub-runtime/src/native.rs",
+    "sha256": "5fcc307a162c1c9d6c06fdfbd2971c49e0c5f7b7e9e22094c5c0f2f585ad9238"
+  }
+]
+```
+
+## 可靠性场景
+
+| 场景 | 标题 | 来源 | 实现状态 | 运行状态 |
+|---|---|---|---|---|
+| [C\-native\-suite](#case-C-native-suite) | C native suite | generated | implemented | 未提交执行记录 |
+| [C\-payload\-oracle](#case-C-payload-oracle) | C payload oracle | generated | implemented | 未提交执行记录 |
+
+<a id="case-C-native-suite"></a>
+
+### C\-native\-suite C native suite
+
+- id: C\-native\-suite
+- title: C native suite
+- kind: correctness
+- implementation_status: implemented
+- origin: generated
+- goal: Actual old/new TCP, TLS, WebSocket and SSH flows survive switching; cancellation and candidate/control failures release owned resources without corrupting future dispatch\.
+- obligation_ids: O\-flows
+- boundary_ids: B\-bootstrap\-deadline, B\-capacity, B\-control\-loss, B\-health\-deadline, B\-native\-preflight, B\-probe\-exhaustion, B\-ssh, B\-tls\-ws\-audit, B\-transfer, B\-ungranted\-disconnect, B\-worker\-crash
+- preconditions: 见共用前提与场景输入；性能 preflight: 不适用
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute forwarding unit regressions, then all real native functional cases, before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: All real worker native integration cases pass, including controller disconnection with live streams, centralized revocation, source silent worker deadline, TLS/WS/SSH, retained capacity and bad native preflight\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business, W\-switch
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "A source child that never reads large bootstrap cannot escape the whole-phase 30s send deadline.",
+    "assertion_refs": [
+      {
+        "first": 420,
+        "last": 478,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ],
+    "boundary_id": "B-bootstrap-deadline",
+    "id": "V-B-bootstrap-deadline",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 420,
+        "last": 478,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Four retained old workers keep all streams; extra prepare is refused and natural drain releases capacity.",
+    "assertion_refs": [
+      {
+        "first": 15,
+        "last": 65,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ],
+    "boundary_id": "B-capacity",
+    "id": "V-B-capacity",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 15,
+        "last": 65,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Control disconnection preserves granted streams, normal EOF and central revocation; final OS exit releases parent leases.",
+    "assertion_refs": [
+      {
+        "first": 286,
+        "last": 419,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ],
+    "boundary_id": "B-control-loss",
+    "id": "V-B-control-loss",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 286,
+        "last": 419,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "A Booted child that stops consuming controls is quarantined by the 30s health deadline and retired.",
+    "assertion_refs": [
+      {
+        "first": 479,
+        "last": 535,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ],
+    "boundary_id": "B-health-deadline",
+    "id": "V-B-health-deadline",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 479,
+        "last": 535,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "With zero target Hosts, bad native ABI cannot publish global stable deployment or change installed target/active worker.",
+    "assertion_refs": [
+      {
+        "first": 102,
+        "last": 216,
+        "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs"
+      }
+    ],
+    "boundary_id": "B-native-preflight",
+    "id": "V-B-native-preflight",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 102,
+        "last": 216,
+        "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Real Unix descriptor exhaustion during granted probe creation marks the original shared socket complete without relying on a Finished frame.",
+    "assertion_refs": [
+      {
+        "first": 7,
+        "last": 64,
+        "path": "crates/hyperhub-core/src/forward/worker/tests.rs"
+      }
+    ],
+    "boundary_id": "B-probe-exhaustion",
+    "id": "V-B-probe-exhaustion",
+    "obligation_id": "O-flows",
+    "trigger": "The named source regression executes its controlled fault or state transition.",
+    "trigger_refs": [
+      {
+        "first": 7,
+        "last": 64,
+        "path": "crates/hyperhub-core/src/forward/worker/tests.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Authenticated SSH channels continue across worker switch using unchanged MITM host identity.",
+    "assertion_refs": [
+      {
+        "first": 80,
+        "last": 199,
+        "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs"
+      }
+    ],
+    "boundary_id": "B-ssh",
+    "id": "V-B-ssh",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 80,
+        "last": 199,
+        "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Both generations retain live TLS/WebSocket streams, original CA/custom roots and one contiguous resident audit sequence.",
+    "assertion_refs": [
+      {
+        "first": 203,
+        "last": 282,
+        "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs"
+      }
+    ],
+    "boundary_id": "B-tls-ws-audit",
+    "id": "V-B-tls-ws-audit",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 203,
+        "last": 282,
+        "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Actual parent/child TCP transfers preserve Fake-IP session authority and centralized cancellation.",
+    "assertion_refs": [
+      {
+        "first": 18,
+        "last": 94,
+        "path": "crates/hyperhub-core/tests/forward_workers.rs"
+      }
+    ],
+    "boundary_id": "B-transfer",
+    "id": "V-B-transfer",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 18,
+        "last": 94,
+        "path": "crates/hyperhub-core/tests/forward_workers.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Control loss immediately releases ungranted offer claims, preserves granted cancellation watchers, and remains idempotent.",
+    "assertion_refs": [
+      {
+        "first": 4,
+        "last": 53,
+        "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+      }
+    ],
+    "boundary_id": "B-ungranted-disconnect",
+    "id": "V-B-ungranted-disconnect",
+    "obligation_id": "O-flows",
+    "trigger": "The named source regression executes its controlled fault or state transition.",
+    "trigger_refs": [
+      {
+        "first": 4,
+        "last": 53,
+        "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Confirmed candidate crash permits rollback of future dispatch while prior generation stream survives.",
+    "assertion_refs": [
+      {
+        "first": 185,
+        "last": 221,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ],
+    "boundary_id": "B-worker-crash",
+    "id": "V-B-worker-crash",
+    "obligation_id": "O-flows",
+    "trigger": "The named real subprocess integration test reaches its specified boundary.",
+    "trigger_refs": [
+      {
+        "first": 185,
+        "last": 221,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  },
+  {
+    "first": 4,
+    "last": 53,
+    "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  },
+  {
+    "first": 7,
+    "last": 64,
+    "path": "crates/hyperhub-core/src/forward/worker/tests.rs"
+  },
+  {
+    "first": 1,
+    "last": 94,
+    "path": "crates/hyperhub-core/tests/forward_workers.rs"
+  },
+  {
+    "first": 1,
+    "last": 535,
+    "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+  },
+  {
+    "first": 1,
+    "last": 216,
+    "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs"
+  },
+  {
+    "first": 1,
+    "last": 282,
+    "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs"
+  },
+  {
+    "first": 1,
+    "last": 199,
+    "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs"
+  }
+]
+```
+
+- matrix:
+
+```json
+{}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-C-payload-oracle"></a>
+
+### C\-payload\-oracle C payload oracle
+
+- id: C\-payload\-oracle
+- title: C payload oracle
+- kind: correctness
+- implementation_status: implemented
+- origin: generated
+- goal: Every offered timed echo and admission token has independent exact byte validation; failed or incomplete work cannot count as successful throughput\.
+- obligation_ids: O\-oracle
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: 不适用
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Each scenario checks untimed independent echo tokens before timing, and every timed response exactly matches client ID, sequence and remaining bytes\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Each scenario checks untimed independent echo tokens before timing, and every timed response exactly matches client ID, sequence and remaining bytes.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-C-payload-oracle",
+    "obligation_id": "O-oracle",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+## 性能场景
+
+| 场景 | 标题 | 来源 | 实现状态 | 运行状态 |
+|---|---|---|---|---|
+| [P\-admission\-baseline](#case-P-admission-baseline) | P admission baseline | generated | implemented | 未提交执行记录 |
+| [P\-admission\-upgrade\-0](#case-P-admission-upgrade-0) | P admission upgrade 0 | generated | implemented | 未提交执行记录 |
+| [P\-admission\-upgrade\-1](#case-P-admission-upgrade-1) | P admission upgrade 1 | generated | implemented | 未提交执行记录 |
+| [P\-admission\-upgrade\-4](#case-P-admission-upgrade-4) | P admission upgrade 4 | generated | implemented | 未提交执行记录 |
+| [P\-control\-upgrade\-0](#case-P-control-upgrade-0) | P control upgrade 0 | generated | implemented | 未提交执行记录 |
+| [P\-control\-upgrade\-1](#case-P-control-upgrade-1) | P control upgrade 1 | generated | implemented | 未提交执行记录 |
+| [P\-control\-upgrade\-4](#case-P-control-upgrade-4) | P control upgrade 4 | generated | implemented | 未提交执行记录 |
+| [P\-echo\-baseline](#case-P-echo-baseline) | P echo baseline | generated | implemented | 未提交执行记录 |
+| [P\-echo\-upgrade\-0](#case-P-echo-upgrade-0) | P echo upgrade 0 | generated | implemented | 未提交执行记录 |
+| [P\-echo\-upgrade\-1](#case-P-echo-upgrade-1) | P echo upgrade 1 | generated | implemented | 未提交执行记录 |
+| [P\-echo\-upgrade\-4](#case-P-echo-upgrade-4) | P echo upgrade 4 | generated | implemented | 未提交执行记录 |
+
+<a id="case-P-admission-baseline"></a>
+
+### P\-admission\-baseline P admission baseline
+
+- id: P\-admission\-baseline
+- title: P admission baseline
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record 32\-client admission cost and controller/worker RSS and thread sampled peaks throughout each trial; include active offer deadline machinery, not only idle resources\.
+- obligation_ids: O\-admission
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-admission-baseline",
+    "obligation_id": "O-admission",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "baseline"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-admission-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-admission-baseline",
+    "level": "component",
+    "resources": [
+      {
+        "description": "Controller/test harness/local origin thread count",
+        "id": "parent-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Controller/test harness/local origin resident memory",
+        "id": "parent-memory",
+        "unit": "bytes"
+      },
+      {
+        "description": "Summed live native worker threads",
+        "id": "worker-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Summed live native worker RSS",
+        "id": "worker-memory",
+        "unit": "bytes"
+      }
+    ],
+    "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+    "work_units": [
+      {
+        "description": "One authenticated SOCKS CONNECT plus first exact echo.",
+        "id": "admission",
+        "unit": "admission"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "admission_ms",
+      "subject_id": "admission",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_threads_peak",
+      "subject_id": "parent-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_rss_peak",
+      "subject_id": "parent-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_threads_peak",
+      "subject_id": "worker-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_rss_peak",
+      "subject_id": "worker-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "admission"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-admission-upgrade-0"></a>
+
+### P\-admission\-upgrade\-0 P admission upgrade 0
+
+- id: P\-admission\-upgrade\-0
+- title: P admission upgrade 0
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record 32\-client admission cost and controller/worker RSS and thread sampled peaks throughout each trial; include active offer deadline machinery, not only idle resources\.
+- obligation_ids: O\-admission
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-admission-upgrade-0",
+    "obligation_id": "O-admission",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-0"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-admission-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-admission-upgrade-0",
+    "level": "component",
+    "resources": [
+      {
+        "description": "Controller/test harness/local origin thread count",
+        "id": "parent-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Controller/test harness/local origin resident memory",
+        "id": "parent-memory",
+        "unit": "bytes"
+      },
+      {
+        "description": "Summed live native worker threads",
+        "id": "worker-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Summed live native worker RSS",
+        "id": "worker-memory",
+        "unit": "bytes"
+      }
+    ],
+    "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+    "work_units": [
+      {
+        "description": "One authenticated SOCKS CONNECT plus first exact echo.",
+        "id": "admission",
+        "unit": "admission"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "admission_ms",
+      "subject_id": "admission",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_threads_peak",
+      "subject_id": "parent-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_rss_peak",
+      "subject_id": "parent-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_threads_peak",
+      "subject_id": "worker-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_rss_peak",
+      "subject_id": "worker-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "admission"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-admission-upgrade-1"></a>
+
+### P\-admission\-upgrade\-1 P admission upgrade 1
+
+- id: P\-admission\-upgrade\-1
+- title: P admission upgrade 1
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record 32\-client admission cost and controller/worker RSS and thread sampled peaks throughout each trial; include active offer deadline machinery, not only idle resources\.
+- obligation_ids: O\-admission
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-admission-upgrade-1",
+    "obligation_id": "O-admission",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-1"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-admission-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-admission-upgrade-1",
+    "level": "component",
+    "resources": [
+      {
+        "description": "Controller/test harness/local origin thread count",
+        "id": "parent-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Controller/test harness/local origin resident memory",
+        "id": "parent-memory",
+        "unit": "bytes"
+      },
+      {
+        "description": "Summed live native worker threads",
+        "id": "worker-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Summed live native worker RSS",
+        "id": "worker-memory",
+        "unit": "bytes"
+      }
+    ],
+    "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+    "work_units": [
+      {
+        "description": "One authenticated SOCKS CONNECT plus first exact echo.",
+        "id": "admission",
+        "unit": "admission"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "admission_ms",
+      "subject_id": "admission",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_threads_peak",
+      "subject_id": "parent-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_rss_peak",
+      "subject_id": "parent-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_threads_peak",
+      "subject_id": "worker-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_rss_peak",
+      "subject_id": "worker-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "admission"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-admission-upgrade-4"></a>
+
+### P\-admission\-upgrade\-4 P admission upgrade 4
+
+- id: P\-admission\-upgrade\-4
+- title: P admission upgrade 4
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record 32\-client admission cost and controller/worker RSS and thread sampled peaks throughout each trial; include active offer deadline machinery, not only idle resources\.
+- obligation_ids: O\-admission
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-admission-upgrade-4",
+    "obligation_id": "O-admission",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-4"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-admission-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-admission-upgrade-4",
+    "level": "component",
+    "resources": [
+      {
+        "description": "Controller/test harness/local origin thread count",
+        "id": "parent-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Controller/test harness/local origin resident memory",
+        "id": "parent-memory",
+        "unit": "bytes"
+      },
+      {
+        "description": "Summed live native worker threads",
+        "id": "worker-threads",
+        "unit": "threads"
+      },
+      {
+        "description": "Summed live native worker RSS",
+        "id": "worker-memory",
+        "unit": "bytes"
+      }
+    ],
+    "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+    "work_units": [
+      {
+        "description": "One authenticated SOCKS CONNECT plus first exact echo.",
+        "id": "admission",
+        "unit": "admission"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "admission_ms",
+      "subject_id": "admission",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_threads_peak",
+      "subject_id": "parent-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "parent_rss_peak",
+      "subject_id": "parent-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_threads_peak",
+      "subject_id": "worker-threads",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "threads"
+    },
+    {
+      "kind": "resource",
+      "minimum": 0,
+      "name": "worker_rss_peak",
+      "subject_id": "worker-memory",
+      "subject_kind": "resource",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "bytes"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "admission"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-control-upgrade-0"></a>
+
+### P\-control\-upgrade\-0 P control upgrade 0
+
+- id: P\-control\-upgrade\-0
+- title: P control upgrade 0
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record five prepare and commit API samples with 0, 1 and 4 live old generations; each successful prepare meets the local 30000ms soft budget and each commit meets 100ms\.
+- obligation_ids: O\-control
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-switch
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-control-upgrade-0",
+    "obligation_id": "O-control",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  },
+  {
+    "first": 117,
+    "last": 341,
+    "path": "crates/hyperhub-core/src/forward/manager.rs"
+  },
+  {
+    "first": 1,
+    "last": 316,
+    "path": "crates/hyperhub-core/src/forward/manager/resident.rs"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-0"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": "All prepare samples <=30000ms and all commit samples <=100ms.",
+    "baseline": null,
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "micro",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-control-upgrade-0",
+    "level": "component",
+    "resources": [],
+    "start_event": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+    "work_units": [
+      {
+        "description": "One successful warm-artifact prepare plus commit; both separately timed.",
+        "id": "upgrade",
+        "unit": "upgrade"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "prepare_ms",
+      "subject_id": "upgrade",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    },
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "commit_ms",
+      "subject_id": "upgrade",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "upgrade"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-control-upgrade-1"></a>
+
+### P\-control\-upgrade\-1 P control upgrade 1
+
+- id: P\-control\-upgrade\-1
+- title: P control upgrade 1
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record five prepare and commit API samples with 0, 1 and 4 live old generations; each successful prepare meets the local 30000ms soft budget and each commit meets 100ms\.
+- obligation_ids: O\-control
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-switch
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-control-upgrade-1",
+    "obligation_id": "O-control",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  },
+  {
+    "first": 117,
+    "last": 341,
+    "path": "crates/hyperhub-core/src/forward/manager.rs"
+  },
+  {
+    "first": 1,
+    "last": 316,
+    "path": "crates/hyperhub-core/src/forward/manager/resident.rs"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-1"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": "All prepare samples <=30000ms and all commit samples <=100ms.",
+    "baseline": null,
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "micro",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-control-upgrade-1",
+    "level": "component",
+    "resources": [],
+    "start_event": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+    "work_units": [
+      {
+        "description": "One successful warm-artifact prepare plus commit; both separately timed.",
+        "id": "upgrade",
+        "unit": "upgrade"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "prepare_ms",
+      "subject_id": "upgrade",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    },
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "commit_ms",
+      "subject_id": "upgrade",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "upgrade"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-control-upgrade-4"></a>
+
+### P\-control\-upgrade\-4 P control upgrade 4
+
+- id: P\-control\-upgrade\-4
+- title: P control upgrade 4
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record five prepare and commit API samples with 0, 1 and 4 live old generations; each successful prepare meets the local 30000ms soft budget and each commit meets 100ms\.
+- obligation_ids: O\-control
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-switch
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-control-upgrade-4",
+    "obligation_id": "O-control",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  },
+  {
+    "first": 117,
+    "last": 341,
+    "path": "crates/hyperhub-core/src/forward/manager.rs"
+  },
+  {
+    "first": 1,
+    "last": 316,
+    "path": "crates/hyperhub-core/src/forward/manager/resident.rs"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-4"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": "All prepare samples <=30000ms and all commit samples <=100ms.",
+    "baseline": null,
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "micro",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-control-upgrade-4",
+    "level": "component",
+    "resources": [],
+    "start_event": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+    "work_units": [
+      {
+        "description": "One successful warm-artifact prepare plus commit; both separately timed.",
+        "id": "upgrade",
+        "unit": "upgrade"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "prepare_ms",
+      "subject_id": "upgrade",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    },
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "commit_ms",
+      "subject_id": "upgrade",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "ms"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "upgrade"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-echo-baseline"></a>
+
+### P\-echo\-baseline P echo baseline
+
+- id: P\-echo\-baseline
+- title: P echo baseline
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record raw per\-echo latencies and valid throughput for eight fixed closed\-loop clients across baseline and 0,1,4 retained old generations\.
+- obligation_ids: O\-echo
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-echo-baseline",
+    "obligation_id": "O-echo",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "baseline"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-echo-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-echo-baseline",
+    "level": "component",
+    "resources": [],
+    "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+    "work_units": [
+      {
+        "description": "One exact256-byte echo from one of eight clients.",
+        "id": "echo",
+        "unit": "echo"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "echo_us",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "us"
+    },
+    {
+      "kind": "throughput",
+      "minimum": 0,
+      "name": "echo_rate",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "echo/s"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "echo"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-echo-upgrade-0"></a>
+
+### P\-echo\-upgrade\-0 P echo upgrade 0
+
+- id: P\-echo\-upgrade\-0
+- title: P echo upgrade 0
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record raw per\-echo latencies and valid throughput for eight fixed closed\-loop clients across baseline and 0,1,4 retained old generations\.
+- obligation_ids: O\-echo
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-echo-upgrade-0",
+    "obligation_id": "O-echo",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-0"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-echo-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-echo-upgrade-0",
+    "level": "component",
+    "resources": [],
+    "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+    "work_units": [
+      {
+        "description": "One exact256-byte echo from one of eight clients.",
+        "id": "echo",
+        "unit": "echo"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "echo_us",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "us"
+    },
+    {
+      "kind": "throughput",
+      "minimum": 0,
+      "name": "echo_rate",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "echo/s"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "echo"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-echo-upgrade-1"></a>
+
+### P\-echo\-upgrade\-1 P echo upgrade 1
+
+- id: P\-echo\-upgrade\-1
+- title: P echo upgrade 1
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record raw per\-echo latencies and valid throughput for eight fixed closed\-loop clients across baseline and 0,1,4 retained old generations\.
+- obligation_ids: O\-echo
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-echo-upgrade-1",
+    "obligation_id": "O-echo",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-1"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-echo-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-echo-upgrade-1",
+    "level": "component",
+    "resources": [],
+    "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+    "work_units": [
+      {
+        "description": "One exact256-byte echo from one of eight clients.",
+        "id": "echo",
+        "unit": "echo"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "echo_us",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "us"
+    },
+    {
+      "kind": "throughput",
+      "minimum": 0,
+      "name": "echo_rate",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "echo/s"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "echo"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-P-echo-upgrade-4"></a>
+
+### P\-echo\-upgrade\-4 P echo upgrade 4
+
+- id: P\-echo\-upgrade\-4
+- title: P echo upgrade 4
+- kind: performance
+- implementation_status: implemented
+- origin: generated
+- goal: Record raw per\-echo latencies and valid throughput for eight fixed closed\-loop clients across baseline and 0,1,4 retained old generations\.
+- obligation_ids: O\-echo
+- boundary_ids: 未声明
+- preconditions: 见共用前提与场景输入；性能 preflight: C\-native\-suite, C\-payload\-oracle
+- inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
+- steps:
+  1. Execute native functional preflight before formal timing\.
+  2. Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials\.
+  3. Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit\.
+- oracle.method: External client exact expected bytes and manager identity/phase assertions\.
+- oracle.assertion: Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process\-group trials\.
+- oracle.independence: Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding\.
+- workload_ids: W\-business
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+    "assertion_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ],
+    "id": "V-P-echo-upgrade-4",
+    "obligation_id": "O-echo",
+    "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+    "trigger_refs": [
+      {
+        "first": 1,
+        "last": 212,
+        "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 84,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  }
+]
+```
+
+- matrix:
+
+```json
+{
+  "state": "upgrade-4"
+}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/benchmark-forward-workers.py",
+    "--worker",
+    "target/release/hyperhub",
+    "--profile",
+    "release",
+    "--output",
+    "target/benchmarks/forward-workers/fresh-run"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- measurement_protocol:
+
+```json
+{
+  "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+  "budget": {
+    "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s.",
+    "timeout_seconds": 180
+  },
+  "comparison": {
+    "acceptance": null,
+    "baseline": "P-echo-baseline",
+    "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+    "factor_ids": [
+      "state"
+    ]
+  },
+  "execution_model": "closed_loop",
+  "measurement_context": {
+    "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+    "factor_ids": [
+      "state"
+    ],
+    "id": "M-echo-upgrade-4",
+    "level": "component",
+    "resources": [],
+    "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+    "work_units": [
+      {
+        "description": "One exact256-byte echo from one of eight clients.",
+        "id": "echo",
+        "unit": "echo"
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "kind": "latency",
+      "minimum": 0,
+      "name": "echo_us",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "us"
+    },
+    {
+      "kind": "throughput",
+      "minimum": 0,
+      "name": "echo_rate",
+      "subject_id": "echo",
+      "subject_kind": "work_unit",
+      "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+      "unit": "echo/s"
+    }
+  ],
+  "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+  "sampling": {
+    "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim.",
+    "min_samples": 5,
+    "unit": "process"
+  },
+  "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+  "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+  "validity_checks": [
+    {
+      "condition": "Same-batch native preflight passed before timing.",
+      "id": "valid-native"
+    },
+    {
+      "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests.",
+      "id": "valid-work"
+    },
+    {
+      "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement.",
+      "id": "valid-state"
+    },
+    {
+      "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds.",
+      "id": "valid-samples"
+    }
+  ],
+  "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+  "work_unit": "echo"
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+## 覆盖映射
+
+| 阶段 | 义务覆盖 | 子边界覆盖 | 关键缺口 | 完整模型门槛 |
+|---|---|---|---|---|
+| 设计 | 5/5 | 11/11 | 无 | 满足 |
+| 实现 | 5/5 | 11/11 | 无 | 满足 |
+| 申报执行 | 0/5 | 0/11 | O\-flows, O\-oracle | 未满足 |
+| 申报有效测量 | 0/5 | 0/11 | O\-flows, O\-oracle | 未满足 |
+
+### 义务与子边界
+
+| ID | 类别 / 风险 / 适用性 | 属性与依据 | 所选阶段 |
+|---|---|---|---|
+| O\-admission | performance / normal / required | Record 32\-client admission cost and controller/worker RSS and thread sampled peaks throughout each trial; include active offer deadline machinery, not only idle resources\. / contract / benchmarks/forward\-workers/CONTRACT\.md; maintainer accepted worker scope and 30s/100ms soft budgets | 已覆盖 |
+| O\-control | performance / normal / required | Record five prepare and commit API samples with 0, 1 and 4 live old generations; each successful prepare meets the local 30000ms soft budget and each commit meets 100ms\. / contract / benchmarks/forward\-workers/CONTRACT\.md; maintainer accepted worker scope and 30s/100ms soft budgets | 已覆盖 |
+| O\-echo | performance / normal / required | Record raw per\-echo latencies and valid throughput for eight fixed closed\-loop clients across baseline and 0,1,4 retained old generations\. / contract / benchmarks/forward\-workers/CONTRACT\.md; maintainer accepted worker scope and 30s/100ms soft budgets | 已覆盖 |
+| O\-flows | correctness / critical / required | Actual old/new TCP, TLS, WebSocket and SSH flows survive switching; cancellation and candidate/control failures release owned resources without corrupting future dispatch\. / contract / benchmarks/forward\-workers/CONTRACT\.md; maintainer accepted worker scope and 30s/100ms soft budgets | 已覆盖 |
+| B\-bootstrap\-deadline | 子边界 | A source child that never reads large bootstrap cannot escape the whole\-phase 30s send deadline\. | 已覆盖 |
+| B\-capacity | 子边界 | Four retained old workers keep all streams; extra prepare is refused and natural drain releases capacity\. | 已覆盖 |
+| B\-control\-loss | 子边界 | Control disconnection preserves granted streams, normal EOF and central revocation; final OS exit releases parent leases\. | 已覆盖 |
+| B\-health\-deadline | 子边界 | A Booted child that stops consuming controls is quarantined by the 30s health deadline and retired\. | 已覆盖 |
+| B\-native\-preflight | 子边界 | With zero target Hosts, bad native ABI cannot publish global stable deployment or change installed target/active worker\. | 已覆盖 |
+| B\-probe\-exhaustion | 子边界 | Real Unix descriptor exhaustion during granted probe creation marks the original shared socket complete without relying on a Finished frame\. | 已覆盖 |
+| B\-ssh | 子边界 | Authenticated SSH channels continue across worker switch using unchanged MITM host identity\. | 已覆盖 |
+| B\-tls\-ws\-audit | 子边界 | Both generations retain live TLS/WebSocket streams, original CA/custom roots and one contiguous resident audit sequence\. | 已覆盖 |
+| B\-transfer | 子边界 | Actual parent/child TCP transfers preserve Fake\-IP session authority and centralized cancellation\. | 已覆盖 |
+| B\-ungranted\-disconnect | 子边界 | Control loss immediately releases ungranted offer claims, preserves granted cancellation watchers, and remains idempotent\. | 已覆盖 |
+| B\-worker\-crash | 子边界 | Confirmed candidate crash permits rollback of future dispatch while prior generation stream survives\. | 已覆盖 |
+| O\-oracle | correctness / critical / required | Every offered timed echo and admission token has independent exact byte validation; failed or incomplete work cannot count as successful throughput\. / contract / benchmarks/forward\-workers/CONTRACT\.md; maintainer accepted worker scope and 30s/100ms soft budgets | 已覆盖 |
+
+### 组合覆盖
+
+```json
+[
+  {
+    "covered": 4,
+    "fraction": 1.0,
+    "id": "I-states",
+    "missing": [],
+    "obligation_ids": [
+      "O-echo",
+      "O-admission"
+    ],
+    "required": 4
+  }
+]
+```
+
+### 属性依据与允许结果
+
+#### O\-admission
+
+```json
+{
+  "allowed_outcomes": [
+    "Record 32-client admission cost and controller/worker RSS and thread sampled peaks throughout each trial; include active offer deadline machinery, not only idle resources."
+  ],
+  "basis_evidence": [
+    {
+      "adoption_reference": null,
+      "locator": "Full component contract",
+      "reference": "benchmarks/forward-workers/CONTRACT.md",
+      "role": "acceptance",
+      "source_type": "project_contract",
+      "verified_scope": "Local fixed-work TCP echo, real worker switching, private transport faults, explicit exclusions and soft budgets.",
+      "version": "0.2.13 worker component contract"
+    }
+  ],
+  "fault_ids": [
+    "F05",
+    "F07",
+    "F08"
+  ],
+  "trigger_dimensions": [
+    "concurrency",
+    "resource",
+    "capacity"
+  ]
+}
+```
+
+#### O\-control
+
+```json
+{
+  "allowed_outcomes": [
+    "Record five prepare and commit API samples with 0, 1 and 4 live old generations; each successful prepare meets the local 30000ms soft budget and each commit meets 100ms."
+  ],
+  "basis_evidence": [
+    {
+      "adoption_reference": null,
+      "locator": "Full component contract",
+      "reference": "benchmarks/forward-workers/CONTRACT.md",
+      "role": "acceptance",
+      "source_type": "project_contract",
+      "verified_scope": "Local fixed-work TCP echo, real worker switching, private transport faults, explicit exclusions and soft budgets.",
+      "version": "0.2.13 worker component contract"
+    }
+  ],
+  "fault_ids": [
+    "F06",
+    "F16"
+  ],
+  "trigger_dimensions": [
+    "state",
+    "time",
+    "capacity"
+  ]
+}
+```
+
+#### O\-echo
+
+```json
+{
+  "allowed_outcomes": [
+    "Record raw per-echo latencies and valid throughput for eight fixed closed-loop clients across baseline and 0,1,4 retained old generations."
+  ],
+  "basis_evidence": [
+    {
+      "adoption_reference": null,
+      "locator": "Full component contract",
+      "reference": "benchmarks/forward-workers/CONTRACT.md",
+      "role": "acceptance",
+      "source_type": "project_contract",
+      "verified_scope": "Local fixed-work TCP echo, real worker switching, private transport faults, explicit exclusions and soft budgets.",
+      "version": "0.2.13 worker component contract"
+    }
+  ],
+  "fault_ids": [
+    "F08"
+  ],
+  "trigger_dimensions": [
+    "state",
+    "concurrency",
+    "capacity"
+  ]
+}
+```
+
+#### O\-flows
+
+```json
+{
+  "allowed_outcomes": [
+    "Actual old/new TCP, TLS, WebSocket and SSH flows survive switching; cancellation and candidate/control failures release owned resources without corrupting future dispatch."
+  ],
+  "basis_evidence": [
+    {
+      "adoption_reference": null,
+      "locator": "Full component contract",
+      "reference": "benchmarks/forward-workers/CONTRACT.md",
+      "role": "acceptance",
+      "source_type": "project_contract",
+      "verified_scope": "Local fixed-work TCP echo, real worker switching, private transport faults, explicit exclusions and soft budgets.",
+      "version": "0.2.13 worker component contract"
+    }
+  ],
+  "fault_ids": [
+    "F01",
+    "F04",
+    "F05",
+    "F06",
+    "F07",
+    "F08",
+    "F09",
+    "F12",
+    "F13",
+    "F14",
+    "F16"
+  ],
+  "trigger_dimensions": [
+    "state",
+    "identity",
+    "concurrency",
+    "time",
+    "resource",
+    "capacity",
+    "dependency",
+    "recovery",
+    "version"
+  ]
+}
+```
+
+#### O\-oracle
+
+```json
+{
+  "allowed_outcomes": [
+    "Every offered timed echo and admission token has independent exact byte validation; failed or incomplete work cannot count as successful throughput."
+  ],
+  "basis_evidence": [
+    {
+      "adoption_reference": null,
+      "locator": "Full component contract",
+      "reference": "benchmarks/forward-workers/CONTRACT.md",
+      "role": "acceptance",
+      "source_type": "project_contract",
+      "verified_scope": "Local fixed-work TCP echo, real worker switching, private transport faults, explicit exclusions and soft budgets.",
+      "version": "0.2.13 worker component contract"
+    }
+  ],
+  "fault_ids": [
+    "F01",
+    "F10"
+  ],
+  "trigger_dimensions": [
+    "input",
+    "identity",
+    "concurrency"
+  ]
+}
+```
+
+### 类别审查与类别覆盖
+
+各阶段类别覆盖要求该类别关联的义务均达到对应阶段；目录审查完成率不能替代义务或子边界覆盖。
+
+| 阶段 | 类别审查完成 | 适用类别覆盖 |
+|---|---|---|
+| 设计 | 完成 | 12/12 |
+| 实现 | 完成 | 12/12 |
+| 申报执行 | 完成 | 0/12 |
+| 申报有效测量 | 完成 | 0/12 |
+
+### 工作负载覆盖与范围一致性
+
+#### 设计
+
+```json
+{
+  "covered": 2,
+  "items": [
+    {
+      "case_ids": [
+        "C-native-suite",
+        "C-payload-oracle",
+        "P-admission-baseline",
+        "P-admission-upgrade-0",
+        "P-admission-upgrade-1",
+        "P-admission-upgrade-4",
+        "P-echo-baseline",
+        "P-echo-upgrade-0",
+        "P-echo-upgrade-1",
+        "P-echo-upgrade-4"
+      ],
+      "covered": true,
+      "goal": "Compare valid closed-loop echo and concurrent admission overhead at baseline and retention boundaries.",
+      "id": "W-business",
+      "missing_atoms": [],
+      "role": "primary",
+      "unresolved_obligations": []
+    },
+    {
+      "case_ids": [
+        "C-native-suite",
+        "P-control-upgrade-0",
+        "P-control-upgrade-1",
+        "P-control-upgrade-4"
+      ],
+      "covered": true,
+      "goal": "Measure prepare and commit separately under retained-generation states.",
+      "id": "W-switch",
+      "missing_atoms": [],
+      "role": "primary",
+      "unresolved_obligations": []
+    }
+  ],
+  "missing": [],
+  "mode": "structured",
+  "required": 2,
+  "scope_aligned": true
+}
+```
+
+#### 实现
+
+```json
+{
+  "covered": 2,
+  "items": [
+    {
+      "case_ids": [
+        "C-native-suite",
+        "C-payload-oracle",
+        "P-admission-baseline",
+        "P-admission-upgrade-0",
+        "P-admission-upgrade-1",
+        "P-admission-upgrade-4",
+        "P-echo-baseline",
+        "P-echo-upgrade-0",
+        "P-echo-upgrade-1",
+        "P-echo-upgrade-4"
+      ],
+      "covered": true,
+      "goal": "Compare valid closed-loop echo and concurrent admission overhead at baseline and retention boundaries.",
+      "id": "W-business",
+      "missing_atoms": [],
+      "role": "primary",
+      "unresolved_obligations": []
+    },
+    {
+      "case_ids": [
+        "C-native-suite",
+        "P-control-upgrade-0",
+        "P-control-upgrade-1",
+        "P-control-upgrade-4"
+      ],
+      "covered": true,
+      "goal": "Measure prepare and commit separately under retained-generation states.",
+      "id": "W-switch",
+      "missing_atoms": [],
+      "role": "primary",
+      "unresolved_obligations": []
+    }
+  ],
+  "missing": [],
+  "mode": "structured",
+  "required": 2,
+  "scope_aligned": true
+}
+```
+
+#### 申报执行
+
+```json
+{
+  "covered": 0,
+  "items": [
+    {
+      "case_ids": [],
+      "covered": false,
+      "goal": "Compare valid closed-loop echo and concurrent admission overhead at baseline and retention boundaries.",
+      "id": "W-business",
+      "missing_atoms": [
+        {
+          "boundary_id": null,
+          "obligation_id": "O-admission"
+        },
+        {
+          "boundary_id": null,
+          "obligation_id": "O-echo"
+        },
+        {
+          "boundary_id": "B-bootstrap-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-capacity",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-control-loss",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-health-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-native-preflight",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-probe-exhaustion",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ssh",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-tls-ws-audit",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-transfer",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-worker-crash",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": null,
+          "obligation_id": "O-oracle"
+        }
+      ],
+      "role": "primary",
+      "unresolved_obligations": []
+    },
+    {
+      "case_ids": [],
+      "covered": false,
+      "goal": "Measure prepare and commit separately under retained-generation states.",
+      "id": "W-switch",
+      "missing_atoms": [
+        {
+          "boundary_id": null,
+          "obligation_id": "O-control"
+        },
+        {
+          "boundary_id": "B-bootstrap-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-capacity",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-control-loss",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-health-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-native-preflight",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-probe-exhaustion",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ssh",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-tls-ws-audit",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-transfer",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-worker-crash",
+          "obligation_id": "O-flows"
+        }
+      ],
+      "role": "primary",
+      "unresolved_obligations": []
+    }
+  ],
+  "missing": [
+    "W-business",
+    "W-switch"
+  ],
+  "mode": "structured",
+  "required": 2,
+  "scope_aligned": true
+}
+```
+
+#### 申报有效测量
+
+```json
+{
+  "covered": 0,
+  "items": [
+    {
+      "case_ids": [],
+      "covered": false,
+      "goal": "Compare valid closed-loop echo and concurrent admission overhead at baseline and retention boundaries.",
+      "id": "W-business",
+      "missing_atoms": [
+        {
+          "boundary_id": null,
+          "obligation_id": "O-admission"
+        },
+        {
+          "boundary_id": null,
+          "obligation_id": "O-echo"
+        },
+        {
+          "boundary_id": "B-bootstrap-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-capacity",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-control-loss",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-health-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-native-preflight",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-probe-exhaustion",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ssh",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-tls-ws-audit",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-transfer",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-worker-crash",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": null,
+          "obligation_id": "O-oracle"
+        }
+      ],
+      "role": "primary",
+      "unresolved_obligations": []
+    },
+    {
+      "case_ids": [],
+      "covered": false,
+      "goal": "Measure prepare and commit separately under retained-generation states.",
+      "id": "W-switch",
+      "missing_atoms": [
+        {
+          "boundary_id": null,
+          "obligation_id": "O-control"
+        },
+        {
+          "boundary_id": "B-bootstrap-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-capacity",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-control-loss",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-health-deadline",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-native-preflight",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-probe-exhaustion",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ssh",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-tls-ws-audit",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-transfer",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-worker-crash",
+          "obligation_id": "O-flows"
+        }
+      ],
+      "role": "primary",
+      "unresolved_obligations": []
+    }
+  ],
+  "missing": [
+    "W-business",
+    "W-switch"
+  ],
+  "mode": "structured",
+  "required": 2,
+  "scope_aligned": true
+}
+```
+
+### 性能验收申报
+
+```json
+{}
+```
+
+## 未覆盖与后续
+
+### 设计缺口
+
+```json
+{
+  "boundaries": [],
+  "interactions": [],
+  "obligations": [],
+  "scope_aligned": true,
+  "workloads": []
+}
+```
+
+### 实现缺口
+
+```json
+{
+  "boundaries": [],
+  "interactions": [],
+  "obligations": [],
+  "scope_aligned": true,
+  "workloads": []
+}
+```
+
+### 申报执行缺口
+
+```json
+{
+  "boundaries": [
+    "B-bootstrap-deadline",
+    "B-capacity",
+    "B-control-loss",
+    "B-health-deadline",
+    "B-native-preflight",
+    "B-probe-exhaustion",
+    "B-ssh",
+    "B-tls-ws-audit",
+    "B-transfer",
+    "B-ungranted-disconnect",
+    "B-worker-crash"
+  ],
+  "interactions": [
+    {
+      "id": "I-states",
+      "missing": [
+        {
+          "state": "baseline"
+        },
+        {
+          "state": "upgrade-0"
+        },
+        {
+          "state": "upgrade-1"
+        },
+        {
+          "state": "upgrade-4"
+        }
+      ]
+    }
+  ],
+  "obligations": [
+    "O-admission",
+    "O-control",
+    "O-echo",
+    "O-flows",
+    "O-oracle"
+  ],
+  "scope_aligned": true,
+  "workloads": [
+    "W-business",
+    "W-switch"
+  ]
+}
+```
+
+### 申报有效测量缺口
+
+```json
+{
+  "boundaries": [
+    "B-bootstrap-deadline",
+    "B-capacity",
+    "B-control-loss",
+    "B-health-deadline",
+    "B-native-preflight",
+    "B-probe-exhaustion",
+    "B-ssh",
+    "B-tls-ws-audit",
+    "B-transfer",
+    "B-ungranted-disconnect",
+    "B-worker-crash"
+  ],
+  "interactions": [
+    {
+      "id": "I-states",
+      "missing": [
+        {
+          "state": "baseline"
+        },
+        {
+          "state": "upgrade-0"
+        },
+        {
+          "state": "upgrade-1"
+        },
+        {
+          "state": "upgrade-4"
+        }
+      ]
+    }
+  ],
+  "obligations": [
+    "O-admission",
+    "O-control",
+    "O-echo",
+    "O-flows",
+    "O-oracle"
+  ],
+  "scope_aligned": true,
+  "workloads": [
+    "W-business",
+    "W-switch"
+  ]
+}
+```
+
+### 假设、排除与粒度限制
+
+```json
+{
+  "coarse_obligations": [
+    "O-admission",
+    "O-control",
+    "O-echo",
+    "O-oracle"
+  ],
+  "conditional_obligations": [],
+  "excluded_obligations": [],
+  "unresolved_obligations": []
+}
+```
+
+未声明子边界的义务只有父项粒度；这些比例不能证明其内部边界全部覆盖。触发与断言引用仍需语义审查。
+
+- Project native hooks, installer, resident durable journal, cold artifact and all\-platform execution remain outside this component benchmark\.
+- Five process trials and fixed offered work cannot establish production tail latency, maximum throughput or long\-term memory leak absence\.
+- Controller resources include local origin and test harness; sampled1ms peaks can miss transient threads\.
+- Known\-cost and wrong\-byte sensitivity mutations will be run in isolated source copies; their results are reported separately\.
+- Unix descriptor\-exhaustion verification is not observed on Windows; its formal valid\-coverage report must retain that gap until an equivalent native fault test exists\.
+- Coverage is relative to the declared model, source snapshot, and finite factor partitions\.
+- Hashes and declarations do not prove semantic completeness, oracle truth, execution authenticity, or statistical validity\.

@@ -113,14 +113,11 @@ enum Command {
     Stop,
     Restart(lifecycle::StartConfig),
     Upgrade,
-    UpgradeHelper {
-        payload: PathBuf,
-        target: PathBuf,
-        restart: bool,
-    },
-    Status {
-        json: bool,
-    },
+    UpgradeAction { action: String, id: Option<String> },
+    ForwardWorker,
+    ExportUpgradeBundle(PathBuf),
+    InstallUpgrade(PathBuf),
+    Status { json: bool },
     Logs(lifecycle::LogsConfig),
     AuthClear,
     Chat(chat::ChatConfig),
@@ -180,11 +177,20 @@ fn execute(command: Command) -> Result<i32, String> {
         Command::Stop => lifecycle::stop(),
         Command::Restart(config) => lifecycle::restart(config),
         Command::Upgrade => upgrade::run_manual(),
-        Command::UpgradeHelper {
-            payload,
-            target,
-            restart,
-        } => upgrade::run_helper(&payload, &target, restart),
+        Command::UpgradeAction { action, id } => upgrade::manage(&action, id.as_deref()),
+        Command::ForwardWorker => tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(
+                std::thread::available_parallelism().map_or(1, |count| count.get().min(4)),
+            )
+            .max_blocking_threads(32)
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(SocksService::run_forward_worker())
+            .map(|()| 0)
+            .map_err(|error| error.to_string()),
+        Command::ExportUpgradeBundle(directory) => upgrade::export_bundle(&directory),
+        Command::InstallUpgrade(job) => upgrade::run_install_helper(&job),
         Command::Status { json } => lifecycle::status(json),
         Command::Logs(config) => lifecycle::logs(config),
         Command::AuthClear => clear_password_authorization(),
@@ -322,7 +328,10 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         socks.runtime(),
         socks.audit_writer(),
     ));
-    let socks = socks.with_trust_store(trust);
+    let socks = socks
+        .with_trust_store(trust)
+        .with_forward_workers(std::env::current_exe().map_err(|error| error.to_string())?)
+        .map_err(|error| format!("cannot prepare forwarding worker: {error}"))?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let socks_address = runtime
         .block_on(socks.prepare_listener())
@@ -347,7 +356,18 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
             .join("runtime/upgrades"),
         Zeroizing::new(api_key.as_bytes().to_vec()),
     )
-    .map_err(|error| format!("cannot open upgrade coordinator: {error}"))?;
+    .map_err(|error| format!("cannot open upgrade coordinator: {error}"))?
+    .with_release_upgrades(
+        &config_store::hyperhub_home()
+            .map_err(|error| error.to_string())?
+            .join("runtime/release-upgrades"),
+        Zeroizing::new(api_key.as_bytes().to_vec()),
+        socks
+            .forward_workers()
+            .ok_or("forwarding worker manager is unavailable")?,
+        &std::env::current_exe().map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("cannot open release coordinator: {error}"))?;
     output.line(format!("HyperHub SOCKS5 listening on {}", socks_address))?;
     output.line(format!(
         "HyperHub control endpoint {}",
@@ -778,14 +798,20 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
             Ok(Command::Stop)
         }
         "restart" => parse_start(&args[1..]).map(Command::Restart),
-        "upgrade" => require_no_args("upgrade", &args[1..]).map(|_| Command::Upgrade),
-        "upgrade-helper" => match &args[1..] {
-            [payload, target] | [payload, target, _] => Ok(Command::UpgradeHelper {
-                payload: payload.clone().into(),
-                target: target.clone().into(),
-                restart: args.get(3).is_some_and(|value| value == "--restart"),
-            }),
-            _ => Err("upgrade-helper is an internal command".into()),
+        "upgrade" => match &args[1..] {
+            [] => Ok(Command::Upgrade),
+            [action] if action == "status" => Ok(Command::UpgradeAction { action: "status".into(), id: None }),
+            [action, id] if action == "status" || action == "recover" || action == "abort" => Ok(Command::UpgradeAction { action: action.to_string_lossy().into_owned(), id: Some(id.to_string_lossy().into_owned()) }),
+            _ => Err("usage: hyperhub upgrade [status [id] | recover <id> | abort <id>]".into()),
+        },
+        "forward-worker" => require_no_args("forward-worker", &args[1..]).map(|_| Command::ForwardWorker),
+        "export-upgrade-bundle" => match &args[1..] {
+            [directory] => Ok(Command::ExportUpgradeBundle(directory.into())),
+            _ => Err("export-upgrade-bundle is an internal command".into()),
+        },
+        "upgrade-install-helper" => match &args[1..] {
+            [job] => Ok(Command::InstallUpgrade(job.into())),
+            _ => Err("upgrade-install-helper is an internal command".into()),
         },
         "status" => parse_status(&args[1..]),
         "logs" => parse_logs(&args[1..]).map(Command::Logs),
@@ -1325,6 +1351,9 @@ server management:
   hyperhub stop                         stop the local gateway
   hyperhub restart                     restart the local gateway
   hyperhub upgrade                       check and install the latest CLI release
+  hyperhub upgrade status [id]           inspect the resident upgrade transaction
+  hyperhub upgrade recover <id>          recover the journal and retry installation
+  hyperhub upgrade abort <id>            roll back before the final upgrade decision
   hyperhub status [--json]              show gateway and managed-process status
   hyperhub logs ...                     view gateway logs
   hyperhub auth clear                   clear cached local authorization

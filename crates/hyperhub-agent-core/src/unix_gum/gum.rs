@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "gum-agent"))]
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 #[repr(C)]
 pub struct GumInterceptor {
@@ -73,24 +73,41 @@ extern "C" {
     ) -> *mut c_void;
     fn gum_module_find_global_export_by_name(symbol_name: *const c_char) -> *mut c_void;
 }
-static ORIGINALS: OnceLock<Mutex<HashMap<&'static str, usize>>> = OnceLock::new();
-fn originals() -> &'static Mutex<HashMap<&'static str, usize>> {
-    ORIGINALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
+// Native bridges are fixed at installation. Immutable published maps avoid a
+// copied Mutex left owned by a vanished parent thread in a fork child. Earlier
+// installation snapshots are bounded by the bridge count and stay resident.
+static ORIGINALS: AtomicPtr<HashMap<&'static str, usize>> = AtomicPtr::new(std::ptr::null_mut());
 pub fn original(symbol: &str) -> Option<*mut c_void> {
-    originals()
-        .lock()
-        .ok()?
-        .get(symbol)
-        .copied()
-        .map(|p| p as *mut c_void)
+    let pointer = ORIGINALS.load(Ordering::Acquire);
+    if pointer.is_null() {
+        None
+    } else {
+        unsafe { &*pointer }
+            .get(symbol)
+            .copied()
+            .map(|p| p as *mut c_void)
+    }
 }
 pub fn set_original(symbol: &'static str, pointer: *mut c_void) -> Result<(), String> {
-    originals()
-        .lock()
-        .map_err(|_| "original map poisoned".to_string())?
-        .insert(symbol, pointer as usize);
-    Ok(())
+    loop {
+        let old = ORIGINALS.load(Ordering::Acquire);
+        let mut map = if old.is_null() {
+            HashMap::new()
+        } else {
+            unsafe { &*old }.clone()
+        };
+        map.insert(symbol, pointer as usize);
+        let fresh = Box::into_raw(Box::new(map));
+        if ORIGINALS
+            .compare_exchange(old, fresh, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        unsafe {
+            drop(Box::from_raw(fresh));
+        }
+    }
 }
 pub unsafe fn initialize() -> Result<*mut GumInterceptor, String> {
     gum_init_embedded();

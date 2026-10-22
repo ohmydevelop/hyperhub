@@ -5,9 +5,19 @@ use std::fs;
 use std::io::IsTerminal;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod bundle;
+
+pub(crate) fn export_bundle(directory: &Path) -> Result<i32, String> {
+    let manifest = bundle::export(directory).map_err(|error| error.to_string())?;
+    println!(
+        "{}",
+        serde_json::to_string(&manifest).map_err(|error| error.to_string())?
+    );
+    Ok(0)
+}
 
 const REPOSITORY: &str = "ohmydevelop/hyperhub";
 const CHECK_INTERVAL_MS: u64 = 12 * 60 * 60 * 1000;
@@ -92,7 +102,7 @@ pub(crate) fn check_on_start() -> Result<bool, String> {
         .map_err(|error| format!("cannot read upgrade choice: {error}"))?;
     match answer.trim() {
         "1" => {
-            perform_upgrade(&result, true)?;
+            perform_upgrade(&result, false, true)?;
             Ok(true)
         }
         "3" => {
@@ -123,47 +133,225 @@ pub(crate) fn run_manual() -> Result<i32, String> {
         result.version
     );
     println!("Release notes: {}", result.release.html_url);
-    perform_upgrade(&result, crate::lifecycle::serve_running()?)?;
+    perform_upgrade(&result, crate::lifecycle::serve_running()?, false)?;
     Ok(0)
 }
 
-pub(crate) fn run_helper(payload: &Path, target: &Path, restart: bool) -> Result<i32, String> {
-    thread::sleep(Duration::from_millis(750));
-    replace_binary(payload, target)?;
-    let _ = fs::remove_file(payload);
-    if restart {
-        let _ = Command::new(target).arg("start").spawn();
+pub(crate) fn manage(action: &str, id: Option<&str>) -> Result<i32, String> {
+    use hyperhub_core::session::{ControlRequest, ControlResponse};
+    let request = if action == "status" {
+        ControlRequest::GetReleaseUpgrades {
+            id: id.map(str::to_owned),
+        }
+    } else {
+        let key = crate::password::acquire_api_key()?;
+        let request = hyperhub_core::release::Request {
+            id: id.ok_or("upgrade transaction id is required")?.into(),
+            issued_at_ms: now_ms(),
+            action: match action {
+                "recover" => hyperhub_core::release::Action::Recover,
+                "abort" => hyperhub_core::release::Action::Abort,
+                _ => return Err("unknown upgrade action".into()),
+            },
+        };
+        let proof = request
+            .proof(key.as_bytes())
+            .map_err(|error| error.to_string())?;
+        ControlRequest::ReleaseUpgrade { request, proof }
+    };
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    let response = runtime
+        .block_on(hyperhub_core::control::control_request(
+            &hyperhub_core::control::discovery_control_endpoint(),
+            &request,
+        ))
+        .map_err(|error| error.to_string())?;
+    match response {
+        ControlResponse::Error { message } => Err(message),
+        response => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
+            );
+            Ok(0)
+        }
     }
-    Ok(0)
 }
 
-fn perform_upgrade(info: &ReleaseInfo, restart: bool) -> Result<(), String> {
+fn perform_upgrade(
+    info: &ReleaseInfo,
+    running: bool,
+    start_after_install: bool,
+) -> Result<(), String> {
     let payload = download_payload(info)?;
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
-    if restart {
-        crate::lifecycle::stop()?;
+    let id = format!("release-{}-{:016x}", now_ms(), rand::random::<u64>());
+    let root = hyperhub_core::config_store::hyperhub_home()
+        .map_err(|error| error.to_string())?
+        .join("runtime/releases")
+        .join(&id);
+    // The content-addressed installer creates and validates a private parent.
+    let payload_manifest = hyperhub_engine::manifest(&payload, &info.version);
+    let artifact = hyperhub_runtime::artifact::Artifact::install(
+        &root.join("executable"),
+        &payload_manifest,
+        payload.as_slice(),
+    )
+    .map_err(|error| error.to_string())?;
+    let executable = root.join(binary_name());
+    fs::hard_link(artifact.path(), &executable).map_err(|error| error.to_string())?;
+    set_executable(&executable)?;
+    let export = root.join("bundle");
+    let output = Command::new(&executable)
+        .arg("export-upgrade-bundle")
+        .arg(&export)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("cannot inspect release bundle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "release bundle inspection failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
-    let temp_dir = std::env::temp_dir().join(format!("hyperhub-upgrade-{}", std::process::id()));
-    fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
-    let payload_path = temp_dir.join(binary_name());
-    fs::write(&payload_path, payload).map_err(|error| error.to_string())?;
-    set_executable(&payload_path)?;
-    let helper_path = temp_dir.join(format!("hyperhub-updater-{}", binary_name()));
-    fs::copy(&current, &helper_path).map_err(|error| error.to_string())?;
-    set_executable(&helper_path)?;
-    let mut helper = Command::new(&helper_path);
-    helper
-        .arg("upgrade-helper")
-        .arg(&payload_path)
-        .arg(&current);
-    if restart {
-        helper.arg("--restart");
+    let (bundle, engine) = bundle::read(&export, &executable).map_err(|error| error.to_string())?;
+    if bundle.version != info.version {
+        return Err("release version does not match the verified archive".into());
     }
-    helper
-        .spawn()
-        .map_err(|error| format!("cannot start upgrade helper: {error}"))?;
-    println!("Upgrade downloaded and will be installed after this process exits.");
+    let expected_target_sha256 = hyperhub_core::release::installer::digest(&current)
+        .map_err(|error| error.to_string())?
+        .0;
+    if running {
+        let request = hyperhub_core::release::Request {
+            id: id.clone(),
+            issued_at_ms: now_ms(),
+            action: hyperhub_core::release::Action::Prepare {
+                plan: hyperhub_core::release::Plan {
+                    bundle,
+                    executable,
+                    engine,
+                    cache: root.join("engines"),
+                    target: current,
+                    expected_target_sha256,
+                },
+                auto_commit: true,
+            },
+        };
+        let key = crate::password::acquire_api_key()?;
+        let proof = request
+            .proof(key.as_bytes())
+            .map_err(|error| error.to_string())?;
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+        let response = runtime
+            .block_on(hyperhub_core::control::control_request(
+                &hyperhub_core::control::discovery_control_endpoint(),
+                &hyperhub_core::session::ControlRequest::ReleaseUpgrade { request, proof },
+            ))
+            .map_err(|error| {
+                format!("resident Serve cannot accept this upgrade: {error}; requires_restart")
+            })?;
+        match response {
+            hyperhub_core::session::ControlResponse::ReleaseUpgrade { record } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?
+                );
+                if record.phase == hyperhub_core::release::Phase::RequiresRestart {
+                    return Err("resident Base requires an explicit restart; no managed process was restarted".into());
+                }
+                println!("Upgrade accepted: {id}. Resident Serve will finish it after this CLI exits. Use hyperhub status --json to inspect progress.");
+            }
+            hyperhub_core::session::ControlResponse::Error { message } => return Err(message),
+            _ => return Err("resident Serve returned an unexpected upgrade response".into()),
+        }
+    } else {
+        let (_, key) = crate::password::ensure_api_key(&crate::password::default_api_key_path()?)?;
+        let job = hyperhub_core::release::installer::SignedJob::sign(
+            hyperhub_core::release::installer::Job {
+                id: id.clone(),
+                attempt: 1,
+                issued_at_ms: now_ms(),
+                source: executable,
+                target: current,
+                sha256: bundle.worker_sha256,
+                size: bundle.worker_size,
+                expected_target_sha256,
+                start_after_install,
+            },
+            key.as_bytes(),
+        )
+        .map_err(|error| error.to_string())?;
+        let job_path = root.join("install.json");
+        job.write(&job_path).map_err(|error| error.to_string())?;
+        let helper = root.join(format!("installer{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(
+            std::env::current_exe().map_err(|error| error.to_string())?,
+            &helper,
+        )
+        .map_err(|error| error.to_string())?;
+        set_executable(&helper)?;
+        Command::new(helper)
+            .arg("upgrade-install-helper")
+            .arg(&job_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("cannot start installation helper: {error}"))?;
+        println!(
+            "Installation accepted: {id}. Helper acknowledgement: {}",
+            job_path.with_extension("ack.json").display()
+        );
+    }
     Ok(())
+}
+
+pub(crate) fn run_install_helper(path: &Path) -> Result<i32, String> {
+    use hyperhub_core::release::installer::{
+        self, Acknowledgement, SignedAcknowledgement, SignedJob,
+    };
+    let key = crate::password::acquire_api_key()?;
+    let signed = SignedJob::read(path, key.as_bytes()).map_err(|error| error.to_string())?;
+    let result = installer::install(&signed.job);
+    let start_after_install = signed.job.start_after_install;
+    let installed_target = signed.job.target.clone();
+    let ack = Acknowledgement {
+        id: signed.job.id,
+        attempt: signed.job.attempt,
+        issued_at_ms: now_ms(),
+        sha256: signed.job.sha256,
+        installed: result.is_ok(),
+        error: result.as_ref().err().map(|error| error.to_string()),
+    };
+    let proof = ack
+        .proof(key.as_bytes())
+        .map_err(|error| error.to_string())?;
+    SignedAcknowledgement {
+        ack: ack.clone(),
+        proof: proof.clone(),
+    }
+    .write(&path.with_extension("ack.json"))
+    .map_err(|error| error.to_string())?;
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    // The persisted signed receipt permits recovery if the resident endpoint is
+    // temporarily unavailable. An offline installation needs only this receipt.
+    let _ = runtime.block_on(hyperhub_core::control::control_request(
+        &hyperhub_core::control::discovery_control_endpoint(),
+        &hyperhub_core::session::ControlRequest::ReleaseHelperAck { ack, proof },
+    ));
+    result.map_err(|error| error.to_string())?;
+    if start_after_install {
+        let status = Command::new(installed_target)
+            .arg("start")
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err(format!(
+                "installed HyperHub could not start Serve: {status}"
+            ));
+        }
+    }
+    Ok(0)
 }
 
 fn check_latest() -> Result<ReleaseInfo, String> {
@@ -249,6 +437,7 @@ fn download_payload(info: &ReleaseInfo) -> Result<Vec<u8>, String> {
 }
 
 fn extract_binary(bytes: &[u8], archive_name: &str) -> Result<Vec<u8>, String> {
+    let mut selected = None;
     if archive_name.ends_with(".zip") {
         let mut archive =
             zip::ZipArchive::new(Cursor::new(bytes)).map_err(|error| error.to_string())?;
@@ -259,10 +448,16 @@ fn extract_binary(bytes: &[u8], archive_name: &str) -> Result<Vec<u8>, String> {
                 .and_then(|name| name.to_str())
                 == Some(binary_name())
             {
-                let mut output = Vec::new();
-                file.read_to_end(&mut output)
-                    .map_err(|error| error.to_string())?;
-                return Ok(output);
+                if selected.is_some()
+                    || !file.is_file()
+                    || file
+                        .unix_mode()
+                        .is_some_and(|mode| mode & 0o170000 == 0o120000)
+                {
+                    return Err("release must contain exactly one regular CLI executable".into());
+                }
+                let size = file.size();
+                selected = Some(read_executable(&mut file, size)?);
             }
         }
     } else {
@@ -272,59 +467,35 @@ fn extract_binary(bytes: &[u8], archive_name: &str) -> Result<Vec<u8>, String> {
             let mut entry = entry.map_err(|error| error.to_string())?;
             if entry
                 .path()
-                .ok()
-                .and_then(|path| path.file_name().map(|name| name == binary_name()))
-                .unwrap_or(false)
+                .map_err(|error| error.to_string())?
+                .file_name()
+                .is_some_and(|name| name == binary_name())
             {
-                let mut output = Vec::new();
-                entry
-                    .read_to_end(&mut output)
-                    .map_err(|error| error.to_string())?;
-                return Ok(output);
+                if selected.is_some() || !entry.header().entry_type().is_file() {
+                    return Err("release must contain exactly one regular CLI executable".into());
+                }
+                let size = entry.size();
+                selected = Some(read_executable(&mut entry, size)?);
             }
         }
     }
-    Err(format!(
-        "release archive does not contain {}",
-        binary_name()
-    ))
+    selected.ok_or_else(|| format!("release archive does not contain {}", binary_name()))
 }
 
-fn replace_binary(payload: &Path, target: &Path) -> Result<(), String> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| "cannot determine HyperHub binary directory".to_string())?;
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "cannot determine HyperHub binary name".to_string())?;
-    let staging = parent.join(format!(".{file_name}.upgrade-{}", std::process::id()));
-    let backup = target.with_extension("upgrade-backup");
-
-    // The downloaded payload lives in the system temporary directory, which
-    // may be mounted on a different filesystem from the install directory.
-    // Copy it beside the target first so the final rename stays same-device
-    // and remains atomic on Unix.
-    let _ = fs::remove_file(&staging);
-    fs::copy(payload, &staging)
-        .map_err(|error| format!("cannot stage upgraded HyperHub binary: {error}"))?;
-    if let Err(error) = set_executable(&staging) {
-        let _ = fs::remove_file(&staging);
-        return Err(format!("cannot prepare staged HyperHub binary: {error}"));
+fn read_executable(reader: &mut impl Read, expected: u64) -> Result<Vec<u8>, String> {
+    use hyperhub_core::release::installer::MAX_EXECUTABLE;
+    if expected == 0 || expected > MAX_EXECUTABLE {
+        return Err("release executable size is invalid".into());
     }
-
-    let _ = fs::remove_file(&backup);
-    if let Err(error) = fs::rename(target, &backup) {
-        let _ = fs::remove_file(&staging);
-        return Err(format!("cannot move current HyperHub binary: {error}"));
+    let mut output = Vec::new();
+    reader
+        .take(MAX_EXECUTABLE + 1)
+        .read_to_end(&mut output)
+        .map_err(|error| error.to_string())?;
+    if output.len() as u64 != expected {
+        return Err("release executable size mismatch".into());
     }
-    if let Err(error) = fs::rename(&staging, target) {
-        let _ = fs::rename(&backup, target);
-        let _ = fs::remove_file(&staging);
-        return Err(format!("cannot install upgraded HyperHub binary: {error}"));
-    }
-    let _ = fs::remove_file(backup);
-    Ok(())
+    Ok(output)
 }
 
 fn asset_name() -> Result<String, String> {
@@ -402,13 +573,15 @@ fn now_ms() -> u64 {
 }
 
 fn set_executable(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = fs::metadata(path)
             .map_err(|error| error.to_string())?
             .permissions();
-        permissions.set_mode(0o755);
+        permissions.set_mode(0o555);
         fs::set_permissions(path, permissions).map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -433,26 +606,47 @@ mod tests {
     }
 
     #[test]
-    fn replaces_binary_through_install_directory_staging() {
-        let root = std::env::temp_dir().join(format!(
-            "hyperhub-upgrade-test-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let payload = root.join("payload");
-        let target = root.join("hyperhub");
-        fs::write(&payload, b"new-binary").unwrap();
-        fs::write(&target, b"old-binary").unwrap();
+    fn archive_rejects_ambiguous_executables_and_size_mismatch() {
+        use zip::write::SimpleFileOptions;
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(
+            format!("package/{}", binary_name()),
+            SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"first executable").unwrap();
+        zip.start_file(
+            format!("other/{}", binary_name()),
+            SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"second executable").unwrap();
+        let archive = zip.finish().unwrap().into_inner();
+        assert!(extract_binary(&archive, "fixture.zip")
+            .unwrap_err()
+            .contains("exactly one"));
+        assert!(read_executable(&mut Cursor::new(b"truncated"), 100).is_err());
+        assert!(read_executable(&mut Cursor::new(b""), 0).is_err());
+    }
 
-        replace_binary(&payload, &target).unwrap();
-
-        assert_eq!(fs::read(&target).unwrap(), b"new-binary");
-        assert!(!target.with_extension("upgrade-backup").exists());
-        assert!(!root
-            .join(format!(".hyperhub.upgrade-{}", std::process::id()))
-            .exists());
-        let _ = fs::remove_dir_all(root);
+    #[test]
+    fn archive_selects_the_regular_cli_among_engine_bundle_entries() {
+        use zip::write::SimpleFileOptions;
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("package/upgrade/bundle.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.start_file(
+            format!("package/{}", binary_name()),
+            SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"local executable fixture").unwrap();
+        let archive = zip.finish().unwrap().into_inner();
+        assert_eq!(
+            extract_binary(&archive, "fixture.zip").unwrap(),
+            b"local executable fixture"
+        );
     }
 
     #[test]

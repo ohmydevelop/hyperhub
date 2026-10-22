@@ -3,7 +3,7 @@ use crate::retention::{
     date_key, date_partition_directory, run_log_retention, run_transcript_retention,
     unix_timestamp_ms,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -35,6 +35,7 @@ struct AuditOutput {
     now_ms: fn() -> u64,
     run_id: String,
     next_sequence: u64,
+    remote: Option<crate::forward::authority::Client>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,8 +43,9 @@ pub struct AuditWriter(Arc<Mutex<AuditOutput>>);
 
 const AUDIT_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Copy)]
-enum AuditCategory {
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuditCategory {
     Connection,
     Session,
     System,
@@ -146,6 +148,7 @@ impl AuditWriter {
             now_ms: clock,
             run_id,
             next_sequence: 1,
+            remote: None,
         }))))
     }
 
@@ -165,7 +168,32 @@ impl AuditWriter {
     }
 
     pub fn debug_enabled(&self) -> bool {
-        self.0.lock().expect("audit mutex poisoned").debug
+        let guard = self.0.lock().expect("audit mutex poisoned");
+        if let Some(client) = guard.remote.clone() {
+            drop(guard);
+            matches!(
+                client.call(crate::forward::authority::Request::DebugEnabled),
+                Ok(crate::forward::authority::Response::DebugEnabled { enabled: true })
+            )
+        } else {
+            guard.debug
+        }
+    }
+
+    pub(crate) fn remote(client: crate::forward::authority::Client) -> std::io::Result<Self> {
+        let writer = Self::open(None)?;
+        writer.0.lock().expect("audit mutex poisoned").remote = Some(client);
+        Ok(writer)
+    }
+    pub(crate) fn record_from_worker(
+        &self,
+        category: AuditCategory,
+        event: &str,
+        dimensions: Map<String, Value>,
+        attributes: Value,
+        debug_only: bool,
+    ) {
+        self.write_record_inner(category, event, dimensions, attributes, debug_only);
     }
 
     pub fn connection(
@@ -306,6 +334,17 @@ impl AuditWriter {
         let Ok(mut guard) = self.0.lock() else {
             return;
         };
+        if let Some(client) = guard.remote.clone() {
+            drop(guard);
+            let _ = client.expect_ok(crate::forward::authority::Request::Audit {
+                category,
+                event: event.into(),
+                dimensions,
+                attributes,
+                debug_only,
+            });
+            return;
+        }
         let now = (guard.now_ms)();
         let today = date_key(now);
         if guard.current_date != Some(today) || guard.file.is_none() {

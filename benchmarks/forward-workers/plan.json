@@ -1,0 +1,2642 @@
+{
+  "schema_version": "1.1",
+  "target": "HyperHub forwarding-worker local component",
+  "revision": "0.2.13 working tree; content-fingerprinted component snapshot",
+  "model_digest": "6ec4c18b1e24d970e0d92e61c788a834d5d2e4a79205f630c2c210ad7df4dfe9",
+  "cases": [
+    {
+      "id": "C-native-suite",
+      "title": "C native suite",
+      "kind": "correctness",
+      "obligation_ids": [
+        "O-flows"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers.rs",
+          "first": 1,
+          "last": 94
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "first": 1,
+          "last": 535
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "first": 1,
+          "last": 216
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "first": 1,
+          "last": 282
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "first": 1,
+          "last": 199
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "first": 7,
+          "last": 64
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "first": 4,
+          "last": 53
+        }
+      ],
+      "parameters": {},
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute forwarding unit regressions, then all real native functional cases, before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "All real worker native integration cases pass, including controller disconnection with live streams, centralized revocation, source silent worker deadline, TLS/WS/SSH, retained capacity and bad native preflight.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": null,
+      "origin": "generated",
+      "workload_ids": [
+        "W-switch",
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-B-transfer",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-transfer",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "Actual parent/child TCP transfers preserve Fake-IP session authority and centralized cancellation.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers.rs",
+              "first": 18,
+              "last": 94
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers.rs",
+              "first": 18,
+              "last": 94
+            }
+          ]
+        },
+        {
+          "id": "V-B-tls-ws-audit",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-tls-ws-audit",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "Both generations retain live TLS/WebSocket streams, original CA/custom roots and one contiguous resident audit sequence.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+              "first": 203,
+              "last": 282
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+              "first": 203,
+              "last": 282
+            }
+          ]
+        },
+        {
+          "id": "V-B-ssh",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-ssh",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "Authenticated SSH channels continue across worker switch using unchanged MITM host identity.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+              "first": 80,
+              "last": 199
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+              "first": 80,
+              "last": 199
+            }
+          ]
+        },
+        {
+          "id": "V-B-capacity",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-capacity",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "Four retained old workers keep all streams; extra prepare is refused and natural drain releases capacity.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 15,
+              "last": 65
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 15,
+              "last": 65
+            }
+          ]
+        },
+        {
+          "id": "V-B-control-loss",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-control-loss",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "Control disconnection preserves granted streams, normal EOF and central revocation; final OS exit releases parent leases.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 286,
+              "last": 419
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 286,
+              "last": 419
+            }
+          ]
+        },
+        {
+          "id": "V-B-worker-crash",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-worker-crash",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "Confirmed candidate crash permits rollback of future dispatch while prior generation stream survives.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 185,
+              "last": 221
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 185,
+              "last": 221
+            }
+          ]
+        },
+        {
+          "id": "V-B-bootstrap-deadline",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-bootstrap-deadline",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "A source child that never reads large bootstrap cannot escape the whole-phase 30s send deadline.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 420,
+              "last": 478
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 420,
+              "last": 478
+            }
+          ]
+        },
+        {
+          "id": "V-B-health-deadline",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-health-deadline",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "A Booted child that stops consuming controls is quarantined by the 30s health deadline and retired.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 479,
+              "last": 535
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 479,
+              "last": 535
+            }
+          ]
+        },
+        {
+          "id": "V-B-native-preflight",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-native-preflight",
+          "trigger": "The named real subprocess integration test reaches its specified boundary.",
+          "assertion": "With zero target Hosts, bad native ABI cannot publish global stable deployment or change installed target/active worker.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+              "first": 102,
+              "last": 216
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+              "first": 102,
+              "last": 216
+            }
+          ]
+        },
+        {
+          "id": "V-B-probe-exhaustion",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-probe-exhaustion",
+          "trigger": "The named source regression executes its controlled fault or state transition.",
+          "assertion": "Real Unix descriptor exhaustion during granted probe creation marks the original shared socket complete without relying on a Finished frame.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/worker/tests.rs",
+              "first": 7,
+              "last": 64
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/worker/tests.rs",
+              "first": 7,
+              "last": 64
+            }
+          ]
+        },
+        {
+          "id": "V-B-ungranted-disconnect",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-ungranted-disconnect",
+          "trigger": "The named source regression executes its controlled fault or state transition.",
+          "assertion": "Control loss immediately releases ungranted offer claims, preserves granted cancellation watchers, and remains idempotent.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+              "first": 4,
+              "last": 53
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+              "first": 4,
+              "last": 53
+            }
+          ]
+        }
+      ],
+      "boundary_ids": [
+        "B-transfer",
+        "B-tls-ws-audit",
+        "B-ssh",
+        "B-capacity",
+        "B-control-loss",
+        "B-worker-crash",
+        "B-bootstrap-deadline",
+        "B-health-deadline",
+        "B-native-preflight",
+        "B-probe-exhaustion",
+        "B-ungranted-disconnect"
+      ]
+    },
+    {
+      "id": "C-payload-oracle",
+      "title": "C payload oracle",
+      "kind": "correctness",
+      "obligation_ids": [
+        "O-oracle"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {},
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Each scenario checks untimed independent echo tokens before timing, and every timed response exactly matches client ID, sequence and remaining bytes.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": null,
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-C-payload-oracle",
+          "obligation_id": "O-oracle",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Each scenario checks untimed independent echo tokens before timing, and every timed response exactly matches client ID, sequence and remaining bytes.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-echo-baseline",
+      "title": "P echo baseline",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-echo"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "baseline"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "echo",
+        "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "echo_us",
+            "unit": "us",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          },
+          {
+            "name": "echo_rate",
+            "unit": "echo/s",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "throughput",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-echo-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-echo-baseline",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "echo",
+              "unit": "echo",
+              "description": "One exact256-byte echo from one of eight clients."
+            }
+          ],
+          "resources": [],
+          "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-echo-baseline",
+          "obligation_id": "O-echo",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-admission-baseline",
+      "title": "P admission baseline",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-admission"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "baseline"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "admission",
+        "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "admission_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "admission"
+          },
+          {
+            "name": "parent_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-threads"
+          },
+          {
+            "name": "parent_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-memory"
+          },
+          {
+            "name": "worker_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-threads"
+          },
+          {
+            "name": "worker_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-memory"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-admission-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-admission-baseline",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "admission",
+              "unit": "admission",
+              "description": "One authenticated SOCKS CONNECT plus first exact echo."
+            }
+          ],
+          "resources": [
+            {
+              "id": "parent-threads",
+              "unit": "threads",
+              "description": "Controller/test harness/local origin thread count"
+            },
+            {
+              "id": "parent-memory",
+              "unit": "bytes",
+              "description": "Controller/test harness/local origin resident memory"
+            },
+            {
+              "id": "worker-threads",
+              "unit": "threads",
+              "description": "Summed live native worker threads"
+            },
+            {
+              "id": "worker-memory",
+              "unit": "bytes",
+              "description": "Summed live native worker RSS"
+            }
+          ],
+          "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-admission-baseline",
+          "obligation_id": "O-admission",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-echo-upgrade-0",
+      "title": "P echo upgrade 0",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-echo"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-0"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "echo",
+        "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "echo_us",
+            "unit": "us",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          },
+          {
+            "name": "echo_rate",
+            "unit": "echo/s",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "throughput",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-echo-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-echo-upgrade-0",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "echo",
+              "unit": "echo",
+              "description": "One exact256-byte echo from one of eight clients."
+            }
+          ],
+          "resources": [],
+          "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-echo-upgrade-0",
+          "obligation_id": "O-echo",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-admission-upgrade-0",
+      "title": "P admission upgrade 0",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-admission"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-0"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "admission",
+        "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "admission_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "admission"
+          },
+          {
+            "name": "parent_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-threads"
+          },
+          {
+            "name": "parent_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-memory"
+          },
+          {
+            "name": "worker_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-threads"
+          },
+          {
+            "name": "worker_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-memory"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-admission-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-admission-upgrade-0",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "admission",
+              "unit": "admission",
+              "description": "One authenticated SOCKS CONNECT plus first exact echo."
+            }
+          ],
+          "resources": [
+            {
+              "id": "parent-threads",
+              "unit": "threads",
+              "description": "Controller/test harness/local origin thread count"
+            },
+            {
+              "id": "parent-memory",
+              "unit": "bytes",
+              "description": "Controller/test harness/local origin resident memory"
+            },
+            {
+              "id": "worker-threads",
+              "unit": "threads",
+              "description": "Summed live native worker threads"
+            },
+            {
+              "id": "worker-memory",
+              "unit": "bytes",
+              "description": "Summed live native worker RSS"
+            }
+          ],
+          "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-admission-upgrade-0",
+          "obligation_id": "O-admission",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-control-upgrade-0",
+      "title": "P control upgrade 0",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-control"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager.rs",
+          "first": 117,
+          "last": 341
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager/resident.rs",
+          "first": 1,
+          "last": 316
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-0"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "upgrade",
+        "timing_boundary": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+        "execution_model": "micro",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "prepare_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "upgrade"
+          },
+          {
+            "name": "commit_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "upgrade"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": null,
+          "acceptance": "All prepare samples <=30000ms and all commit samples <=100ms.",
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-control-upgrade-0",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "upgrade",
+              "unit": "upgrade",
+              "description": "One successful warm-artifact prepare plus commit; both separately timed."
+            }
+          ],
+          "resources": [],
+          "start_event": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-switch"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-control-upgrade-0",
+          "obligation_id": "O-control",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-echo-upgrade-1",
+      "title": "P echo upgrade 1",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-echo"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-1"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "echo",
+        "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "echo_us",
+            "unit": "us",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          },
+          {
+            "name": "echo_rate",
+            "unit": "echo/s",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "throughput",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-echo-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-echo-upgrade-1",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "echo",
+              "unit": "echo",
+              "description": "One exact256-byte echo from one of eight clients."
+            }
+          ],
+          "resources": [],
+          "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-echo-upgrade-1",
+          "obligation_id": "O-echo",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-admission-upgrade-1",
+      "title": "P admission upgrade 1",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-admission"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-1"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "admission",
+        "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "admission_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "admission"
+          },
+          {
+            "name": "parent_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-threads"
+          },
+          {
+            "name": "parent_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-memory"
+          },
+          {
+            "name": "worker_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-threads"
+          },
+          {
+            "name": "worker_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-memory"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-admission-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-admission-upgrade-1",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "admission",
+              "unit": "admission",
+              "description": "One authenticated SOCKS CONNECT plus first exact echo."
+            }
+          ],
+          "resources": [
+            {
+              "id": "parent-threads",
+              "unit": "threads",
+              "description": "Controller/test harness/local origin thread count"
+            },
+            {
+              "id": "parent-memory",
+              "unit": "bytes",
+              "description": "Controller/test harness/local origin resident memory"
+            },
+            {
+              "id": "worker-threads",
+              "unit": "threads",
+              "description": "Summed live native worker threads"
+            },
+            {
+              "id": "worker-memory",
+              "unit": "bytes",
+              "description": "Summed live native worker RSS"
+            }
+          ],
+          "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-admission-upgrade-1",
+          "obligation_id": "O-admission",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-control-upgrade-1",
+      "title": "P control upgrade 1",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-control"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager.rs",
+          "first": 117,
+          "last": 341
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager/resident.rs",
+          "first": 1,
+          "last": 316
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-1"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "upgrade",
+        "timing_boundary": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+        "execution_model": "micro",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "prepare_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "upgrade"
+          },
+          {
+            "name": "commit_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "upgrade"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": null,
+          "acceptance": "All prepare samples <=30000ms and all commit samples <=100ms.",
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-control-upgrade-1",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "upgrade",
+              "unit": "upgrade",
+              "description": "One successful warm-artifact prepare plus commit; both separately timed."
+            }
+          ],
+          "resources": [],
+          "start_event": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-switch"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-control-upgrade-1",
+          "obligation_id": "O-control",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-echo-upgrade-4",
+      "title": "P echo upgrade 4",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-echo"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-4"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "echo",
+        "timing_boundary": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "echo_us",
+            "unit": "us",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          },
+          {
+            "name": "echo_rate",
+            "unit": "echo/s",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "throughput",
+            "subject_kind": "work_unit",
+            "subject_id": "echo"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-echo-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-echo-upgrade-4",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "echo",
+              "unit": "echo",
+              "description": "One exact256-byte echo from one of eight clients."
+            }
+          ],
+          "resources": [],
+          "start_event": "For each echo, immediately before client write to complete read of 256 bytes; byte assertion follows timestamp. Throughput spans barrier release through final successful task completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-echo-upgrade-4",
+          "obligation_id": "O-echo",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-admission-upgrade-4",
+      "title": "P admission upgrade 4",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-admission"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-4"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "admission",
+        "timing_boundary": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+        "execution_model": "closed_loop",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "admission_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "admission"
+          },
+          {
+            "name": "parent_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-threads"
+          },
+          {
+            "name": "parent_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "parent-memory"
+          },
+          {
+            "name": "worker_threads_peak",
+            "unit": "threads",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-threads"
+          },
+          {
+            "name": "worker_rss_peak",
+            "unit": "bytes",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "resource",
+            "subject_kind": "resource",
+            "subject_id": "worker-memory"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": "P-admission-baseline",
+          "acceptance": null,
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-admission-upgrade-4",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "admission",
+              "unit": "admission",
+              "description": "One authenticated SOCKS CONNECT plus first exact echo."
+            }
+          ],
+          "resources": [
+            {
+              "id": "parent-threads",
+              "unit": "threads",
+              "description": "Controller/test harness/local origin thread count"
+            },
+            {
+              "id": "parent-memory",
+              "unit": "bytes",
+              "description": "Controller/test harness/local origin resident memory"
+            },
+            {
+              "id": "worker-threads",
+              "unit": "threads",
+              "description": "Summed live native worker threads"
+            },
+            {
+              "id": "worker-memory",
+              "unit": "bytes",
+              "description": "Summed live native worker RSS"
+            }
+          ],
+          "start_event": "Per-client barrier release to completed authentication, CONNECT and first validated echo; resource sampling spans generation setup through business completion.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-admission-upgrade-4",
+          "obligation_id": "O-admission",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P-control-upgrade-4",
+      "title": "P control upgrade 4",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-control"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager.rs",
+          "first": 117,
+          "last": 341
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager/resident.rs",
+          "first": 1,
+          "last": 316
+        }
+      ],
+      "parameters": {
+        "state": "upgrade-4"
+      },
+      "inputs": "Task-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials.",
+      "procedure": [
+        "Execute native functional preflight before formal timing.",
+        "Reset a fresh worker group for each trial; use fixed warm artifact and reverse state order on alternate trials.",
+        "Assert exact bytes and retained generation state, preserve every raw sample, then close streams and wait for worker OS exit."
+      ],
+      "oracle": {
+        "method": "External client exact expected bytes and manager identity/phase assertions.",
+        "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+        "independence": "Clients construct expected payloads without calling forwarding code; OS process and stable authority checks are separate from child forwarding."
+      },
+      "preflight_ids": [
+        "C-native-suite",
+        "C-payload-oracle"
+      ],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/benchmark-forward-workers.py",
+          "--worker",
+          "target/release/hyperhub",
+          "--profile",
+          "release",
+          "--output",
+          "target/benchmarks/forward-workers/fresh-run"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+        ]
+      },
+      "protocol": {
+        "work_unit": "upgrade",
+        "timing_boundary": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+        "execution_model": "micro",
+        "warmup": "Eight clients each perform32 untimed exchanges; actual untimed byte oracle runs before all timed traffic. Prepare is explicitly warm-artifact.",
+        "reset": "Fresh task-owned worker group and local origin each trial; held old streams enforce target state.",
+        "sampling": {
+          "unit": "process",
+          "min_samples": 5,
+          "basis": "Five independent worker groups per state are an explicit local development budget, informed by 20-scenario pilot; request samples are correlated within trials. No production power or P99 claim."
+        },
+        "metrics": [
+          {
+            "name": "prepare_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "upgrade"
+          },
+          {
+            "name": "commit_ms",
+            "unit": "ms",
+            "summary": "Raw samples; report median/range and observed percentile only; no population P99 claim.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "upgrade"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "valid-native",
+            "condition": "Same-batch native preflight passed before timing."
+          },
+          {
+            "id": "valid-work",
+            "condition": "Every raw trial has1024 successful byte-validated echoes and32 successful admissions, with no retries or unfinished requests."
+          },
+          {
+            "id": "valid-state",
+            "condition": "Five fresh process groups per state have expected retained generations and held streams still echo after switch and measurement."
+          },
+          {
+            "id": "valid-samples",
+            "condition": "All positive timing and nominal1ms resource observations are preserved; sampled peaks are lower bounds."
+          }
+        ],
+        "accounting": "Unique logical work only:5 upgrade operations,5120 echoes or160 admissions by case. Errors terminate scenario and make run invalid; no retry.",
+        "uncertainty": "Local shared host, fixed closed-loop supply and warm artifact. Five independent groups, correlated per-request samples, sampled process peaks, controller includes local origin and harness. No saturation, production capacity, cold artifact or unexecuted platform claim.",
+        "comparison": {
+          "baseline": null,
+          "acceptance": "All prepare samples <=30000ms and all commit samples <=100ms.",
+          "basis": "CONTRACT.md accepted engineering budgets; throughput/admission/resources have no acceptance threshold.",
+          "factor_ids": [
+            "state"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 180,
+          "rationale": "One scenario includes process startup and deterministic traffic; individual reads timeout10s and prepare phase deadline30s."
+        },
+        "measurement_context": {
+          "id": "M-control-upgrade-4",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "upgrade",
+              "unit": "upgrade",
+              "description": "One successful warm-artifact prepare plus commit; both separately timed."
+            }
+          ],
+          "resources": [],
+          "start_event": "Immediately before manager.prepare/commit API entry to successful synchronous return. Hash expected value computation and assertions are outside.",
+          "end_event": "Declared synchronous API return, fully received echo, or validated admission echo; resource interval ends after business work.",
+          "factor_ids": [
+            "state"
+          ]
+        }
+      },
+      "origin": "generated",
+      "workload_ids": [
+        "W-switch"
+      ],
+      "verifications": [
+        {
+          "id": "V-P-control-upgrade-4",
+          "obligation_id": "O-control",
+          "trigger": "Actual scenario performs the specified operation with all declared peers and retained generations.",
+          "assertion": "Native workload completes exact work accounting, independent payload validation and required retained generation state; preserve five independent process-group trials.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+              "first": 1,
+              "last": 212
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+      "sha256": "5d9f4ed25325079badb6ed330aa088c6a384e62e382c0e685494de374b9fdd4c"
+    },
+    {
+      "path": "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+      "sha256": "a3cbddd3adc1177aae89b1d307b66532790b800c05ebd74bbc47d7fe20abd8ef"
+    },
+    {
+      "path": "crates/hyperhub-core/tests/forward_workers/support.rs",
+      "sha256": "d379d21af2c48de129e2e56b17961bd0dc6de383e0163a48d63f457bfb44b11b"
+    },
+    {
+      "path": "crates/hyperhub-core/tests/forward_workers.rs",
+      "sha256": "4b27bf60b8014a49c39fa4338f96d09d84120d091d2308e074333837dbcc2971"
+    },
+    {
+      "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+      "sha256": "cd95345fdadff01a0e1f0877e3b2a415b2ef314eb21a313e5428848526f5292f"
+    },
+    {
+      "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+      "sha256": "fc5afcba83f46745bca3eb628a3d9a4053775b3bc29e819ad6a4c4bb25d56a87"
+    },
+    {
+      "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+      "sha256": "e59d202a26554f37efab0633e980b8074ab2ebd9bf5daf4ea3e079aa433a5ab2"
+    },
+    {
+      "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+      "sha256": "a71dcd3fead887f1bc802ac34b1cb42cd1bee6afa18982069a74e5d659bbb828"
+    },
+    {
+      "path": "tests/fixtures/forward_worker_probe.rs",
+      "sha256": "87dd2ce7ce8faae6d48c3feaa06f731a9e62e9f6f5f7aed60d643c78ad5e0371"
+    },
+    {
+      "path": "tests/fixtures/forward_worker_silent.rs",
+      "sha256": "1471e1ced91e05d4bb7638663261c64c13b81c3a28738574b1cb59a96bffa610"
+    },
+    {
+      "path": "scripts/benchmark-forward-workers.py",
+      "sha256": "2e937730a36dbf1038e3b5f7e8df6a146b55765b8ef624f4e7a47339e81216d1"
+    },
+    {
+      "path": "tests/fixtures/forward_worker_unresponsive.rs",
+      "sha256": "9cafe14b12c4f361dd6b307491d244f30491644bead7a325bc9ab34e9e63060f"
+    },
+    {
+      "path": "benchmarks/forward-workers/sensitivity.py",
+      "sha256": "53b63ae11b0937b52b2593b5769786979c8225015c6b6050dd6988ea2b7e0b38"
+    },
+    {
+      "path": "benchmarks/forward-workers/README.md",
+      "sha256": "bb184ade0ffd780b934915762f4adcccd075392122723e47f3ead487ed8f0bcf"
+    },
+    {
+      "path": "crates/hyperhub-core/src/forward/worker/tests.rs",
+      "sha256": "bc51d24dc90afa3a97fae44df652b892044c7c18d721c688b6947982f85bc12f"
+    },
+    {
+      "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+      "sha256": "afbd22ac9d807059375136e34592b1ffec06610f86cf057ef286f9454470c3a4"
+    }
+  ],
+  "limitations": [
+    "Project native hooks, installer, resident durable journal, cold artifact and all-platform execution remain outside this component benchmark.",
+    "Five process trials and fixed offered work cannot establish production tail latency, maximum throughput or long-term memory leak absence.",
+    "Controller resources include local origin and test harness; sampled1ms peaks can miss transient threads.",
+    "Known-cost and wrong-byte sensitivity mutations will be run in isolated source copies; their results are reported separately.",
+    "Unix descriptor-exhaustion verification is not observed on Windows; its formal valid-coverage report must retain that gap until an equivalent native fault test exists."
+  ],
+  "common_context": {
+    "preconditions": [
+      "Built final CLI or source worker probe matching frozen sources; Rust/Cargo and local compiler available.",
+      "Native resource collection on Linux or Windows; task-owned files and loopback sockets only."
+    ],
+    "cleanup": [
+      "Close clients; mark workers draining and wait for confirmed child OS exit; remove only task-owned fixture directories."
+    ],
+    "generation_notes": [
+      "Sub-agent owns forwarding component; main agent reviews and publishes full project.",
+      "The checker validates declarations and evidence hashes, not execution authenticity or semantic completeness."
+    ]
+  }
+}

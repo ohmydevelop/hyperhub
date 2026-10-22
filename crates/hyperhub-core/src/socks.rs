@@ -33,6 +33,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
+pub(crate) mod forwarding;
+pub use forwarding::{WorkerGroupStatus, WorkerManager, WorkerStatus};
+
 const SOCKS_VERSION: u8 = 5;
 const AUTH_USERPASS: u8 = 2;
 const LEARNED_PROXY_TIMEOUT_MS: u64 = 10_000;
@@ -45,15 +48,18 @@ struct ProxyAffinityKey {
     port: u16,
 }
 
-#[derive(Clone, Debug)]
-struct LearnedProxy {
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct LearnedProxy {
     upstream: Upstream,
     snapshot: ClientProxySnapshot,
     observed_at: SystemTime,
 }
 
 #[derive(Clone, Default)]
-struct SessionProxyAffinity(Arc<Mutex<std::collections::HashMap<ProxyAffinityKey, LearnedProxy>>>);
+struct SessionProxyAffinity(
+    Arc<Mutex<std::collections::HashMap<ProxyAffinityKey, LearnedProxy>>>,
+    Option<crate::forward::authority::Client>,
+);
 
 impl SessionProxyAffinity {
     fn remember(
@@ -62,11 +68,19 @@ impl SessionProxyAffinity {
         destination: &Destination,
         proxy_protocol: &str,
         proxy_address: String,
-    ) {
+    ) -> io::Result<()> {
+        if let Some(client) = &self.1 {
+            return client.expect_ok(crate::forward::authority::Request::RememberProxy {
+                session_id: session_id.into(),
+                destination: destination.clone(),
+                protocol: proxy_protocol.into(),
+                address: proxy_address,
+            });
+        }
         let kind = match proxy_protocol {
             "http" => UpstreamKind::HttpConnect,
             "socks5" => UpstreamKind::Socks5,
-            _ => return,
+            _ => return Ok(()),
         };
         let proxy = LearnedProxy {
             upstream: Upstream {
@@ -86,7 +100,7 @@ impl SessionProxyAffinity {
             observed_at: SystemTime::now(),
         };
         let Ok(mut proxies) = self.0.lock() else {
-            return;
+            return Err(io::Error::other("proxy affinity state poisoned"));
         };
         proxies.retain(|_, value| {
             value
@@ -104,11 +118,28 @@ impl SessionProxyAffinity {
                 proxy.clone(),
             );
         }
+        Ok(())
     }
 
-    fn lookup(&self, session_id: &str, destination: &Destination) -> Option<LearnedProxy> {
-        let proxies = self.0.lock().ok()?;
-        destination.hostnames.iter().find_map(|hostname| {
+    fn lookup(
+        &self,
+        session_id: &str,
+        destination: &Destination,
+    ) -> io::Result<Option<LearnedProxy>> {
+        if let Some(client) = &self.1 {
+            return match client.call(crate::forward::authority::Request::LookupProxy {
+                session_id: session_id.into(),
+                destination: destination.clone(),
+            })? {
+                crate::forward::authority::Response::Proxy { proxy } => Ok(proxy),
+                _ => Err(crate::forward::authority::invalid_response()),
+            };
+        }
+        let proxies = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("proxy affinity state poisoned"))?;
+        Ok(destination.hostnames.iter().find_map(|hostname| {
             proxies
                 .get(&ProxyAffinityKey {
                     session_id: session_id.into(),
@@ -122,7 +153,7 @@ impl SessionProxyAffinity {
                         .is_ok_and(|age| age <= LEARNED_PROXY_MAX_AGE)
                 })
                 .cloned()
-        })
+        }))
     }
 }
 
@@ -174,8 +205,10 @@ impl SocksListenerController {
 
 #[derive(Clone)]
 pub struct SocksService {
+    forward_workers: Option<WorkerManager>,
     runtime: RuntimeState,
     sessions: SessionRegistry,
+    names: crate::forward::authority::NameService,
     audit: AuditWriter,
     tls_mitm: Arc<TlsMitm>,
     ssh_mitm_key: Arc<russh::keys::PrivateKey>,
@@ -259,6 +292,7 @@ impl SocksService {
         let (listener_sender, listener_commands) = mpsc::channel(8);
         let bound_address = Arc::new(RwLock::new(None));
         Ok(Self {
+            forward_workers: None,
             audit: AuditWriter::open_with_retention(
                 config.audit.log.as_deref(),
                 config.audit.transcript_dir.as_deref(),
@@ -267,6 +301,7 @@ impl SocksService {
                 debug_output,
             )?,
             runtime,
+            names: sessions.clone().into(),
             sessions,
             tls_mitm,
             ssh_mitm_key: Arc::new(crate::ssh_mitm::server_key_from_master(ssh_mitm_master)),
@@ -447,6 +482,9 @@ impl SocksService {
 
     async fn handle(self, mut client: TcpStream) -> io::Result<()> {
         let session = authenticate(&mut client, self.sessions.clone()).await?;
+        if let Some(workers) = self.forward_workers.clone() {
+            return workers.dispatch(client, session).await;
+        }
         let cancellation = session.cancellation.clone();
         tokio::select! {
             result = self.handle_authenticated(client, session) => result,
@@ -470,10 +508,7 @@ impl SocksService {
             }
         };
         if requested.hostnames.is_empty() {
-            if let Some(hostname) = self
-                .sessions
-                .restore_fake(&session.session_id, requested.ip)
-            {
+            if let Some(hostname) = self.names.restore_fake(&session.session_id, requested.ip)? {
                 requested.ip = tokio::net::lookup_host((hostname.as_str(), requested.port))
                     .await?
                     .next()
@@ -505,7 +540,7 @@ impl SocksService {
             protocol: Protocol::Unknown,
         };
         let now = unix_timestamp_ms();
-        let active = self.connections.track(ConnectionSnapshot {
+        let active = self.connections.try_track(ConnectionSnapshot {
             session_id: context.session_id.clone(),
             connection_id: context.connection_id,
             pid: context.process.pid,
@@ -520,7 +555,7 @@ impl SocksService {
             phase: "routing".into(),
             started_at_ms: now,
             updated_at_ms: now,
-        });
+        })?;
         // 连接级快照：热更新只影响新连接，当前连接全程使用本次快照。
         let runtime = self.runtime.snapshot();
         let config = runtime.config;
@@ -825,7 +860,7 @@ impl SocksService {
         if is_socks5_greeting(&peek[..count]) {
             let target = negotiate_socks5(&mut client, &mut upstream).await?;
             context.destination =
-                match resolve_socks5_target(target, &session.session_id, &self.sessions).await {
+                match resolve_socks5_target(target, &session.session_id, &self.names).await {
                     Ok(destination) => destination,
                     Err(error) => {
                         write_socks5_reply(&mut client, reply_code(&error)).await?;
@@ -1180,7 +1215,7 @@ impl SocksService {
                     &context.destination,
                     &proxy.protocol,
                     proxy.address.clone(),
-                );
+                )?;
             }
         }
         let client_proxy = detected_client_proxy.or(associated_client_proxy);
@@ -1236,7 +1271,7 @@ impl SocksService {
             audit: self.audit.clone(),
             context,
             decision,
-            sessions: self.sessions.clone(),
+            sessions: self.names.clone(),
             trust: self.trust.clone(),
             upstream_tunneled,
         };
@@ -1292,7 +1327,7 @@ impl SocksService {
                     transport: UpstreamTransport::Tunneled,
                     associated_client_proxy: None,
                 }),
-                None => match self.proxy_affinity.lookup(session_id, destination) {
+                None => match self.proxy_affinity.lookup(session_id, destination)? {
                     Some(proxy) => Ok(ConnectedUpstream {
                         stream: connect_upstream(proxy.upstream, destination.clone()).await?,
                         transport: UpstreamTransport::Tunneled,
@@ -1563,7 +1598,9 @@ mod tests {
             port: 443,
             hostnames: vec!["Example.COM.".into()],
         };
-        affinity.remember("session-a", &destination, "http", "127.0.0.1:7897".into());
+        affinity
+            .remember("session-a", &destination, "http", "127.0.0.1:7897".into())
+            .unwrap();
 
         let matched = affinity
             .lookup(
@@ -1575,9 +1612,13 @@ mod tests {
                 },
             )
             .unwrap();
+        let matched = matched.unwrap();
         assert_eq!(matched.upstream.kind, UpstreamKind::HttpConnect);
         assert_eq!(matched.upstream.address, "127.0.0.1:7897");
-        assert!(affinity.lookup("session-b", &destination).is_none());
+        assert!(affinity
+            .lookup("session-b", &destination)
+            .unwrap()
+            .is_none());
         assert!(affinity
             .lookup(
                 "session-a",
@@ -1586,6 +1627,7 @@ mod tests {
                     ..destination
                 },
             )
+            .unwrap()
             .is_none());
     }
 

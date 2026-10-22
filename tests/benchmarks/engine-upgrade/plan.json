@@ -1,0 +1,622 @@
+{
+  "schema_version": "1.1",
+  "target": "HyperHub native Engine component",
+  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v7 worktree snapshot)",
+  "model_digest": "f408c8d3cff99a1b177285b51a2647a1df16ee71364f053b33a91d0d93dd7166",
+  "cases": [
+    {
+      "source_refs": [
+        {
+          "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "first": 1,
+          "last": 231
+        }
+      ],
+      "inputs": "Two independently compiled native DSOs; 32 ordered anchored-regex rules; matching last target and protection; four workers; fixed pinned old lease; deterministic local data without credentials.",
+      "procedure": [
+        "Construct the initial real native Runtime and warm both operation caches outside timing.",
+        "Validate the initial sentinel pass result. Start four workers through a barrier.",
+        "In upgrade mode measure Prepare installation/hash/fsync/health and CommitHeld separately, with all four workers asserted active.",
+        "Verify candidate sentinel deny and pinned old sentinel pass, plus changed generation. Join workers and account only units that passed all three native decision assertions."
+      ],
+      "oracle": {
+        "method": "Fixed explicit semantic outputs and rule/protection expectations independent of matcher implementation",
+        "assertion": "Every current file/current process/old-file result is pass with rule-31 and review. Actual candidate code changes sentinel pass to deny while old code remains pass. No panic or error is accepted.",
+        "independence": "Expected values are fixed from the controlled input and fixture change; the oracle does not rerun or mirror the rule matcher."
+      },
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "cargo",
+          "run",
+          "--release",
+          "-p",
+          "hyperhub-engine",
+          "--example",
+          "native_upgrade_bench",
+          "--locked",
+          "--",
+          "target/diagnostics/native-engine-performance"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "tests/fixtures/network_upgrade_engine.rs",
+          "tests/fixtures/engine_fixture_build.rs",
+          "tests/benchmarks/engine-upgrade/record.py"
+        ]
+      },
+      "origin": "generated",
+      "id": "C-native",
+      "title": "Real native semantic and old-lease preflight",
+      "kind": "correctness",
+      "obligation_ids": [
+        "O-oracle"
+      ],
+      "parameters": {},
+      "preflight_ids": [],
+      "protocol": null,
+      "workload_ids": [
+        "W-decisions",
+        "W-switch"
+      ],
+      "verifications": [
+        {
+          "id": "V-native",
+          "obligation_id": "O-oracle",
+          "trigger": "Two independently compiled baseline/candidate DSOs execute before and after native generation switch with a pinned old lease.",
+          "assertion": "Candidate sentinel changes to deny, old sentinel stays pass, generation changes; every completed work unit matches rule-31 and review.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source_refs": [
+        {
+          "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "first": 1,
+          "last": 231
+        }
+      ],
+      "inputs": "Two independently compiled native DSOs; 32 ordered anchored-regex rules; matching last target and protection; four workers; fixed pinned old lease; deterministic local data without credentials.",
+      "procedure": [
+        "Construct the initial real native Runtime and warm both operation caches outside timing.",
+        "Validate the initial sentinel pass result. Start four workers through a barrier.",
+        "In upgrade mode measure Prepare installation/hash/fsync/health and CommitHeld separately, with all four workers asserted active.",
+        "Verify candidate sentinel deny and pinned old sentinel pass, plus changed generation. Join workers and account only units that passed all three native decision assertions."
+      ],
+      "oracle": {
+        "method": "Fixed explicit semantic outputs and rule/protection expectations independent of matcher implementation",
+        "assertion": "Every current file/current process/old-file result is pass with rule-31 and review. Actual candidate code changes sentinel pass to deny while old code remains pass. No panic or error is accepted.",
+        "independence": "Expected values are fixed from the controlled input and fixture change; the oracle does not rerun or mirror the rule matcher."
+      },
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "cargo",
+          "run",
+          "--release",
+          "-p",
+          "hyperhub-engine",
+          "--example",
+          "native_upgrade_bench",
+          "--locked",
+          "--",
+          "target/diagnostics/native-engine-performance"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "tests/fixtures/network_upgrade_engine.rs",
+          "tests/fixtures/engine_fixture_build.rs",
+          "tests/benchmarks/engine-upgrade/record.py"
+        ]
+      },
+      "origin": "generated",
+      "id": "P-decisions-baseline",
+      "title": "Useful native decision cost baseline",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-decisions"
+      ],
+      "parameters": {
+        "mode": "baseline"
+      },
+      "preflight_ids": [
+        "C-native"
+      ],
+      "workload_ids": [
+        "W-decisions"
+      ],
+      "verifications": [
+        {
+          "id": "V-decisions-baseline",
+          "obligation_id": "O-decisions",
+          "trigger": "Four workers run the matched 250 ms workload with 32 rules and a retained old lease.",
+          "assertion": "All measured units contain exactly three successfully checked native decisions; positive work, elapsed intervals and sampled latencies are preserved.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ]
+        }
+      ],
+      "protocol": {
+        "work_unit": "One verified file/process/pinned-file decision unit",
+        "timing_boundary": "Wall clock from immediately before barrier release until all four workers join; unit sample from before current acquire through three native calls, assertions and successful counter update. Excludes compilation, initial native load/cache warmup and sentinel preflight. Upgrade mode includes concurrent preparation/commit activity in wall time.",
+        "execution_model": "closed_loop",
+        "warmup": "128 successful file and process decisions per trial before workers start.",
+        "reset": "Fresh Runtime and private artifact cache for each trial; pinned lease remains until the completed trial is dropped.",
+        "sampling": {
+          "unit": "trial",
+          "min_samples": 5,
+          "basis": "Five paired alternating-mode trials expose local variation; not a statistical significance or whole-product tail claim."
+        },
+        "metrics": [
+          {
+            "name": "units_per_second",
+            "unit": "units/s",
+            "summary": "Successful three-native-call units divided by joined wall time.",
+            "minimum": 0,
+            "kind": "throughput",
+            "subject_kind": "work_unit",
+            "subject_id": "decision_unit"
+          },
+          {
+            "name": "unit_latency_ns_p50",
+            "unit": "ns",
+            "summary": "Median of systematically sampled every-64th successful unit latencies within a trial.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "decision_unit"
+          },
+          {
+            "name": "unit_latency_ns_p99",
+            "unit": "ns",
+            "summary": "99th percentile of sampled every-64th successful unit latencies; not the full population or service tail.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "decision_unit"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "V-work",
+            "condition": "All worker assertions pass; every offered unit succeeds exactly once, with three native calls; no retries."
+          },
+          {
+            "id": "V-clock",
+            "condition": "Elapsed times, sampled latencies and completed units are positive."
+          },
+          {
+            "id": "V-samples",
+            "condition": "Five actual trials per mode contain raw work counts and samples."
+          },
+          {
+            "id": "V-overlap",
+            "condition": "In upgrade mode all four decision workers remain active immediately before and after direct commit."
+          }
+        ],
+        "accounting": "Count unique three-call decision units only after all results pass their independent assertions. A worker error invalidates the execution; no retry is used.",
+        "uncertainty": "Uncontrolled shared Linux runner, five correlated paired trials, fixed four-thread synthetic load. Sampled unit percentiles omit most calls; report no production SLO or statistically significant regression.",
+        "comparison": {
+          "baseline": null,
+          "acceptance": null,
+          "basis": "Matched same-initial-version no-upgrade baseline; user provided no numeric throughput regression threshold.",
+          "factor_ids": [
+            "mode"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 120,
+          "rationale": "Fixed ten 250ms trials and bounded local source compilation. The external runner imposes process timeout; native deadlock is a failure."
+        },
+        "measurement_context": {
+          "id": "M-decisions-baseline",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "decision_unit",
+              "unit": "units",
+              "description": "One current file decision, one current process decision and one pinned old-file decision, all verified."
+            }
+          ],
+          "resources": [],
+          "start_event": "Instant immediately before releasing the four-worker barrier",
+          "end_event": "Instant after all four workers join with successful counts",
+          "factor_ids": [
+            "mode"
+          ]
+        }
+      }
+    },
+    {
+      "source_refs": [
+        {
+          "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "first": 1,
+          "last": 231
+        }
+      ],
+      "inputs": "Two independently compiled native DSOs; 32 ordered anchored-regex rules; matching last target and protection; four workers; fixed pinned old lease; deterministic local data without credentials.",
+      "procedure": [
+        "Construct the initial real native Runtime and warm both operation caches outside timing.",
+        "Validate the initial sentinel pass result. Start four workers through a barrier.",
+        "In upgrade mode measure Prepare installation/hash/fsync/health and CommitHeld separately, with all four workers asserted active.",
+        "Verify candidate sentinel deny and pinned old sentinel pass, plus changed generation. Join workers and account only units that passed all three native decision assertions."
+      ],
+      "oracle": {
+        "method": "Fixed explicit semantic outputs and rule/protection expectations independent of matcher implementation",
+        "assertion": "Every current file/current process/old-file result is pass with rule-31 and review. Actual candidate code changes sentinel pass to deny while old code remains pass. No panic or error is accepted.",
+        "independence": "Expected values are fixed from the controlled input and fixture change; the oracle does not rerun or mirror the rule matcher."
+      },
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "cargo",
+          "run",
+          "--release",
+          "-p",
+          "hyperhub-engine",
+          "--example",
+          "native_upgrade_bench",
+          "--locked",
+          "--",
+          "target/diagnostics/native-engine-performance"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "tests/fixtures/network_upgrade_engine.rs",
+          "tests/fixtures/engine_fixture_build.rs",
+          "tests/benchmarks/engine-upgrade/record.py"
+        ]
+      },
+      "origin": "generated",
+      "id": "P-decisions-upgrade",
+      "title": "Useful native decision cost upgrade",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-decisions"
+      ],
+      "parameters": {
+        "mode": "upgrade"
+      },
+      "preflight_ids": [
+        "C-native"
+      ],
+      "workload_ids": [
+        "W-decisions"
+      ],
+      "verifications": [
+        {
+          "id": "V-decisions-upgrade",
+          "obligation_id": "O-decisions",
+          "trigger": "Four workers run the matched 250 ms workload with 32 rules and a retained old lease.",
+          "assertion": "All measured units contain exactly three successfully checked native decisions; positive work, elapsed intervals and sampled latencies are preserved.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ]
+        }
+      ],
+      "protocol": {
+        "work_unit": "One verified file/process/pinned-file decision unit",
+        "timing_boundary": "Wall clock from immediately before barrier release until all four workers join; unit sample from before current acquire through three native calls, assertions and successful counter update. Excludes compilation, initial native load/cache warmup and sentinel preflight. Upgrade mode includes concurrent preparation/commit activity in wall time.",
+        "execution_model": "closed_loop",
+        "warmup": "128 successful file and process decisions per trial before workers start.",
+        "reset": "Fresh Runtime and private artifact cache for each trial; pinned lease remains until the completed trial is dropped.",
+        "sampling": {
+          "unit": "trial",
+          "min_samples": 5,
+          "basis": "Five paired alternating-mode trials expose local variation; not a statistical significance or whole-product tail claim."
+        },
+        "metrics": [
+          {
+            "name": "units_per_second",
+            "unit": "units/s",
+            "summary": "Successful three-native-call units divided by joined wall time.",
+            "minimum": 0,
+            "kind": "throughput",
+            "subject_kind": "work_unit",
+            "subject_id": "decision_unit"
+          },
+          {
+            "name": "unit_latency_ns_p50",
+            "unit": "ns",
+            "summary": "Median of systematically sampled every-64th successful unit latencies within a trial.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "decision_unit"
+          },
+          {
+            "name": "unit_latency_ns_p99",
+            "unit": "ns",
+            "summary": "99th percentile of sampled every-64th successful unit latencies; not the full population or service tail.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "decision_unit"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "V-work",
+            "condition": "All worker assertions pass; every offered unit succeeds exactly once, with three native calls; no retries."
+          },
+          {
+            "id": "V-clock",
+            "condition": "Elapsed times, sampled latencies and completed units are positive."
+          },
+          {
+            "id": "V-samples",
+            "condition": "Five actual trials per mode contain raw work counts and samples."
+          },
+          {
+            "id": "V-overlap",
+            "condition": "In upgrade mode all four decision workers remain active immediately before and after direct commit."
+          }
+        ],
+        "accounting": "Count unique three-call decision units only after all results pass their independent assertions. A worker error invalidates the execution; no retry is used.",
+        "uncertainty": "Uncontrolled shared Linux runner, five correlated paired trials, fixed four-thread synthetic load. Sampled unit percentiles omit most calls; report no production SLO or statistically significant regression.",
+        "comparison": {
+          "baseline": "P-decisions-baseline",
+          "acceptance": null,
+          "basis": "Matched same-initial-version no-upgrade baseline; user provided no numeric throughput regression threshold.",
+          "factor_ids": [
+            "mode"
+          ]
+        },
+        "budget": {
+          "timeout_seconds": 120,
+          "rationale": "Fixed ten 250ms trials and bounded local source compilation. The external runner imposes process timeout; native deadlock is a failure."
+        },
+        "measurement_context": {
+          "id": "M-decisions-upgrade",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "decision_unit",
+              "unit": "units",
+              "description": "One current file decision, one current process decision and one pinned old-file decision, all verified."
+            }
+          ],
+          "resources": [],
+          "start_event": "Instant immediately before releasing the four-worker barrier",
+          "end_event": "Instant after all four workers join with successful counts",
+          "factor_ids": [
+            "mode"
+          ]
+        }
+      }
+    },
+    {
+      "source_refs": [
+        {
+          "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "first": 1,
+          "last": 231
+        }
+      ],
+      "inputs": "Two independently compiled native DSOs; 32 ordered anchored-regex rules; matching last target and protection; four workers; fixed pinned old lease; deterministic local data without credentials.",
+      "procedure": [
+        "Construct the initial real native Runtime and warm both operation caches outside timing.",
+        "Validate the initial sentinel pass result. Start four workers through a barrier.",
+        "In upgrade mode measure Prepare installation/hash/fsync/health and CommitHeld separately, with all four workers asserted active.",
+        "Verify candidate sentinel deny and pinned old sentinel pass, plus changed generation. Join workers and account only units that passed all three native decision assertions."
+      ],
+      "oracle": {
+        "method": "Fixed explicit semantic outputs and rule/protection expectations independent of matcher implementation",
+        "assertion": "Every current file/current process/old-file result is pass with rule-31 and review. Actual candidate code changes sentinel pass to deny while old code remains pass. No panic or error is accepted.",
+        "independence": "Expected values are fixed from the controlled input and fixture change; the oracle does not rerun or mirror the rule matcher."
+      },
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "cargo",
+          "run",
+          "--release",
+          "-p",
+          "hyperhub-engine",
+          "--example",
+          "native_upgrade_bench",
+          "--locked",
+          "--",
+          "target/diagnostics/native-engine-performance"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+          "tests/fixtures/network_upgrade_engine.rs",
+          "tests/fixtures/engine_fixture_build.rs",
+          "tests/benchmarks/engine-upgrade/record.py"
+        ]
+      },
+      "origin": "generated",
+      "id": "P-switch",
+      "title": "Direct native prepare and commit under active calls",
+      "kind": "performance",
+      "obligation_ids": [
+        "O-switch"
+      ],
+      "parameters": {},
+      "preflight_ids": [
+        "C-native"
+      ],
+      "workload_ids": [
+        "W-switch"
+      ],
+      "verifications": [
+        {
+          "id": "V-switch",
+          "obligation_id": "O-switch",
+          "trigger": "Actual candidate native module is installed and committed while all four workers remain active.",
+          "assertion": "Native preparation and commit have separate positive durations; candidate semantics change while the old lease retains old semantics.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+              "first": 1,
+              "last": 231
+            }
+          ]
+        }
+      ],
+      "protocol": {
+        "work_unit": "One real native candidate prepare and commit",
+        "timing_boundary": "Prepare clock starts immediately before management::execute(Command::Prepare) and ends after response; includes content-addressed artifact installation, digest checking, fsync, module loading and native health. Commit clock starts immediately before management::execute(Command::CommitHeld) and ends on response; includes actual generation publication, excludes source compilation, source pre-read and control subscription/RPC polling.",
+        "execution_model": "closed_loop",
+        "warmup": "Initial native file/process caches warmed before workers, candidate cache intentionally cold.",
+        "reset": "Fresh initial Runtime/cache per trial; candidate is a separate compiled DSO; rollback occurs after measurements.",
+        "sampling": {
+          "unit": "trial",
+          "min_samples": 5,
+          "basis": "Five independent Runtime/candidate installations under the same four-worker offered load; finite local soft-budget check."
+        },
+        "metrics": [
+          {
+            "name": "prepare_ns",
+            "unit": "ns",
+            "summary": "Actual direct preparation duration; no 100ms preparation budget is asserted.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "native_upgrade"
+          },
+          {
+            "name": "commit_ns",
+            "unit": "ns",
+            "summary": "Actual direct commit duration compared with the requested 100ms soft switch budget.",
+            "minimum": 0,
+            "kind": "latency",
+            "subject_kind": "work_unit",
+            "subject_id": "native_upgrade"
+          }
+        ],
+        "validity_checks": [
+          {
+            "id": "V-native",
+            "condition": "Actual separate DSOs change sentinel behavior and preserve the pinned old lease."
+          },
+          {
+            "id": "V-overlap",
+            "condition": "All four workers are still active directly before and after commit."
+          },
+          {
+            "id": "V-clock",
+            "condition": "Both direct-operation intervals are positive."
+          },
+          {
+            "id": "V-samples",
+            "condition": "Five actual prepare/commit pairs are present."
+          }
+        ],
+        "accounting": "One unique native candidate prepare+commit constitutes one upgrade. Five upgrades are offered, accepted and complete; retries and failures are zero for a valid run.",
+        "uncertainty": "Includes local filesystem/cache behavior and a shared runner. Five samples support only observed soft-budget acceptance, not an upper bound for all hardware/workloads.",
+        "comparison": {
+          "baseline": null,
+          "acceptance": "Each of five observed direct commit_ns samples must be <= 100000000 ns (100 ms soft budget). This is no universal latency bound.",
+          "basis": "Explicitly requested 100ms soft native switch budget; prepare reported separately with no invented acceptance bound.",
+          "factor_ids": []
+        },
+        "budget": {
+          "timeout_seconds": 120,
+          "rationale": "Same bounded component harness and external deadline."
+        },
+        "measurement_context": {
+          "id": "M-switch",
+          "level": "component",
+          "work_units": [
+            {
+              "id": "native_upgrade",
+              "unit": "upgrades",
+              "description": "One real candidate preparation followed by direct commit under active native decision workers."
+            }
+          ],
+          "resources": [],
+          "start_event": "Separate Instant boundaries before direct Prepare and CommitHeld calls",
+          "end_event": "Immediate successful response of each direct management call",
+          "factor_ids": []
+        }
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
+      "sha256": "64fae1816f2ca8bc080f997a8dfdaf76a3a20bd1c69694ec9dde78da6d414804"
+    },
+    {
+      "path": "tests/fixtures/network_upgrade_engine.rs",
+      "sha256": "b32eb29e3cfda1345b038fdd7fee77740771b2df996f5557fcdcc25311635573"
+    },
+    {
+      "path": "tests/fixtures/engine_fixture_build.rs",
+      "sha256": "312ae35ffb2db399024beeeb07f63f063a497bce3f220ea37a49ac7c296752e2"
+    },
+    {
+      "path": "tests/benchmarks/engine-upgrade/record.py",
+      "sha256": "e90fb6032a41321a18a4fad7a821c4ec48c0be54732022402f82c2c4d76048cf"
+    }
+  ],
+  "limitations": [
+    "This is native Engine component performance only; real Hook backend behavior, Windows native execution, workers and whole-product recovery have separate release tests.",
+    "Linux release-profile execution is measured here; no Windows/macOS performance numbers are inferred.",
+    "Four threads, 32 ordered regex rules, 250ms trials and every-64th latency samples are controlled assumptions, not a production workload distribution.",
+    "Only the 100ms commit soft budget has numeric acceptance; no throughput regression threshold or statistical significance is claimed."
+  ],
+  "common_context": {
+    "preconditions": [
+      "Use source/model hashes exactly as frozen; build with the lockfile and a Rust release toolchain.",
+      "Use isolated private diagnostic output; no real Serve or credentials participate."
+    ],
+    "cleanup": [
+      "Drop Runtime/leases after each trial and preserve raw.json before removing private artifact caches."
+    ],
+    "generation_notes": [
+      "Initial model was refrozen before any performance execution to add an explicit all-four-worker overlap oracle; the denominator and requested scope were unchanged. A failed preflight was retained, operation-specific inputs were corrected, and a final refreeze binds the added ownership unit regression, dependency manifests and evidence recorder before the repeated run. The v6 refreeze adds the statically linked Engine lib.rs dependency and its bounded pure-policy capacity retry. The final v7 refreeze binds Engine build/native Base source generation and the immutable r2 release context after the verified exec enrollment, ordinary-exit, process-birth and connection-claim lifecycle fixes. v5 and v6 raw evidence remain archived separately; no prior performance observations are pooled into this run.",
+      "Self-reviewed complete category catalog; exclusions are local to this healthy-path timing experiment."
+    ]
+  }
+}

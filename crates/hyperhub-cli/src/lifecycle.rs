@@ -42,10 +42,6 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
         return Ok(0);
     }
 
-    if crate::upgrade::check_on_start()? {
-        return Ok(0);
-    }
-
     let config_path = default_config_path().map_err(|error| error.to_string())?;
     let first_run = !config_path.is_file();
     let api_key_path = if first_run {
@@ -77,6 +73,11 @@ pub fn start(config: StartConfig) -> Result<i32, String> {
         );
         api_key_path
     };
+    // The detached installer can start the new executable only after this Home
+    // has a usable runtime envelope. Preserve first-run/password-file setup.
+    if crate::upgrade::check_on_start()? {
+        return Ok(0);
+    }
     let log_path = default_log_path()?;
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -250,6 +251,8 @@ pub fn status(json: bool) -> Result<i32, String> {
             "connections": status.connections,
             "engine_hosts": status.engine_hosts,
             "engine_upgrades": status.engine_upgrades,
+            "release_upgrades": status.release_upgrades,
+            "forward_workers": status.forward_workers,
         });
         println!(
             "{}",
@@ -340,6 +343,8 @@ struct ServeStatus {
     connections: Vec<hyperhub_core::session::ConnectionSnapshot>,
     engine_hosts: Vec<hyperhub_core::engine_hosts::HostStatus>,
     engine_upgrades: Option<hyperhub_core::upgrade::Status>,
+    release_upgrades: Option<hyperhub_core::release::Status>,
+    forward_workers: Option<hyperhub_core::socks::WorkerGroupStatus>,
 }
 
 fn query_status() -> Result<Option<ServeStatus>, String> {
@@ -374,6 +379,8 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
             connections,
             engine_hosts,
             engine_upgrades,
+            release_upgrades,
+            forward_workers,
         } => Ok(Some(ServeStatus {
             pid,
             socks_address,
@@ -383,6 +390,8 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
             connections,
             engine_hosts,
             engine_upgrades,
+            release_upgrades,
+            forward_workers,
         })),
         _ => Err("HyperHub serve returned an unexpected status response".into()),
     }

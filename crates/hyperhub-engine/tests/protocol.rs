@@ -107,7 +107,7 @@ fn reply_validation_covers_greeting_authentication_and_split_connect_headers() {
 fn exported_native_table_obeys_buffer_and_error_output_contracts() {
     let api = unsafe { &*hh_engine_v1() };
     assert_eq!(api.abi, hyperhub_runtime::abi::ABI_V1);
-    assert_eq!(api.hooks, NETWORK_OPERATIONS);
+    assert_eq!(api.hooks, REQUIRED_OPERATIONS);
     assert_eq!(unsafe { api.health.unwrap()() }, 0);
     let request =
         serde_json::to_vec(&input(0, TargetAddress::Ip("127.0.0.1".parse().unwrap()))).unwrap();
@@ -161,4 +161,82 @@ fn exported_native_table_obeys_buffer_and_error_output_contracts() {
         INVALID
     );
     assert_eq!(written, 0);
+}
+
+#[test]
+fn capacity_retry_is_bounded_to_one_pure_policy_call_and_preserves_input_limits() {
+    use hyperhub_runtime::{Engine, Lease, Manifest, Runtime};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    struct Capacity {
+        manifest: Manifest,
+        calls: Arc<AtomicUsize>,
+    }
+    impl Engine for Capacity {
+        fn manifest(&self) -> &Manifest {
+            &self.manifest
+        }
+        fn health(&self) -> bool {
+            true
+        }
+        fn invoke(&self, lease: &Lease, _: u32, _: &[u8], output: &mut [u8]) -> Result<usize, i32> {
+            assert_eq!(lease.generation(), 0);
+            assert!(output.len() <= MAX_POLICY_REQUEST * 2 + MAX_RESPONSE);
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(CAPACITY)
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::new(
+        Arc::new(Capacity {
+            manifest: manifest(b"retry-contract", "retry-contract"),
+            calls: calls.clone(),
+        }),
+        Default::default(),
+    )
+    .unwrap();
+    let lease = runtime.acquire();
+    for operation in [FILE_POLICY, PROCESS_POLICY, FIREWALL_POLICY] {
+        calls.store(0, Ordering::Relaxed);
+        assert_eq!(
+            call(&lease, operation, &"controlled request"),
+            Err(CAPACITY)
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "at most one pure retry");
+    }
+    for operation in [
+        NORMALIZE_DNS,
+        PLAN_CONNECT,
+        BUILD_HANDSHAKE,
+        VALIDATE_REPLY,
+        TRUST_BUNDLE,
+        CHILD_PLAN,
+        SANITIZE_ACTION,
+        FORK_RESET,
+        MODULE_RETAIN,
+        MODULE_RELEASE,
+    ] {
+        calls.store(0, Ordering::Relaxed);
+        assert_eq!(
+            call(&lease, operation, &"controlled request"),
+            Err(CAPACITY)
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "no other operation may repeat"
+        );
+    }
+    calls.store(0, Ordering::Relaxed);
+    assert_eq!(
+        call(&lease, FILE_POLICY, &"x".repeat(MAX_POLICY_REQUEST)),
+        Err(INVALID)
+    );
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "oversized input must not reach a module"
+    );
 }

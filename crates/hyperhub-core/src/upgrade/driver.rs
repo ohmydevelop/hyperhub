@@ -13,6 +13,8 @@ use zeroize::Zeroizing;
 
 #[path = "actions.rs"]
 mod actions;
+#[path = "admission.rs"]
+mod admission;
 #[path = "participant.rs"]
 mod participant;
 
@@ -20,6 +22,8 @@ mod participant;
 #[serde(deny_unknown_fields)]
 struct Book {
     records: BTreeMap<String, Record>,
+    #[serde(default)]
+    finalize_order: u64,
 }
 struct State {
     book: Book,
@@ -296,6 +300,7 @@ impl Coordinator {
         let mut book = state.book.clone();
         let now = (self.0.now)();
         actions::apply(&self.0, &mut book, &request, now)?;
+        order_finalizations(&mut book)?;
         let result = book
             .records
             .get(&request.id)
@@ -328,6 +333,7 @@ impl Coordinator {
                 changed = true;
             }
         }
+        order_finalizations(&mut book)?;
         // Every new intent and the irreversible finalize decision reach disk
         // before the first corresponding message leaves the coordinator.
         if changed {
@@ -354,6 +360,23 @@ impl Coordinator {
             })
             .collect();
         self.0.hosts.retire_coordinated(&pending);
+        let referenced = state
+            .book
+            .records
+            .values()
+            .filter(|record| !record.phase.terminal())
+            .flat_map(|record| record.participants.iter().filter(|p| !p.exited))
+            .map(|p| {
+                (
+                    p.identity.session_id.clone(),
+                    p.identity.host_pid,
+                    p.identity.host_start_time,
+                )
+            })
+            .collect();
+        // Retire exit evidence only after its group result is in the journal.
+        // Online Hosts and recent unconsumed reports retain independent grace.
+        self.0.hosts.retire_exit_evidence(&referenced);
         // Preserve intent ordering across runner interruption and recovery.
         // Dispatch only enqueues a command; it performs no target or file IO.
         drop(state);
@@ -377,3 +400,18 @@ pub(super) fn fingerprint(value: &impl Serialize) -> io::Result<String> {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+fn order_finalizations(book: &mut Book) -> io::Result<()> {
+    for record in book
+        .records
+        .values_mut()
+        .filter(|r| r.finalize_decided && r.finalize_order == 0)
+    {
+        book.finalize_order = book
+            .finalize_order
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("deployment order exhausted"))?;
+        record.finalize_order = book.finalize_order;
+    }
+    Ok(())
+}

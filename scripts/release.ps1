@@ -74,6 +74,12 @@ try {
 
   New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
   Copy-Item -LiteralPath $cli -Destination $packageDir
+  & $cli export-upgrade-bundle (Join-Path $packageDir 'upgrade')
+  if ($LASTEXITCODE -ne 0) { throw 'packaged Engine bundle export failed' }
+  $bundle = Get-Content -LiteralPath (Join-Path $packageDir 'upgrade/bundle.json') -Raw | ConvertFrom-Json
+  if ($bundle.version -ne $Version -or $bundle.target -ne 'x86_64-pc-windows-msvc') {
+    throw 'release version or target differs from the compiled bundle'
+  }
   Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination $packageDir
   Copy-Item -LiteralPath $license -Destination (Join-Path $packageDir 'LICENSE')
   Copy-Item -LiteralPath $fridaLicense -Destination (Join-Path $packageDir 'LICENSE-FRIDA-GUM.txt')

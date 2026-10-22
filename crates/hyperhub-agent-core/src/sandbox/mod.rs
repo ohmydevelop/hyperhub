@@ -29,14 +29,14 @@ pub(crate) enum FileSandboxOperation {
     Rename,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SandboxSnapshot {
     pub(crate) version: u64,
     pub(crate) network: Option<FirewallSnapshot>,
     pub(crate) process: Option<ProcessSandboxSnapshot>,
     pub(crate) file: Option<FileSandboxSnapshot>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(not(all(windows, feature = "gum-agent")), allow(dead_code))]
 pub(crate) struct ProcessSandboxSnapshot {
     pub(crate) default_action: SandboxAction,
@@ -44,7 +44,7 @@ pub(crate) struct ProcessSandboxSnapshot {
     pub(crate) error_action: SandboxAction,
     pub(crate) rules: Vec<ProcessSandboxSnapshotRule>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(not(all(windows, feature = "gum-agent")), allow(dead_code))]
 pub(crate) struct ProcessSandboxSnapshotRule {
     pub(crate) id: String,
@@ -53,13 +53,13 @@ pub(crate) struct ProcessSandboxSnapshotRule {
     #[serde(default)]
     pub(crate) protection: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
 pub(crate) struct ProcessSandboxPattern {
     pub(crate) executable: String,
     pub(crate) command_line: String,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(not(all(windows, feature = "gum-agent")), allow(dead_code))]
 pub(crate) struct FileSandboxSnapshot {
     pub(crate) default_action: SandboxAction,
@@ -67,7 +67,7 @@ pub(crate) struct FileSandboxSnapshot {
     pub(crate) error_action: SandboxAction,
     pub(crate) rules: Vec<FileSandboxSnapshotRule>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(not(all(windows, feature = "gum-agent")), allow(dead_code))]
 pub(crate) struct FileSandboxSnapshotRule {
     pub(crate) id: String,
@@ -80,35 +80,13 @@ pub(crate) struct FileSandboxSnapshotRule {
 
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
 pub(crate) struct CompiledProcessSandboxSnapshot {
-    pub(crate) default_action: SandboxAction,
     pub(crate) error_action: SandboxAction,
-    rules: Vec<CompiledProcessSandboxRule>,
-}
-#[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
-struct CompiledProcessSandboxRule {
-    id: String,
-    action: SandboxAction,
-    patterns: Vec<CompiledProcessSandboxPattern>,
-    protection: Option<String>,
-}
-#[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
-struct CompiledProcessSandboxPattern {
-    executable: Option<regex::Regex>,
-    command_line: Option<regex::Regex>,
+    wire: serde_json::Value,
 }
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
 pub(crate) struct CompiledFileSandboxSnapshot {
-    pub(crate) default_action: SandboxAction,
     pub(crate) error_action: SandboxAction,
-    rules: Vec<CompiledFileSandboxRule>,
-}
-#[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]
-struct CompiledFileSandboxRule {
-    id: String,
-    action: SandboxAction,
-    patterns: Vec<regex::Regex>,
-    operations: Vec<FileSandboxOperation>,
-    protection: Option<String>,
+    wire: serde_json::Value,
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -147,19 +125,63 @@ pub(crate) fn process_allows(exe: &str, cmd: &str) -> bool {
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
+fn parse_action(action: &str) -> SandboxAction {
+    if action == "pass" {
+        SandboxAction::Pass
+    } else {
+        SandboxAction::Deny
+    }
+}
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+fn engine_policy(
+    snapshot: &serde_json::Value,
+    operation: u32,
+    target: &str,
+    op: &str,
+    command_line: &str,
+) -> Result<hyperhub_engine::contract::PolicyDecision, i32> {
+    let engine = crate::state()
+        .lock()
+        .map_err(|_| crate::HH_ERR_INVALID)?
+        .engine
+        .clone();
+    let lease = crate::engine_call::calling(&engine)?;
+    hyperhub_engine::policy(
+        &lease,
+        operation,
+        &hyperhub_engine::contract::PolicyInput {
+            snapshot: snapshot.clone(),
+            target: target.into(),
+            operation: op.into(),
+            command_line: command_line.into(),
+        },
+    )
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
 pub(crate) fn file_sandbox_decision(
     snapshot: &CompiledFileSandboxSnapshot,
     path: &str,
     op: FileSandboxOperation,
 ) -> (SandboxAction, Option<String>, String) {
-    for rule in &snapshot.rules {
-        if rule.operations.contains(&op)
-            && rule.patterns.iter().any(|pattern| pattern.is_match(path))
-        {
-            return (rule.action, Some(rule.id.clone()), "rule".into());
-        }
-    }
-    (snapshot.default_action, None, "default".into())
+    engine_policy(
+        &snapshot.wire,
+        hyperhub_engine::contract::FILE_POLICY,
+        path,
+        &serde_json::to_value(op)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+        "",
+    )
+    .map(|decision| {
+        (
+            parse_action(&decision.action),
+            decision.rule_id,
+            decision.source,
+        )
+    })
+    .unwrap_or((snapshot.error_action, None, "error".into()))
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -168,21 +190,21 @@ pub(crate) fn process_sandbox_decision(
     exe: &str,
     cmd: &str,
 ) -> (SandboxAction, Option<String>, String) {
-    for rule in &snapshot.rules {
-        if rule.patterns.iter().any(|pattern| {
-            pattern
-                .executable
-                .as_ref()
-                .is_none_or(|regex| regex.is_match(exe))
-                && pattern
-                    .command_line
-                    .as_ref()
-                    .is_none_or(|regex| regex.is_match(cmd))
-        }) {
-            return (rule.action, Some(rule.id.clone()), "rule".into());
-        }
-    }
-    (snapshot.default_action, None, "default".into())
+    engine_policy(
+        &snapshot.wire,
+        hyperhub_engine::contract::PROCESS_POLICY,
+        exe,
+        "",
+        cmd,
+    )
+    .map(|decision| {
+        (
+            parse_action(&decision.action),
+            decision.rule_id,
+            decision.source,
+        )
+    })
+    .unwrap_or((snapshot.error_action, None, "error".into()))
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -296,23 +318,15 @@ pub(crate) fn process_protection_id(
     executable: &str,
     command_line: &str,
 ) -> Option<(String, String)> {
-    snapshot.rules.iter().find_map(|rule| {
-        if rule.protection.is_none()
-            || !rule.patterns.iter().any(|pattern| {
-                pattern
-                    .executable
-                    .as_ref()
-                    .is_none_or(|regex| regex.is_match(executable))
-                    && pattern
-                        .command_line
-                        .as_ref()
-                        .is_none_or(|regex| regex.is_match(command_line))
-            })
-        {
-            return None;
-        }
-        Some((rule.id.clone(), rule.protection.clone()?))
-    })
+    let decision = engine_policy(
+        &snapshot.wire,
+        hyperhub_engine::contract::PROCESS_POLICY,
+        executable,
+        "",
+        command_line,
+    )
+    .ok()?;
+    Some((decision.protection_rule_id?, decision.protection?))
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -321,15 +335,16 @@ pub(crate) fn file_protection_id(
     path: &str,
     operation: FileSandboxOperation,
 ) -> Option<(String, String)> {
-    snapshot.rules.iter().find_map(|rule| {
-        if rule.protection.is_none()
-            || !rule.operations.contains(&operation)
-            || !rule.patterns.iter().any(|pattern| pattern.is_match(path))
-        {
-            return None;
-        }
-        Some((rule.id.clone(), rule.protection.clone()?))
-    })
+    let op = serde_json::to_value(operation).ok()?.as_str()?.to_owned();
+    let decision = engine_policy(
+        &snapshot.wire,
+        hyperhub_engine::contract::FILE_POLICY,
+        path,
+        &op,
+        "",
+    )
+    .ok()?;
+    Some((decision.protection_rule_id?, decision.protection?))
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -478,36 +493,19 @@ pub(crate) fn file_sandbox_snapshot() -> Option<Arc<CompiledFileSandboxSnapshot>
 pub(crate) fn compile_process_snapshot(
     snapshot: ProcessSandboxSnapshot,
 ) -> Result<CompiledProcessSandboxSnapshot, regex::Error> {
-    let rules = snapshot
-        .rules
-        .into_iter()
-        .map(|rule| {
-            let patterns = rule
-                .patterns
-                .into_iter()
-                .map(|pattern| {
-                    Ok(CompiledProcessSandboxPattern {
-                        executable: (!pattern.executable.is_empty())
-                            .then(|| regex::Regex::new(&pattern.executable))
-                            .transpose()?,
-                        command_line: (!pattern.command_line.is_empty())
-                            .then(|| regex::Regex::new(&pattern.command_line))
-                            .transpose()?,
-                    })
-                })
-                .collect::<Result<_, regex::Error>>()?;
-            Ok(CompiledProcessSandboxRule {
-                id: rule.id,
-                action: rule.action,
-                patterns,
-                protection: rule.protection,
-            })
-        })
-        .collect::<Result<_, regex::Error>>()?;
+    for rule in &snapshot.rules {
+        for pattern in &rule.patterns {
+            if !pattern.executable.is_empty() {
+                regex::Regex::new(&pattern.executable)?;
+            }
+            if !pattern.command_line.is_empty() {
+                regex::Regex::new(&pattern.command_line)?;
+            }
+        }
+    }
     Ok(CompiledProcessSandboxSnapshot {
-        default_action: snapshot.default_action,
         error_action: snapshot.error_action,
-        rules,
+        wire: serde_json::to_value(snapshot).expect("serializable policy"),
     })
 }
 
@@ -515,27 +513,14 @@ pub(crate) fn compile_process_snapshot(
 pub(crate) fn compile_file_snapshot(
     snapshot: FileSandboxSnapshot,
 ) -> Result<CompiledFileSandboxSnapshot, regex::Error> {
-    let rules = snapshot
-        .rules
-        .into_iter()
-        .map(|rule| {
-            Ok(CompiledFileSandboxRule {
-                id: rule.id,
-                action: rule.action,
-                patterns: rule
-                    .patterns
-                    .into_iter()
-                    .map(|pattern| regex::Regex::new(&pattern))
-                    .collect::<Result<_, _>>()?,
-                operations: rule.operations,
-                protection: rule.protection,
-            })
-        })
-        .collect::<Result<_, regex::Error>>()?;
+    for rule in &snapshot.rules {
+        for pattern in &rule.patterns {
+            regex::Regex::new(pattern)?;
+        }
+    }
     Ok(CompiledFileSandboxSnapshot {
-        default_action: snapshot.default_action,
         error_action: snapshot.error_action,
-        rules,
+        wire: serde_json::to_value(snapshot).expect("serializable policy"),
     })
 }
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]

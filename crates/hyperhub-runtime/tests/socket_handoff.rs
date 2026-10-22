@@ -277,3 +277,27 @@ fn winsock_offer_has_a_fixed_size_and_preserves_initialized_wire_bytes() {
     let offer = handoff::SocketOffer::from_bytes(&bytes).unwrap();
     assert_eq!(offer.as_bytes(), bytes);
 }
+
+#[cfg(unix)]
+#[test]
+fn packet_api_accepts_zero_or_one_descriptor_without_weakening_strict_offers() {
+    use std::os::unix::net::UnixDatagram;
+    let (left, right) = UnixDatagram::pair().unwrap();
+    handoff::send_packet(&left, None, b"control").unwrap();
+    let (socket, bytes) = handoff::receive_packet(&right).unwrap();
+    assert!(socket.is_none());
+    assert_eq!(bytes, b"control");
+    handoff::send_packet(&left, None, b"missing-socket").unwrap();
+    assert!(handoff::receive(&right).is_err());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (_client, server) = connect(&listener);
+    handoff::send_packet(&left, Some(&server), b"offer").unwrap();
+    let (socket, bytes) = handoff::receive_packet(&right).unwrap();
+    assert_eq!(
+        socket.unwrap().peer_addr().unwrap(),
+        server.peer_addr().unwrap()
+    );
+    assert_eq!(bytes, b"offer");
+    malformed_offer(&left, &server, 2, b"ambiguous");
+    assert!(handoff::receive_packet(&right).is_err());
+}

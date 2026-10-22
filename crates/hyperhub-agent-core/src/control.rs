@@ -29,6 +29,15 @@ pub(crate) enum AgentControlRequest<'a> {
         hostname: &'a str,
         family: u8,
     },
+    GetEngineBootstrap {
+        session_id: &'a str,
+        token: &'a str,
+        pid: u32,
+        root_pid: u32,
+        nonce: [u8; 32],
+        host: hyperhub_runtime::Manifest,
+        native_base_sha256: &'a str,
+    },
     GetTrust {
         session_id: &'a str,
         token: &'a str,
@@ -143,6 +152,9 @@ pub(crate) enum AgentControlRequest<'a> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AgentControlResponse {
+    EngineBootstrap {
+        bootstrap: hyperhub_engine::bootstrap::Bootstrap,
+    },
     #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
     Ok,
     SmartProtectionDecision {
@@ -708,7 +720,6 @@ pub(crate) fn register_unix_process(
 
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn subscribe_sandbox() {
-    subscribe_engine();
     let _ = std::thread::Builder::new()
         .name("hyperhub-sandbox-subscription".into())
         .spawn(|| {
@@ -777,11 +788,13 @@ pub(crate) fn subscribe_sandbox() {
         });
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
-fn subscribe_engine() {
-    let _ = std::thread::Builder::new()
+fn subscribe_engine() -> Result<(), i32> {
+    let (ready_send, ready_recv) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
         .name("hyperhub-engine-control".into())
-        .spawn(|| {
+        .spawn(move || {
             crate::engine_call::background(|| {
+                let mut ready_send = Some(ready_send);
                 let delays = [250u64, 1000, 2000, 5000, 10000, 30000];
                 let mut attempt = 0usize;
                 loop {
@@ -796,7 +809,7 @@ fn subscribe_engine() {
                     let Some((endpoint, session_id, token, engine)) = values else {
                         return;
                     };
-                    let _ = (|| -> Result<(), i32> {
+                    let result = (|| -> Result<(), i32> {
                         let mut stream = open_control(&endpoint)?;
                         let nonce = rand::random();
                         let request = hyperhub_engine::host::Enrollment {
@@ -808,6 +821,7 @@ fn subscribe_engine() {
                             backend: hyperhub_engine::host::Backend::LinuxGum,
                             #[cfg(windows)]
                             backend: hyperhub_engine::host::Backend::WindowsGum,
+                            native_base_sha256: hyperhub_engine::NATIVE_BASE_SHA256,
                             snapshot: hyperhub_engine::host::report(&engine)
                                 .map_err(|_| HH_ERR_PROTOCOL)?,
                             nonce,
@@ -815,17 +829,90 @@ fn subscribe_engine() {
                         hyperhub_engine::host::write_frame(&mut *stream, &request)
                             .map_err(|_| HH_ERR_PROTOCOL)?;
                         unsafe {
+                            hyperhub_engine::host::await_enrollment(
+                                &mut *stream,
+                                &engine,
+                                &token,
+                                &nonce,
+                            )
+                        }
+                        .map_err(|_| HH_ERR_PROTOCOL)?;
+                        if let Some(sender) = ready_send.take() {
+                            let _ = sender.send(Ok(()));
+                        }
+                        unsafe {
                             hyperhub_engine::host::serve(&mut *stream, &engine, &token, &nonce)
                         }
                         .map_err(|_| HH_ERR_PROTOCOL)
                     })();
+                    if let Some(sender) = ready_send.take() {
+                        let _ = sender.send(result);
+                        return;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(
                         delays[attempt.min(delays.len() - 1)],
                     ));
                     attempt = attempt.saturating_add(1);
                 }
             });
-        });
+        })
+        .map_err(|_| HH_ERR_PROTOCOL)?;
+    ready_recv
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .map_err(|_| HH_ERR_PROTOCOL)?
+}
+/// Rebased fork Hosts retain their transaction history. Enrollment reconciles
+/// inherited held observations and installs any newer session deployment.
+#[cfg(all(target_os = "linux", feature = "gum-agent"))]
+pub(crate) fn reenroll_fork_engine() -> Result<(), i32> {
+    subscribe_engine()
+}
+/// Complete bootstrap and durable Host enrollment before target-ready signaling.
+/// This function must run outside the Agent-state mutex and native loader locks.
+#[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
+pub(crate) fn initialize_engine_control() -> Result<(), i32> {
+    crate::engine_call::background(|| {
+        let (endpoint, session_id, token, engine) = {
+            let core = crate::state().lock().map_err(|_| HH_ERR_PROTOCOL)?;
+            (
+                core.session.control_endpoint.clone(),
+                core.session.session_id.clone(),
+                core.session.token.clone(),
+                core.engine.clone(),
+            )
+        };
+        let host = engine.snapshot().map_err(|_| HH_ERR_PROTOCOL)?.host;
+        let pid = std::process::id();
+        let nonce = rand::random();
+        let response = exchange_control(
+            &endpoint,
+            &AgentControlRequest::GetEngineBootstrap {
+                session_id: &session_id,
+                token: &token,
+                pid,
+                root_pid: pid,
+                nonce,
+                host: host.clone(),
+                native_base_sha256: hyperhub_engine::NATIVE_BASE_SHA256,
+            },
+        )?;
+        let AgentControlResponse::EngineBootstrap { bootstrap } = response else {
+            return Err(HH_ERR_PROTOCOL);
+        };
+        if !bootstrap.verify(
+            &token,
+            &nonce,
+            pid,
+            pid,
+            &host,
+            hyperhub_engine::NATIVE_BASE_SHA256,
+        ) {
+            return Err(HH_ERR_PROTOCOL);
+        }
+        unsafe { hyperhub_engine::bootstrap::install(&engine, &bootstrap.selection) }
+            .map_err(|_| HH_ERR_PROTOCOL)?;
+        subscribe_engine()
+    })
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn report_sandbox_audit(event: &SandboxAuditEvent) -> Result<(), i32> {
@@ -879,7 +966,7 @@ pub(crate) fn exchange_control(
     serde_json::from_slice::<AgentControlResponse>(&payload).map_err(|_| HH_ERR_PROTOCOL)
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct SessionState {
     pub(crate) initialized: bool,
     pub(crate) session_id: String,

@@ -6,6 +6,10 @@ fn main() {}
 mod diagnostics;
 
 #[cfg(windows)]
+#[path = "windows_fls_teardown.rs"]
+mod fls_teardown;
+
+#[cfg(windows)]
 mod probe {
     use std::mem::{size_of, zeroed};
     use std::ptr::{null, null_mut};
@@ -270,7 +274,9 @@ mod probe {
         let arguments: Vec<String> = std::env::args().collect();
         let mode = &arguments[1];
         let port = arguments[2].parse().unwrap();
-        if mode == "dns-cancel-concurrent" {
+        if mode == "fls-teardown" {
+            super::fls_teardown::run(port, &arguments[3], arguments[4] == "deny");
+        } else if mode == "dns-cancel-concurrent" {
             // Each thread reuses caller storage only after its own completion.
             // A barrier overlaps native entry, cancellation and callback exit;
             // it does not add synchronization inside the observed Hooks.

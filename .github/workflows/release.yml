@@ -9,7 +9,7 @@ on:
       version:
         description: "Release version without the leading v"
         required: true
-        default: "0.2.12"
+        default: "0.2.13"
 
 permissions:
   contents: write
@@ -51,7 +51,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang gcc-aarch64-linux-gnu libclang-dev
+          sudo apt-get install -y clang gcc-aarch64-linux-gnu libclang-dev qemu-user
 
       - name: Build and package Linux CLI
         if: runner.os == 'Linux'
@@ -71,12 +71,24 @@ jobs:
           rm -rf "$package_dir" "$archive"
           mkdir -p "$package_dir"
           install -m 0755 "$binary" "$package_dir/hyperhub"
+          if [[ "${{ matrix.arch }}" == x86_64 ]]; then
+            "$binary" export-upgrade-bundle "$package_dir/upgrade"
+          else
+            qemu-aarch64 -L /usr/aarch64-linux-gnu "$binary" export-upgrade-bundle "$package_dir/upgrade"
+          fi
+          python3 - "$package_dir/upgrade/bundle.json" "$version" "${{ matrix.target }}" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as source:
+              bundle = json.load(source)
+          assert bundle["version"] == sys.argv[2], "release tag differs from compiled version"
+          assert bundle["target"] == sys.argv[3], "release target differs from compiled target"
+          PY
           cp README.md LICENSE third_party/frida-gum/COPYING \
             "$package_dir/"
           cp third_party/needle/LICENSE "$package_dir/LICENSE-NEEDLE.txt"
           cp third_party/needle/README.md "$package_dir/NOTICE-NEEDLE.md"
           mv "$package_dir/COPYING" "$package_dir/LICENSE-FRIDA-GUM.txt"
-          (cd "$package_dir" && sha256sum * > MANIFEST.sha256)
+          (cd "$package_dir" && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > MANIFEST.sha256)
           tar -czf "$archive" -C dist "$package_name"
 
       - name: Build and package Windows CLI

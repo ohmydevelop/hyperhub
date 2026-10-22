@@ -11,7 +11,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct TrustStore(Arc<TrustStoreInner>);
+pub struct TrustStore(Arc<TrustStoreBackend>);
+
+enum TrustStoreBackend {
+    Local(TrustStoreInner),
+    Remote(crate::forward::authority::Client),
+}
 
 struct TrustStoreInner {
     config_path: PathBuf,
@@ -41,21 +46,59 @@ impl TrustStore {
         runtime: RuntimeState,
         audit: AuditWriter,
     ) -> Self {
-        Self(Arc::new(TrustStoreInner {
+        Self(Arc::new(TrustStoreBackend::Local(TrustStoreInner {
             config_path,
             keyring,
             runtime,
             audit,
             mutation: Mutex::new(()),
             cache: Mutex::new(None),
-        }))
+        })))
+    }
+
+    pub(crate) fn remote(client: crate::forward::authority::Client) -> Self {
+        Self(Arc::new(TrustStoreBackend::Remote(client)))
+    }
+    fn local(&self) -> io::Result<&TrustStoreInner> {
+        match &*self.0 {
+            TrustStoreBackend::Local(local) => Ok(local),
+            TrustStoreBackend::Remote(_) => Err(io::Error::other(
+                "trust persistence belongs to resident Serve",
+            )),
+        }
     }
 
     pub fn tls_material(&self, host: &str, port: u16) -> io::Result<TlsTrustMaterial> {
+        if let TrustStoreBackend::Remote(client) = &*self.0 {
+            return match client.call(crate::forward::authority::Request::TlsMaterial {
+                host: host.into(),
+                port,
+            })? {
+                crate::forward::authority::Response::TlsMaterial {
+                    roots,
+                    host_certificate,
+                } => {
+                    let mut store = RootCertStore::empty();
+                    store.roots = roots
+                        .into_iter()
+                        .map(|anchor| rustls::pki_types::TrustAnchor {
+                            subject: anchor.subject.into(),
+                            subject_public_key_info: anchor.subject_public_key_info.into(),
+                            name_constraints: anchor.name_constraints.map(Into::into),
+                        })
+                        .collect();
+                    Ok(TlsTrustMaterial {
+                        roots: Arc::new(store),
+                        host_certificate: host_certificate.map(CertificateDer::from),
+                    })
+                }
+                _ => Err(crate::forward::authority::invalid_response()),
+            };
+        }
+        let local = self.local()?;
         let authority = trust_authority(host, port);
-        let snapshot = self.0.runtime.snapshot();
-        let mut cache = self
-            .0
+        let snapshot = local.runtime.snapshot();
+        let mut cache = local
             .cache
             .lock()
             .map_err(|_| io::Error::other("TLS trust cache poisoned"))?;
@@ -78,14 +121,21 @@ impl TrustStore {
         port: u16,
         certificate: &CertificateDer<'_>,
     ) -> io::Result<()> {
-        let _mutation = self
-            .0
+        if let TrustStoreBackend::Remote(client) = &*self.0 {
+            return client.expect_ok(crate::forward::authority::Request::TrustTls {
+                host: host.into(),
+                port,
+                certificate: certificate.as_ref().to_vec(),
+            });
+        }
+        let local = self.local()?;
+        let _mutation = local
             .mutation
             .lock()
             .map_err(|_| io::Error::other("trust configuration lock poisoned"))?;
         let authority = trust_authority(host, port);
         let fingerprint = crate::certificate::fingerprint(certificate);
-        let snapshot = self.0.runtime.snapshot();
+        let snapshot = local.runtime.snapshot();
         let mut config = (*snapshot.config).clone();
         if let Some(existing) = config
             .root_certificates
@@ -107,8 +157,8 @@ impl TrustStore {
             ));
         }
         config_store::import_root_certificates_from_der_with_keyring(
-            &self.0.config_path,
-            &self.0.keyring,
+            &local.config_path,
+            &local.keyring,
             std::slice::from_ref(certificate),
         )
         .map_err(io::Error::other)?;
@@ -119,7 +169,7 @@ impl TrustStore {
             enabled: true,
         });
         self.persist(config)?;
-        self.0.audit.system_event(
+        local.audit.system_event(
             "tls_host_trusted_first_use",
             json!({"host": authority, "fingerprint": fingerprint}),
         );
@@ -133,13 +183,21 @@ impl TrustStore {
         key_type: &str,
         key_blob: &str,
     ) -> io::Result<()> {
-        let _mutation = self
-            .0
+        if let TrustStoreBackend::Remote(client) = &*self.0 {
+            return client.expect_ok(crate::forward::authority::Request::TrustSsh {
+                host: host.into(),
+                port,
+                key_type: key_type.into(),
+                key_blob: key_blob.into(),
+            });
+        }
+        let local = self.local()?;
+        let _mutation = local
             .mutation
             .lock()
             .map_err(|_| io::Error::other("trust configuration lock poisoned"))?;
         let authority = trust_authority(host, port);
-        let snapshot = self.0.runtime.snapshot();
+        let snapshot = local.runtime.snapshot();
         let mut config = (*snapshot.config).clone();
         if let Some(existing) = config
             .ssh_host_keys
@@ -168,7 +226,7 @@ impl TrustStore {
             enabled: true,
         });
         self.persist(config)?;
-        self.0.audit.system_event(
+        local.audit.system_event(
             "ssh_host_trusted_first_use",
             json!({"host": authority, "key_type": key_type}),
         );
@@ -176,17 +234,16 @@ impl TrustStore {
     }
 
     fn persist(&self, config: Config) -> io::Result<()> {
+        let local = self.local()?;
         config.validate().map_err(io::Error::other)?;
-        config_store::save_encrypted_with_keyring(&self.0.config_path, &config, &self.0.keyring)
+        config_store::save_encrypted_with_keyring(&local.config_path, &config, &local.keyring)
             .map_err(io::Error::other)?;
-        let prepared = self
-            .0
+        let prepared = local
             .runtime
             .prepare_update(Arc::new(config))
             .map_err(io::Error::other)?;
-        self.0.runtime.commit_update(prepared);
-        *self
-            .0
+        local.runtime.commit_update(prepared);
+        *local
             .cache
             .lock()
             .map_err(|_| io::Error::other("TLS trust cache poisoned"))? = None;
@@ -194,13 +251,14 @@ impl TrustStore {
     }
 
     fn load_cache(&self, config: &Config, version: u64) -> io::Result<TrustCache> {
+        let local = self.local()?;
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let mut host_certificates = HashMap::new();
         for item in config.root_certificates.iter().filter(|item| item.enabled) {
             let certificate = config_store::read_root_certificate_with_keyring(
-                &self.0.config_path,
-                &self.0.keyring,
+                &local.config_path,
+                &local.keyring,
                 &item.fingerprint,
             )
             .map_err(io::Error::other)?;

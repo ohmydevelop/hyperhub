@@ -27,6 +27,8 @@ for tuple in "x86_64:x86_64-unknown-linux-gnu" "aarch64:aarch64-unknown-linux-gn
   cargo check -p hyperhub --locked --target "$target"
   cargo build --release -p hyperhub-agent-core --features gum-agent --locked --target "$target"
   export HYPERHUB_EMBEDDED_AGENT_PATH="${CARGO_TARGET_DIR:-$root/target}/$target/release/libhyperhub_gum_agent.so"
+  cargo build -p hyperhub-engine --release --locked --target "$target"
+  export HYPERHUB_EMBEDDED_ENGINE_PATH="${CARGO_TARGET_DIR:-$root/target}/$target/release/libhyperhub_engine.so"
   cargo check -p hyperhub --locked --target "$target" --no-default-features --features embedded-agent
 done
 if command -v cc >/dev/null 2>&1; then
@@ -50,6 +52,7 @@ export HYPERHUB_FRIDA_CORE_ROOT=${native_devkits[1]}
 native_include=$(cc -print-file-name=include)
 export BINDGEN_EXTRA_CLANG_ARGS="-I$HYPERHUB_FRIDA_CORE_ROOT -isystem $native_include"
 export HYPERHUB_EMBEDDED_AGENT_PATH="${CARGO_TARGET_DIR:-$root/target}/x86_64-unknown-linux-gnu/release/libhyperhub_gum_agent.so"
+export HYPERHUB_EMBEDDED_ENGINE_PATH="${CARGO_TARGET_DIR:-$root/target}/x86_64-unknown-linux-gnu/release/libhyperhub_engine.so"
 cargo build --release -p hyperhub --locked --target x86_64-unknown-linux-gnu \
   --no-default-features --features embedded-agent
 "$root/scripts/test-cli-config-approval.sh" \

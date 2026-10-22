@@ -68,6 +68,11 @@ pub extern "C" fn hh_agent_initialize_from_env() -> i32 {
             .lock()
             .map_err(|_| HH_ERR_INVALID)?
             .initialize_from_env()?;
+        #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
+        {
+            crate::control::initialize_engine_control()?;
+            crate::subscribe_sandbox();
+        }
         Ok(HH_OK)
     })
 }
@@ -485,7 +490,8 @@ pub unsafe extern "C" fn hh_agent_redirect_path(
             .to_str()
             .map_err(|_| HH_ERR_INVALID)?;
         let mut core = state().lock().map_err(|_| HH_ERR_INVALID)?;
-        let Some(replacement) = core.trust.redirect_ca_bundle(input) else {
+        let lease = crate::engine_call::calling(&core.engine)?;
+        let Some(replacement) = core.trust.redirect_ca_bundle(input, &lease) else {
             unsafe { written.write(0) };
             return Ok(HH_BYPASS);
         };

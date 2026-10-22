@@ -16,6 +16,15 @@ fn control_buffer(bytes: usize) -> Vec<usize> {
 /// that connected endpoint can receive the descriptor. Payloads are bounded and
 /// datagrams preserve the descriptor/payload association under concurrency.
 pub fn send(channel: &UnixDatagram, stream: &TcpStream, payload: &[u8]) -> io::Result<()> {
+    send_packet(channel, Some(stream), payload)
+}
+
+/// Send a bounded private packet with zero or one accepted TCP descriptor.
+pub fn send_packet(
+    channel: &UnixDatagram,
+    stream: Option<&TcpStream>,
+    payload: &[u8],
+) -> io::Result<()> {
     if payload.is_empty() || payload.len() > MAX_PAYLOAD {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -31,16 +40,20 @@ pub fn send(channel: &UnixDatagram, stream: &TcpStream, payload: &[u8]) -> io::R
     let mut message: libc::msghdr = unsafe { mem::zeroed() };
     message.msg_iov = &mut vector;
     message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = space as _;
-    unsafe {
-        let header = libc::CMSG_FIRSTHDR(&message);
-        (*header).cmsg_level = libc::SOL_SOCKET;
-        (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as _) as _;
-        libc::CMSG_DATA(header)
-            .cast::<libc::c_int>()
-            .write_unaligned(stream.as_raw_fd());
+    if stream.is_some() {
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = space as _;
+    }
+    if let Some(stream) = stream {
+        unsafe {
+            let header = libc::CMSG_FIRSTHDR(&message);
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as _) as _;
+            libc::CMSG_DATA(header)
+                .cast::<libc::c_int>()
+                .write_unaligned(stream.as_raw_fd());
+        }
     }
     loop {
         let result = unsafe { libc::sendmsg(channel.as_raw_fd(), &message, 0) };
@@ -63,6 +76,19 @@ pub fn send(channel: &UnixDatagram, stream: &TcpStream, payload: &[u8]) -> io::R
 /// Receive one socket offer. All unexpected descriptors are owned immediately
 /// and closed on rejection, including truncated/malformed offers.
 pub fn receive(channel: &UnixDatagram) -> io::Result<(TcpStream, Vec<u8>)> {
+    let (stream, payload) = receive_packet(channel)?;
+    let stream = stream.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "socket offer is missing its descriptor",
+        )
+    })?;
+    Ok((stream, payload))
+}
+
+/// Receive a bounded packet. Unexpected descriptors are closed before returning
+/// an error. An absent descriptor is valid only for this packet-level API.
+pub fn receive_packet(channel: &UnixDatagram) -> io::Result<(Option<TcpStream>, Vec<u8>)> {
     let mut payload = vec![0; MAX_PAYLOAD];
     let mut vector = libc::iovec {
         iov_base: payload.as_mut_ptr().cast(),
@@ -110,14 +136,17 @@ pub fn receive(channel: &UnixDatagram) -> io::Result<(TcpStream, Vec<u8>)> {
     }
     if count == 0
         || message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
-        || descriptors.len() != 1
+        || descriptors.len() > 1
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "socket offer must contain one descriptor and a complete payload",
+            "packet must contain at most one descriptor and a complete payload",
         ));
     }
-    let descriptor = descriptors.pop().unwrap();
+    payload.truncate(count);
+    let Some(descriptor) = descriptors.pop() else {
+        return Ok((None, payload));
+    };
     // Also verify CLOEXEC on non-Linux systems and inherited descriptors.
     let fd_flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
     if fd_flags < 0
@@ -154,6 +183,5 @@ pub fn receive(channel: &UnixDatagram) -> io::Result<(TcpStream, Vec<u8>)> {
             "offered descriptor is not a TCP stream",
         ));
     }
-    payload.truncate(count);
-    Ok((stream, payload))
+    Ok((Some(stream), payload))
 }

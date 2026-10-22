@@ -9,6 +9,63 @@ struct Failure {
     restart: bool,
 }
 
+// PID and process birth survive exec; Runtime generation counters do not.
+// Rebind only after the old channel has left, and query the new image before
+// using any channel-derived confirmation in a durable group decision.
+pub(super) fn rebind(record: &mut Record, index: usize, host: &HostStatus, now: u64) {
+    if record.participants[index].host_id == host.host_id {
+        return;
+    }
+    let transaction = host
+        .snapshot
+        .transactions
+        .iter()
+        .find(|t| t.id == record.id);
+    let selected = transaction.is_some_and(|t| {
+        t.manifest == record.manifest
+            && matches!(t.stage, Stage::Prepared | Stage::Draining | Stage::Complete)
+    });
+    let participant = &mut record.participants[index];
+    participant.host_id = host.host_id.clone();
+    participant.pending = None;
+    if transaction.is_none() && record.finalize_decided && participant.finalized {
+        // A lower counter proves the old Runtime disappeared at exec. If the
+        // counter did not reset, preserve the normal retired-lease drain check:
+        // a plain reconnect can retain old leases after its transaction report
+        // has left the bounded wire history.
+        participant.recovering = false;
+        if participant
+            .generation
+            .is_some_and(|g| host.snapshot.active.generation < g)
+        {
+            participant.stage = Some(Stage::Complete);
+        }
+        return;
+    }
+    participant.recovering = true;
+    participant.generation = transaction.and_then(|t| t.generation);
+    participant.stage = transaction.map(|t| t.stage);
+    participant.confirmed = transaction.is_some_and(|t| {
+        t.manifest == record.manifest && matches!(t.stage, Stage::Draining | Stage::Complete)
+    });
+    participant.finalized = false;
+    participant.cleanup_done = false;
+    participant.previous_generation = participant
+        .generation
+        .map_or(host.snapshot.active.generation, |g| g.saturating_sub(1));
+    if record.finalize_decided {
+        record.phase = Phase::Finalizing;
+    } else if record.phase.terminal() && selected {
+        record.phase = if participant.confirmed {
+            Phase::RollingBack
+        } else {
+            Phase::Aborting
+        };
+    } else if record.phase == Phase::Observing {
+        record.health_started_at_ms = Some(now);
+    }
+}
+
 pub(super) fn advance(
     record: &mut Record,
     known: &[HostStatus],
@@ -28,36 +85,63 @@ pub(super) fn advance(
         );
     }
     for index in 0..record.participants.len() {
-        let selected = known
-            .iter()
-            .find(|host| record.participants[index].identity.matches(host))
-            .cloned();
-        let Some(mut host) = selected else {
+        if record.participants[index].exited {
+            continue;
+        }
+        let identity = record.participants[index].identity.clone();
+        let failed = registry.process_failure(&identity, record.created_at_ms);
+        if let Some(reason) = &failed {
+            fail(
+                record,
+                Failure {
+                    reason: reason.clone(),
+                    restart: record.finalize_decided,
+                },
+            );
+        }
+        let normal = registry.normal_exit(&identity);
+        let gone = gone(&identity);
+        if normal || gone {
             let participant = &mut record.participants[index];
-            if gone(&participant.identity) {
+            let started = *participant.exit_wait_started_ms.get_or_insert(now);
+            if normal || failed.is_some() || now.saturating_sub(started) >= 2000 {
                 participant.exited = true;
+                participant.exit_clean = normal && failed.is_none();
                 participant.cleanup_done = true;
+                participant.finalized = true;
+                participant.stage = Some(Stage::Complete);
                 participant.pending = None;
-                participant.reason = Some("target process exited".into());
-                if !matches!(record.phase, Phase::Finalizing | Phase::Draining) {
+                participant.reason = Some(
+                    if normal {
+                        "managed process exited normally"
+                    } else {
+                        "managed process exited without a normal completion proof"
+                    }
+                    .into(),
+                );
+                if !normal
+                    && failed.is_none()
+                    && !matches!(record.phase, Phase::Finalizing | Phase::Draining)
+                {
                     fail(
                         record,
                         Failure {
-                            reason: "target process exited during upgrade".into(),
+                            reason: "managed process exit proof is unavailable".into(),
                             restart: false,
                         },
                     );
                 }
             }
             continue;
+        }
+        record.participants[index].exit_wait_started_ms = None;
+        let selected = known.iter().find(|host| identity.matches(host)).cloned();
+        let Some(mut host) = selected else {
+            continue;
         };
+        rebind(record, index, &host, now);
         let phase = record.phase;
         let participant = &mut record.participants[index];
-        if participant.host_id != host.host_id {
-            participant.host_id = host.host_id.clone();
-            participant.pending = None;
-            participant.recovering = true;
-        }
         if let Some(pending) = participant.pending.clone() {
             match registry.command(&pending.request.request_id) {
                 Some(status) if status.state == DeliveryState::Acknowledged => {
@@ -94,6 +178,7 @@ pub(super) fn advance(
         }
         let participant = &mut record.participants[index];
         if participant.confirmed
+            && !participant.recovering
             && matches!(record.phase, Phase::Committed | Phase::Observing)
             && Some(host.snapshot.active.generation) != participant.generation
         {
@@ -163,16 +248,24 @@ fn desired(record: &Record, index: usize) -> Option<(Purpose, Command)> {
     let participant = &record.participants[index];
     let id = record.id.clone();
     match record.phase {
-        Phase::Preparing if participant.stage.is_none() => Some((
-            Purpose::Prepare,
-            Command::Prepare {
-                id,
-                manifest: record.manifest.clone(),
-                source: record.source.clone(),
-                cache: record.cache.clone(),
-            },
-        )),
-        Phase::Switching
+        Phase::Preparing
+        | Phase::Switching
+        | Phase::Committed
+        | Phase::Observing
+        | Phase::Finalizing
+            if participant.stage.is_none() && !participant.confirmed =>
+        {
+            Some((
+                Purpose::Prepare,
+                Command::Prepare {
+                    id,
+                    manifest: record.manifest.clone(),
+                    source: record.source.clone(),
+                    cache: record.cache.clone(),
+                },
+            ))
+        }
+        Phase::Switching | Phase::Committed | Phase::Observing | Phase::Finalizing
             if !participant.confirmed && participant.stage == Some(Stage::Prepared) =>
         {
             Some((Purpose::Commit, Command::CommitHeld { id }))
@@ -195,7 +288,9 @@ fn desired(record: &Record, index: usize) -> Option<(Purpose, Command)> {
                 Some((Purpose::Recover, Command::QueryTransaction { id }))
             }
         }
-        Phase::Finalizing if !participant.finalized && !participant.cleanup_done => {
+        Phase::Finalizing
+            if participant.confirmed && !participant.finalized && !participant.cleanup_done =>
+        {
             Some((Purpose::Finalize, Command::FinalizeObservation { id }))
         }
         _ => None,
@@ -350,7 +445,7 @@ fn finish_phase(record: &mut Record, known: &[HostStatus], now: u64) {
             if record
                 .participants
                 .iter()
-                .all(|p| p.stage == Some(Stage::Prepared) && p.pending.is_none()) =>
+                .all(|p| p.exited || (p.stage == Some(Stage::Prepared) && p.pending.is_none())) =>
         {
             record.phase = Phase::Prepared
         }
@@ -358,21 +453,16 @@ fn finish_phase(record: &mut Record, known: &[HostStatus], now: u64) {
             if record
                 .participants
                 .iter()
-                .all(|p| p.confirmed && p.pending.is_none()) =>
+                .all(|p| p.exited || (p.confirmed && p.pending.is_none())) =>
         {
             record.phase = Phase::Committed
         }
         Phase::Observing => {
             let elapsed = now.saturating_sub(record.health_started_at_ms.unwrap_or(now));
-            let fresh = record.participants.iter().all(|p| {
-                known.iter().any(|host| {
-                    p.identity.matches(host)
-                        && now.saturating_sub(host.last_seen_ms) < 2500
-                        && Some(host.snapshot.active.generation) == p.generation
-                })
-            });
-            if elapsed >= record.health_window_ms && fresh {
+            let fresh = healthy(record, known, now);
+            if !record.defer_finalize && elapsed >= record.health_window_ms && fresh {
                 // Driver persists this global decision before a finalize send.
+                record.finalize_decided = true;
                 record.phase = Phase::Finalizing;
             }
         }
@@ -404,7 +494,11 @@ fn finish_phase(record: &mut Record, known: &[HostStatus], now: u64) {
         {
             record.phase = if record.restart_requested {
                 Phase::RequiresRestart
-            } else if record.participants.iter().any(|p| p.exited) {
+            } else if record
+                .participants
+                .iter()
+                .any(|p| p.exited && !p.exit_clean)
+            {
                 Phase::Failed
             } else if record.rollback_requested {
                 Phase::RolledBack
@@ -420,31 +514,20 @@ fn finish_phase(record: &mut Record, known: &[HostStatus], now: u64) {
     }
 }
 
-fn gone(identity: &Identity) -> bool {
-    if let Some(start) = crate::session::process_start_time(identity.root_pid) {
-        return start != identity.root_start_time;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::metadata(format!("/proc/{}", identity.root_pid))
-            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-    }
-    #[cfg(windows)]
-    unsafe {
-        use windows_sys::Win32::{
-            Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER},
-            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-        };
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, identity.root_pid);
-        if process.is_null() {
-            GetLastError() == ERROR_INVALID_PARAMETER
-        } else {
-            CloseHandle(process);
-            false
-        }
-    }
-    #[cfg(not(any(windows, target_os = "linux")))]
-    {
-        false
-    }
+pub(super) fn gone(identity: &Identity) -> bool {
+    EngineHosts::process_is_gone(identity.host_pid, identity.host_start_time)
+}
+
+pub(super) fn healthy(record: &Record, known: &[HostStatus], now: u64) -> bool {
+    record.participants.iter().all(|p| {
+        p.exited
+            || (p.confirmed
+                && !p.recovering
+                && p.pending.is_none()
+                && known.iter().any(|host| {
+                    p.identity.matches(host)
+                        && now.saturating_sub(host.last_seen_ms) < 2500
+                        && Some(host.snapshot.active.generation) == p.generation
+                }))
+    })
 }

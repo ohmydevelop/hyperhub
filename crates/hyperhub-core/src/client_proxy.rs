@@ -1,8 +1,8 @@
 //! Recognition and preservation of proxy protocols configured by the target
 //! application. The injected agent never parses these protocols.
 
+use crate::forward::authority::NameService;
 use crate::policy::Destination;
-use crate::session::SessionRegistry;
 use std::io;
 use std::net::IpAddr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -153,7 +153,7 @@ where
 pub(crate) async fn resolve_socks5_target(
     target: Socks5Target,
     session_id: &str,
-    sessions: &SessionRegistry,
+    sessions: &NameService,
 ) -> io::Result<Destination> {
     match target {
         Socks5Target::Domain(hostname, port) => {
@@ -175,7 +175,7 @@ pub(crate) async fn resolve_socks5_target(
         }
         Socks5Target::Ip(mut ip, port) => {
             let mut hostnames = Vec::new();
-            if let Some(hostname) = sessions.restore_fake(session_id, ip) {
+            if let Some(hostname) = sessions.restore_fake(session_id, ip)? {
                 ip = tokio::net::lookup_host((hostname.as_str(), port))
                     .await?
                     .next()

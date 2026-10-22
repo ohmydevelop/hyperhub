@@ -26,6 +26,9 @@ struct CallContext<'a> {
 
 pub struct NativeEngine {
     api: abi::EngineApi,
+    owner_epoch: Option<u64>,
+    #[cfg(target_os = "linux")]
+    fork_handle: usize,
     // Drop order: library finalizers can still access the artifact and bridge.
     _library: libloading::Library,
     artifact: Artifact,
@@ -66,12 +69,66 @@ impl NativeEngine {
         {
             return Err(Error::RequiresRestart);
         }
+        #[cfg(target_os = "linux")]
+        let (library, fork_handle) = {
+            let platform: libloading::os::unix::Library = library.into();
+            let raw = platform.into_raw();
+            (
+                unsafe { libloading::os::unix::Library::from_raw(raw) }.into(),
+                raw as usize,
+            )
+        };
+        let owner_epoch = if api.state_schema == 2 && api.hooks & 0x1800 == 0x1800 {
+            let mut epoch = [0u8; 8];
+            let mut written = 0;
+            if unsafe {
+                (api.invoke.unwrap())(
+                    std::ptr::null(),
+                    12,
+                    std::ptr::null(),
+                    0,
+                    epoch.as_mut_ptr(),
+                    epoch.len(),
+                    &mut written,
+                )
+            } != abi::OK
+                || written != 8
+            {
+                return Err(Error::RequiresRestart);
+            }
+            Some(u64::from_le_bytes(epoch))
+        } else {
+            None
+        };
         Ok(Self {
             api,
+            owner_epoch,
+            #[cfg(target_os = "linux")]
+            fork_handle,
             _library: library,
             artifact,
             bridge: host.map(|host| Box::new(Bridge { host })),
         })
+    }
+}
+
+impl Drop for NativeEngine {
+    fn drop(&mut self) {
+        if let Some(epoch) = self.owner_epoch.take() {
+            let bytes = epoch.to_le_bytes();
+            let mut written = 0;
+            unsafe {
+                (self.api.invoke.unwrap())(
+                    std::ptr::null(),
+                    13,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    std::ptr::null_mut(),
+                    0,
+                    &mut written,
+                );
+            }
+        }
     }
 }
 
@@ -81,6 +138,48 @@ impl Engine for NativeEngine {
     }
     fn health(&self) -> bool {
         unsafe { (self.api.health.unwrap())() == abi::OK }
+    }
+    #[cfg(target_os = "linux")]
+    unsafe fn fork_copy(&self) -> Result<Arc<dyn Engine>, Error> {
+        if self.bridge.is_some() {
+            return Err(Error::RequiresRestart);
+        }
+        let artifact = self.artifact.duplicate_after_fork()?;
+        Ok(Arc::new(unsafe { Self::load(artifact, None)? }))
+    }
+    #[cfg(target_os = "linux")]
+    fn fork_module_key(&self) -> usize {
+        self.fork_handle
+    }
+    #[cfg(target_os = "linux")]
+    unsafe fn fork_reset(&self) -> Result<(), Error> {
+        let mut written = 0;
+        // Schema 2 freezes the child-reset operation at number 11. It accepts
+        // no Host services, native pointers or retained Rust allocations.
+        if self.api.state_schema != 2
+            || unsafe {
+                (self.api.invoke.unwrap())(
+                    std::ptr::null(),
+                    11,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut written,
+                )
+            } != abi::OK
+            || written != 0
+        {
+            return Err(Error::RequiresRestart);
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    unsafe fn fork_release(&self) {
+        unsafe {
+            libc::dlclose(self.fork_handle as *mut c_void);
+            self.artifact.release_after_fork();
+        }
     }
     fn invoke(
         &self,

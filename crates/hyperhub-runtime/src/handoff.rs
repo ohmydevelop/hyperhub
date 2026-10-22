@@ -9,7 +9,7 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{receive, send};
+pub use unix::{receive, receive_packet, send, send_packet, MAX_PAYLOAD};
 
 #[cfg(windows)]
 mod windows;
