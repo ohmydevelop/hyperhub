@@ -83,6 +83,93 @@ fn value(lease: &hyperhub_runtime::Lease) -> u8 {
 }
 
 #[test]
+fn partial_group_commit_keeps_rollback_code_until_the_coordinator_decides() {
+    let first = runtime();
+    let second = runtime();
+    for host in [&first, &second] {
+        host.prepare("group", &manifest(1), || Ok(good(1))).unwrap();
+    }
+    first.commit_held("group").unwrap();
+    let completed_entry = first.acquire();
+    // A zero health window exposes premature expiry deterministically: an
+    // ordinary standalone commit would already discard its rollback reserve.
+    first.observe().unwrap();
+    first.observe().unwrap();
+    let status = first.snapshot().unwrap();
+    assert_eq!(status.transactions[0].stage, Stage::Draining);
+    assert!(status.retired[0].rollback_reserved);
+    assert_eq!(status.retired[0].references, 0);
+    second.abort("group").unwrap();
+    assert_eq!(
+        first
+            .rollback("group", "another participant failed")
+            .unwrap()
+            .stage,
+        Stage::RolledBack
+    );
+    assert_eq!(value(&first.acquire()), 0);
+    assert_eq!(value(&second.acquire()), 0);
+    assert_eq!(value(&completed_entry), 1);
+    assert_eq!(first.snapshot().unwrap().retired[0].references, 1);
+}
+
+#[test]
+fn global_confirmation_explicitly_starts_and_completes_held_observation() {
+    let host = runtime();
+    host.prepare("confirmed", &manifest(1), || Ok(good(1)))
+        .unwrap();
+    assert!(matches!(
+        host.begin_observation("confirmed"),
+        Err(Error::NotPrepared)
+    ));
+    host.commit_held("confirmed").unwrap();
+    // Replaying either commit variant must not accidentally release the hold.
+    host.commit("confirmed").unwrap();
+    host.observe().unwrap();
+    assert_eq!(host.query("confirmed").unwrap().stage, Stage::Draining);
+    host.begin_observation("confirmed").unwrap();
+    host.begin_observation("confirmed").unwrap();
+    host.observe().unwrap();
+    assert_eq!(
+        host.begin_observation("confirmed").unwrap().stage,
+        Stage::Complete
+    );
+    assert!(host.snapshot().unwrap().retired.is_empty());
+    assert!(matches!(
+        host.rollback("confirmed", "too late"),
+        Err(Error::AlreadyCommitted)
+    ));
+    host.prepare("next", &manifest(2), || Ok(good(2))).unwrap();
+    host.commit_held("next").unwrap();
+    assert_eq!(
+        host.begin_observation("confirmed").unwrap().stage,
+        Stage::Complete
+    );
+    host.observe().unwrap();
+    assert_eq!(host.query("next").unwrap().stage, Stage::Draining);
+    assert!(host.snapshot().unwrap().retired[0].rollback_reserved);
+}
+
+#[test]
+fn a_held_commit_still_rolls_back_an_unhealthy_new_engine() {
+    let host = runtime();
+    let healthy = Arc::new(AtomicBool::new(true));
+    host.prepare("health", &manifest(1), || {
+        Ok(engine(1, healthy.clone(), Arc::new(AtomicUsize::new(0))))
+    })
+    .unwrap();
+    host.commit_held("health").unwrap();
+    healthy.store(false, Ordering::Release);
+    host.observe().unwrap();
+    assert_eq!(host.query("health").unwrap().stage, Stage::RolledBack);
+    assert_eq!(value(&host.acquire()), 0);
+    assert!(matches!(
+        host.begin_observation("health"),
+        Err(Error::NotPrepared)
+    ));
+}
+
+#[test]
 fn new_calls_switch_and_pending_entry_exit_or_callbacks_keep_old_code() {
     let drops = Arc::new(AtomicUsize::new(0));
     let runtime = Runtime::new(

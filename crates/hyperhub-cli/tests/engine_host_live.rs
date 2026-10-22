@@ -396,7 +396,7 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         source: module, cache: root.0.join("cache") }).await, Reply::Transaction { transaction } if transaction.stage == Stage::Prepared)
     );
     assert!(
-        matches!(dispatch(&endpoint, &original.host_id, "commit", Command::Commit { id: "change".into() }).await,
+        matches!(dispatch(&endpoint, &original.host_id, "commit", Command::CommitHeld { id: "change".into() }).await,
         Reply::Transaction { transaction } if matches!(transaction.stage, Stage::Draining | Stage::Complete))
     );
     input.write_all(b"ping\nopen\n").unwrap();
@@ -433,6 +433,10 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         .retired
         .iter()
         .any(|g| g.generation == original.snapshot.active.generation && g.references > 0));
+    assert!(
+        matches!(dispatch(&endpoint, &original.host_id, "observe-start", Command::BeginObservation { id: "change".into() }).await,
+        Reply::Transaction { transaction } if transaction.stage == Stage::Draining)
+    );
     assert!(
         matches!(dispatch(&endpoint, &original.host_id, "rollback", Command::Rollback {
         id: "change".into(), reason: "fixture observation failure".into(),

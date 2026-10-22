@@ -24,6 +24,12 @@ pub enum Command {
     Commit {
         id: String,
     },
+    CommitHeld {
+        id: String,
+    },
+    BeginObservation {
+        id: String,
+    },
     Abort {
         id: String,
     },
@@ -66,6 +72,12 @@ pub unsafe fn execute(runtime: &Runtime, command: Command) -> Reply {
             .map(|transaction| Reply::Transaction { transaction }),
         Command::Commit { id } => runtime
             .commit(&id)
+            .map(|transaction| Reply::Transaction { transaction }),
+        Command::CommitHeld { id } => runtime
+            .commit_held(&id)
+            .map(|transaction| Reply::Transaction { transaction }),
+        Command::BeginObservation { id } => runtime
+            .begin_observation(&id)
             .map(|transaction| Reply::Transaction { transaction }),
         Command::Abort { id } => runtime
             .abort(&id)

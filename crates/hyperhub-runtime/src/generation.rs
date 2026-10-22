@@ -145,7 +145,7 @@ struct Pending {
 struct Observation {
     id: String,
     previous: u64,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 struct State {
     next: u64,
@@ -366,6 +366,18 @@ impl Runtime {
     }
 
     pub fn commit(&self, id: &str) -> Result<Transaction, Error> {
+        self.commit_inner(id, false)
+    }
+
+    /// Coordinated commits retain rollback code until the durable coordinator
+    /// confirms the global decision and explicitly starts observation. A lost
+    /// coordinator must not expire rollback ability on a partially committed
+    /// group. The existing retained-generation limit still applies.
+    pub fn commit_held(&self, id: &str) -> Result<Transaction, Error> {
+        self.commit_inner(id, true)
+    }
+
+    fn commit_inner(&self, id: &str, hold_observation: bool) -> Result<Transaction, Error> {
         let started = Instant::now();
         let mut state = loop {
             match self.state.try_lock() {
@@ -400,12 +412,31 @@ impl Runtime {
         state.observation = Some(Observation {
             id: id.into(),
             previous: old.id,
-            deadline: Instant::now() + self.settings.health_window,
+            deadline: (!hold_observation).then(|| Instant::now() + self.settings.health_window),
         });
         state.retired.push(old);
         let tx = state.transactions.get_mut(id).unwrap();
         tx.stage = Stage::Draining;
         Ok(tx.clone())
+    }
+
+    /// Idempotent: retries never extend an already-running health window.
+    pub fn begin_observation(&self, id: &str) -> Result<Transaction, Error> {
+        let mut state = self.lock()?;
+        let tx = state.transactions.get(id).ok_or(Error::NotPrepared)?;
+        if !matches!(tx.stage, Stage::Draining | Stage::Complete) {
+            return Err(Error::NotPrepared);
+        }
+        if let Some(observation) = state
+            .observation
+            .as_mut()
+            .filter(|observation| observation.id == id)
+        {
+            observation
+                .deadline
+                .get_or_insert_with(|| Instant::now() + self.settings.health_window);
+        }
+        Ok(state.transactions.get(id).unwrap().clone())
     }
 
     pub fn abort(&self, id: &str) -> Result<Transaction, Error> {
@@ -486,7 +517,10 @@ impl Runtime {
                 let tx = state.transactions.get_mut(&id).unwrap();
                 tx.stage = Stage::RolledBack;
                 tx.reason = Some("new engine failed its health check".into());
-            } else if Instant::now() >= observation.deadline {
+            } else if observation
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 state.observation = None;
             }
         }
