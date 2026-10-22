@@ -5,6 +5,26 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 mod slots;
 
+// The Host must not change the application's Win32/Winsock error while it
+// accesses a fiber slot or releases a generation after the original API call.
+#[cfg(windows)]
+pub(crate) struct WindowsLastErrorGuard(u32, std::marker::PhantomData<std::rc::Rc<()>>);
+#[cfg(windows)]
+impl WindowsLastErrorGuard {
+    pub(crate) fn capture() -> Self {
+        Self(
+            unsafe { windows_sys::Win32::Foundation::GetLastError() },
+            std::marker::PhantomData,
+        )
+    }
+}
+#[cfg(windows)]
+impl Drop for WindowsLastErrorGuard {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::SetLastError(self.0) }
+    }
+}
+
 struct Slot {
     calling: RefCell<Option<Lease>>,
     epoch: u64,
@@ -136,6 +156,8 @@ impl EngineCallGuard {
 #[cfg(any(test, all(any(windows, target_os = "linux"), feature = "gum-agent")))]
 impl Drop for EngineCallGuard {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        let _last_error = WindowsLastErrorGuard::capture();
         if self.epoch == EPOCH.load(Ordering::Acquire) && slots::get().cast::<Slot>() == self.slot {
             unsafe { &*self.slot }.calling.replace(self.previous.take());
             if self.temporary {

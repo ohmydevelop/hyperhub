@@ -323,11 +323,14 @@ record_check backend.engine_fork_runtime "native module cache lock and old lease
 record_check backend.forward_workers "real worker processes preserve resident identities and old streams across generation changes"
 (
   cd "$root"
-  HH_FORWARD_WORKER_FIXTURE="$standalone_hyperhub" \
-    cargo test -p hyperhub --test release_live --locked -- --ignored --nocapture \
-    >"$result_dir/release-upgrade.log" 2>&1
+  for release_backend in ptrace gum; do
+    HH_FORWARD_WORKER_FIXTURE="$standalone_hyperhub" \
+      HYPERHUB_TEST_RELEASE_BACKEND="$release_backend" \
+      cargo test -p hyperhub --test release_live --locked -- --ignored --nocapture \
+      >"$result_dir/release-upgrade-$release_backend.log" 2>&1
+  done
 )
-record_check backend.release_upgrade "joint Engine and worker finalize preserves target streams before verified helper installation"
+record_check backend.release_upgrade "ptrace and Gum joint Engine and worker finalize preserve target streams before verified helper installation"
 (
   cd "$root"
   cargo run --release -p hyperhub-engine --example native_upgrade_bench --locked -- \

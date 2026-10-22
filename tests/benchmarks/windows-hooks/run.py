@@ -100,12 +100,12 @@ rules = []
                         modes = [(mode, 0) for mode in (
                             "dns-event", "dns-poll", "dns-callback", "dns-cancel",
                             "dns-cancel-callback", "dns-cancel-poll",
-                            "connectex-empty", "connectex-data", "fls-teardown")]
+                            "connectex-empty", "connectex-data", "fls-teardown", "error-semantics")]
                         modes.extend(("dns-cancel-concurrent", index) for index in range(8))
                         for managed in (False, True):
                             for mode, iteration in modes:
                                 command = [str(probe), mode, str(server.server_address[1])]
-                                if mode == "fls-teardown":
+                                if mode in ("fls-teardown", "error-semantics"):
                                     command.extend((str(denied_file), "deny" if managed else "allow"))
                                 if managed:
                                     command = [str(hyperhub), "run", "--", *command]
@@ -136,7 +136,10 @@ rules = []
                                     assert result.stdout.count("fls_callback ") == 66, item
                                     assert result.stdout.count("success=true") == 66, item
                                     assert f"denied={str(managed).lower()}" in result.stdout, item
-                                marker = ("fls_teardown=ok callbacks=66 fiber_switches=6" if mode == "fls-teardown"
+                                if mode == "error-semantics":
+                                    assert f"denied={str(managed).lower()}" in result.stdout, item
+                                marker = ("error_semantics=ok connect_timeout=true invalid_socket=10038 missing_file=2 missing_process=2" if mode == "error-semantics"
+                                          else "fls_teardown=ok callbacks=66 fiber_switches=6" if mode == "fls-teardown"
                                           else "connectex=unsupported-initial-data" if managed and mode == "connectex-data"
                                           else "dns=terminal" if mode.startswith("dns-cancel")
                                           else "dns=ok" if mode.startswith("dns-") else "connectex=ok")
@@ -153,7 +156,7 @@ rules = []
                 assert len(dns) == 3, f"async DNS connections lost hostname attribution: {audit}"
                 assert len({entry["session_id"] for entry in dns}) == 3, "DNS modes did not each reach the gateway"
                 connections = [entry for entry in audit if entry.get("event") == "connect"]
-                assert len(connections) == 70, f"unexpected managed connection side effects: {connections}"
+                assert len(connections) == 71, f"unexpected managed connection side effects: {connections}"
             finally:
                 serve.terminate()
                 try:

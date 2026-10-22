@@ -360,7 +360,9 @@ async fn private_home_release_keeps_native_target_streams_and_installs_after_joi
     let mut launcher = cli(&installed, &root.0);
     launcher.arg("run");
     #[cfg(target_os = "linux")]
-    launcher.args(["--backend", "ptrace"]);
+    launcher
+        .arg("--backend")
+        .arg(std::env::var("HYPERHUB_TEST_RELEASE_BACKEND").unwrap_or_else(|_| "ptrace".into()));
     launcher
         .arg("--")
         .arg(&target_path)

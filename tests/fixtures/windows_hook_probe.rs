@@ -267,6 +267,58 @@ mod probe {
         CloseHandle(event);
     }
 
+    unsafe fn error_semantics(port: u16, denied_file: &str, expect_denied: bool) {
+        use std::io::{Read, Write};
+        use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+
+        let mut stream = TcpStream::connect_timeout(
+            &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(b"error-semantics-echo").unwrap();
+        let mut reply = [0; 20];
+        stream.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"error-semantics-echo");
+        drop(stream);
+
+        let mut byte = 0;
+        assert_eq!(recv(INVALID_SOCKET, &mut byte, 1, 0), SOCKET_ERROR);
+        assert_eq!(WSAGetLastError(), WSAENOTSOCK);
+        let mut nonblocking = 1;
+        assert_eq!(
+            ioctlsocket(INVALID_SOCKET, FIONBIO, &mut nonblocking),
+            SOCKET_ERROR
+        );
+        assert_eq!(WSAGetLastError(), WSAENOTSOCK);
+
+        let missing =
+            std::path::Path::new(denied_file).with_file_name("hyperhub-missing-error-fixture.exe");
+        assert!(!missing.exists(), "missing-file fixture must not exist");
+        assert_eq!(
+            std::fs::File::open(&missing).unwrap_err().raw_os_error(),
+            Some(2)
+        );
+        assert_eq!(
+            std::process::Command::new(&missing)
+                .status()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(2)
+        );
+        match std::fs::File::open(denied_file) {
+            Ok(_) => assert!(!expect_denied),
+            Err(error) => {
+                assert!(expect_denied);
+                assert_eq!(error.raw_os_error(), Some(5));
+            }
+        }
+        println!("error_semantics=ok connect_timeout=true invalid_socket=10038 missing_file=2 missing_process=2 denied={expect_denied}");
+    }
+
     pub unsafe fn run() {
         super::diagnostics::install();
         let mut data: WSADATA = zeroed();
@@ -276,6 +328,8 @@ mod probe {
         let port = arguments[2].parse().unwrap();
         if mode == "fls-teardown" {
             super::fls_teardown::run(port, &arguments[3], arguments[4] == "deny");
+        } else if mode == "error-semantics" {
+            error_semantics(port, &arguments[3], arguments[4] == "deny");
         } else if mode == "dns-cancel-concurrent" {
             // Each thread reuses caller storage only after its own completion.
             // A barrier overlaps native entry, cancellation and callback exit;

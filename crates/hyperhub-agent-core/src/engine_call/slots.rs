@@ -41,6 +41,7 @@ fn create() -> Result<usize, i32> {
 }
 #[cfg(windows)]
 fn create() -> Result<usize, i32> {
+    let _last_error = super::WindowsLastErrorGuard::capture();
     let key = unsafe { windows_sys::Win32::System::Threading::FlsAlloc(Some(cleanup)) };
     if key == u32::MAX {
         Err(crate::HH_ERR_INVALID)
@@ -56,6 +57,7 @@ fn delete(key: usize) {
 }
 #[cfg(windows)]
 fn delete(key: usize) {
+    let _last_error = super::WindowsLastErrorGuard::capture();
     unsafe {
         windows_sys::Win32::System::Threading::FlsFree(key as u32);
     }
@@ -70,6 +72,7 @@ fn set_key(key: usize, value: *mut c_void) -> Result<(), i32> {
 }
 #[cfg(windows)]
 fn set_key(key: usize, value: *mut c_void) -> Result<(), i32> {
+    let _last_error = super::WindowsLastErrorGuard::capture();
     if unsafe { windows_sys::Win32::System::Threading::FlsSetValue(key as u32, value) } != 0 {
         Ok(())
     } else {
@@ -93,6 +96,45 @@ pub(super) fn get() -> *mut c_void {
     }
     #[cfg(windows)]
     {
+        let _last_error = super::WindowsLastErrorGuard::capture();
         unsafe { windows_sys::Win32::System::Threading::FlsGetValue(key as u32) }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, SetLastError},
+        Networking::WinSock::{WSAGetLastError, WSASetLastError, WSAENOTSOCK, WSAEWOULDBLOCK},
+    };
+
+    #[test]
+    fn fiber_slot_operations_and_engine_release_preserve_application_errors() {
+        for error in [0, 2, 5, WSAEWOULDBLOCK, WSAENOTSOCK] {
+            std::thread::spawn(move || unsafe {
+                WSASetLastError(error);
+                initialize().unwrap();
+                assert_eq!(GetLastError(), error as u32);
+                assert!(get().is_null());
+                assert_eq!(WSAGetLastError(), error);
+                let key = create().unwrap();
+                assert_eq!(WSAGetLastError(), error);
+                set_key(key, std::ptr::null_mut()).unwrap();
+                assert_eq!(WSAGetLastError(), error);
+                delete(key);
+                assert_eq!(WSAGetLastError(), error);
+
+                let runtime = hyperhub_engine::resident();
+                let guard = super::super::EngineCallGuard::with_lease(runtime.acquire()).unwrap();
+                SetLastError(error as u32);
+                assert!(!get().is_null());
+                assert_eq!(WSAGetLastError(), error);
+                drop(guard);
+                assert_eq!(WSAGetLastError(), error);
+            })
+            .join()
+            .unwrap();
+        }
     }
 }

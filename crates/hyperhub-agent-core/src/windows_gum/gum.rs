@@ -143,6 +143,7 @@ pub(in crate::windows_gum) struct HookGuard {
 
 impl HookGuard {
     pub(in crate::windows_gum) fn enter() -> Option<Self> {
+        let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
         if crate::engine_call::host_background() {
             return None;
         }
@@ -165,6 +166,10 @@ impl HookGuard {
 
 impl Drop for HookGuard {
     fn drop(&mut self) {
+        let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+        // Release the Engine while recursion protection is still active. An
+        // automatic field drop would run after the error was restored here.
+        drop(self._engine.take());
         INSIDE_HOOK.with(|inside| inside.set(false));
     }
 }
@@ -208,5 +213,33 @@ where
             }
             fallback()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, SetLastError},
+        Networking::WinSock::{WSAGetLastError, WSASetLastError, WSAEWOULDBLOCK},
+    };
+
+    #[test]
+    fn hook_generation_entry_and_cleanup_preserve_win32_and_winsock_errors() {
+        std::thread::spawn(|| unsafe {
+            for error in [0, 2, 5, WSAEWOULDBLOCK] {
+                WSASetLastError(error);
+                let guard = HookGuard::enter().unwrap();
+                assert_eq!(WSAGetLastError(), error);
+                assert!(INSIDE_HOOK.with(Cell::get));
+                SetLastError(error as u32);
+                drop(guard);
+                assert_eq!(GetLastError(), error as u32);
+                assert_eq!(WSAGetLastError(), error);
+                assert!(!INSIDE_HOOK.with(Cell::get));
+            }
+        })
+        .join()
+        .unwrap();
     }
 }
