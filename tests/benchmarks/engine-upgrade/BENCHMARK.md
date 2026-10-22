@@ -6,9 +6,9 @@
 
 - schema_version: 1\.1
 - target: HyperHub native Engine component
-- version_or_revision: native\-component\-v1 \(v0\.2\.13 final\-lifecycle\-v7 worktree snapshot\)
-- model_digest: f408c8d3cff99a1b177285b51a2647a1df16ee71364f053b33a91d0d93dd7166
-- plan_digest: db70268e46a5bc5df081911e9e8e8a48c84ddade9a57f8b51c9705f9f96d2ddc
+- version_or_revision: native\-component\-v1 \(v0\.2\.13 final\-lifecycle\-v8 worktree snapshot\)
+- model_digest: 17ae45fb135e3fda926ffedad9b01e0598d2b81ae65e8e0f7e1e09225b1a9066
+- plan_digest: 05ef0b65ea2106514d47af29f68affea0a506e23215064a0abbc70a6f2cf9072
 
 导航：[准备](#准备) · [可靠性场景](#可靠性场景) · [性能场景](#性能场景) · [覆盖映射](#覆盖映射) · [未覆盖与后续](#未覆盖与后续)
 
@@ -49,7 +49,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
     "Drop Runtime/leases after each trial and preserve raw.json before removing private artifact caches."
   ],
   "generation_notes": [
-    "Initial model was refrozen before any performance execution to add an explicit all-four-worker overlap oracle; the denominator and requested scope were unchanged. A failed preflight was retained, operation-specific inputs were corrected, and a final refreeze binds the added ownership unit regression, dependency manifests and evidence recorder before the repeated run. The v6 refreeze adds the statically linked Engine lib.rs dependency and its bounded pure-policy capacity retry. The final v7 refreeze binds Engine build/native Base source generation and the immutable r2 release context after the verified exec enrollment, ordinary-exit, process-birth and connection-claim lifecycle fixes. v5 and v6 raw evidence remain archived separately; no prior performance observations are pooled into this run.",
+    "Initial model was refrozen before any performance execution to add an explicit all-four-worker overlap oracle; the denominator and requested scope were unchanged. A failed preflight was retained, operation-specific inputs were corrected, and a final refreeze binds the added ownership unit regression, dependency manifests and evidence recorder before the repeated run. The v6 refreeze adds the statically linked Engine lib.rs dependency and its bounded pure-policy capacity retry. The v7 refreeze binds Engine build/native Base source generation and the immutable r2 release context after the verified exec enrollment, ordinary-exit, process-birth and connection-claim lifecycle fixes. The final v8 refreeze binds the r3 immutable CLI after the Windows-only Winsock startup fix; Linux Agent, Engine and native Base remain byte-identical with r2. v5, v6 and v7 raw evidence remain archived separately; no prior performance observations are pooled into this run.",
     "Self-reviewed complete category catalog; exclusions are local to this healthy-path timing experiment."
   ],
   "preconditions": [
@@ -144,7 +144,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
 ```json
 {
   "kind": "self",
-  "notes": "Reviewed all sixteen categories against this controlled healthy-path native component scope; excludes whole-product delivery, hostile inputs and crash recovery. Existing separate functional regressions are not substituted for timing evidence. Final release context: immutable CLI SHA256 419800bd707330167f7486f3d4d2c945e423a984c084568e4efe1a03f19f64a4, Agent SHA256 f09a19ce5da463322ba9f14cc546f7ed5bd1f5c0d094b474053a550a7ad7416a, native Base 219dac7345afe39fb7d7f6f60fd351ecf7f26346a093b7e7fdbb6531183e4b8f. This timing harness still measures the native Engine component, not CLI or Core RPC latency.",
+  "notes": "Reviewed all sixteen categories against this controlled healthy-path native component scope; excludes whole-product delivery, hostile inputs and crash recovery. Existing separate functional regressions are not substituted for timing evidence. Final release context: immutable CLI SHA256 649121688cfc7eff6b79103667bccd10eec578f57fa70bf9186295b4999a532d, Agent SHA256 f09a19ce5da463322ba9f14cc546f7ed5bd1f5c0d094b474053a550a7ad7416a, native Base 219dac7345afe39fb7d7f6f60fd351ecf7f26346a093b7e7fdbb6531183e4b8f. The r3 CLI includes a Windows-only Winsock startup fix; its Linux Agent and Engine are byte-identical with r2. This timing harness still measures the native Engine component, not CLI or Core RPC latency.",
   "reviewer": "Codex remaining_engines"
 }
 ```
@@ -338,7 +338,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
     }
   ],
   "measurement": "not_applicable",
@@ -564,13 +564,13 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
 {
   "acceptance": "not_evaluated",
   "accounting": {
-    "accepted": 21648,
+    "accepted": 14710,
     "cancelled": 0,
     "failed": 0,
-    "offered": 21648,
+    "offered": 14710,
     "rejected": 0,
     "retries": 0,
-    "succeeded": 21648,
+    "succeeded": 14710,
     "unfinished": 0,
     "work_unit_id": "decision_unit"
   },
@@ -602,7 +602,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
     }
   ],
   "measurement": "valid",
@@ -612,25 +612,25 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   },
   "samples": {
     "unit_latency_ns_p50": [
-      169343,
-      166848,
-      166047,
-      166403,
-      165938
+      167555,
+      166607,
+      168175,
+      168433,
+      170655
     ],
     "unit_latency_ns_p99": [
-      938472,
-      226111,
-      184138,
-      181484,
-      1197957
+      3176419,
+      995731,
+      3212722,
+      4192934,
+      2187459
     ],
     "units_per_second": [
-      18144.721423724444,
-      20567.28310630514,
-      18567.460386742823,
-      12094.071454845052,
-      15513.147374695473
+      14288.952666968136,
+      16599.548054589457,
+      12751.371940638297,
+      6052.3660761236,
+      7979.054407010283
     ]
   },
   "status": "completed",
@@ -845,13 +845,13 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
 {
   "acceptance": "not_evaluated",
   "accounting": {
-    "accepted": 21808,
+    "accepted": 11636,
     "cancelled": 0,
     "failed": 0,
-    "offered": 21808,
+    "offered": 11636,
     "rejected": 0,
     "retries": 0,
-    "succeeded": 21808,
+    "succeeded": 11636,
     "unfinished": 0,
     "work_unit_id": "decision_unit"
   },
@@ -883,7 +883,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
     }
   ],
   "measurement": "valid",
@@ -893,25 +893,25 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   },
   "samples": {
     "unit_latency_ns_p50": [
-      173026,
-      169972,
-      172128,
-      170165,
-      171627
+      172033,
+      170939,
+      168587,
+      171874,
+      172404
     ],
     "unit_latency_ns_p99": [
-      3019729,
-      223100,
-      2188026,
-      225283,
-      424166
+      1533564,
+      3181520,
+      179774,
+      4209536,
+      192807
     ],
     "units_per_second": [
-      14344.214381448199,
-      20905.80462736558,
-      12896.634388933733,
-      15724.585405056663,
-      22448.72245805892
+      12308.034944328183,
+      12464.486704554052,
+      5515.730668381677,
+      8530.482346145134,
+      6014.809451789374
     ]
   },
   "status": "completed",
@@ -1149,7 +1149,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
     }
   ],
   "measurement": "valid",
@@ -1157,18 +1157,18 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "parameters": {},
   "samples": {
     "commit_ns": [
-      1296,
-      988,
-      1073,
-      1019,
-      1139
+      1095,
+      1121,
+      1488,
+      1087,
+      973
     ],
     "prepare_ns": [
-      67752261,
-      61057987,
-      76268923,
-      68985266,
-      58191492
+      62868438,
+      60358322,
+      85640721,
+      56098930,
+      53538912
     ]
   },
   "status": "completed",

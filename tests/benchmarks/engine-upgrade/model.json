@@ -1,7 +1,7 @@
 {
   "schema_version": "1.1",
   "target": "HyperHub native Engine component",
-  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v7 worktree snapshot)",
+  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v8 worktree snapshot)",
   "sources": [
     {
       "path": "crates/hyperhub-engine/examples/native_upgrade_bench.rs",
@@ -75,7 +75,7 @@
   "review": {
     "kind": "self",
     "reviewer": "Codex remaining_engines",
-    "notes": "Reviewed all sixteen categories against this controlled healthy-path native component scope; excludes whole-product delivery, hostile inputs and crash recovery. Existing separate functional regressions are not substituted for timing evidence. Final release context: immutable CLI SHA256 419800bd707330167f7486f3d4d2c945e423a984c084568e4efe1a03f19f64a4, Agent SHA256 f09a19ce5da463322ba9f14cc546f7ed5bd1f5c0d094b474053a550a7ad7416a, native Base 219dac7345afe39fb7d7f6f60fd351ecf7f26346a093b7e7fdbb6531183e4b8f. This timing harness still measures the native Engine component, not CLI or Core RPC latency."
+    "notes": "Reviewed all sixteen categories against this controlled healthy-path native component scope; excludes whole-product delivery, hostile inputs and crash recovery. Existing separate functional regressions are not substituted for timing evidence. Final release context: immutable CLI SHA256 649121688cfc7eff6b79103667bccd10eec578f57fa70bf9186295b4999a532d, Agent SHA256 f09a19ce5da463322ba9f14cc546f7ed5bd1f5c0d094b474053a550a7ad7416a, native Base 219dac7345afe39fb7d7f6f60fd351ecf7f26346a093b7e7fdbb6531183e4b8f. The r3 CLI includes a Windows-only Winsock startup fix; its Linux Agent and Engine are byte-identical with r2. This timing harness still measures the native Engine component, not CLI or Core RPC latency."
   },
   "obligations": [
     {

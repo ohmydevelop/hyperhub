@@ -1,8 +1,8 @@
 {
   "schema_version": "1.1",
   "target": "HyperHub native Engine component",
-  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v7 worktree snapshot)",
-  "model_digest": "f408c8d3cff99a1b177285b51a2647a1df16ee71364f053b33a91d0d93dd7166",
+  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v8 worktree snapshot)",
+  "model_digest": "17ae45fb135e3fda926ffedad9b01e0598d2b81ae65e8e0f7e1e09225b1a9066",
   "cases": [
     {
       "source_refs": [
@@ -615,7 +615,7 @@
       "Drop Runtime/leases after each trial and preserve raw.json before removing private artifact caches."
     ],
     "generation_notes": [
-      "Initial model was refrozen before any performance execution to add an explicit all-four-worker overlap oracle; the denominator and requested scope were unchanged. A failed preflight was retained, operation-specific inputs were corrected, and a final refreeze binds the added ownership unit regression, dependency manifests and evidence recorder before the repeated run. The v6 refreeze adds the statically linked Engine lib.rs dependency and its bounded pure-policy capacity retry. The final v7 refreeze binds Engine build/native Base source generation and the immutable r2 release context after the verified exec enrollment, ordinary-exit, process-birth and connection-claim lifecycle fixes. v5 and v6 raw evidence remain archived separately; no prior performance observations are pooled into this run.",
+      "Initial model was refrozen before any performance execution to add an explicit all-four-worker overlap oracle; the denominator and requested scope were unchanged. A failed preflight was retained, operation-specific inputs were corrected, and a final refreeze binds the added ownership unit regression, dependency manifests and evidence recorder before the repeated run. The v6 refreeze adds the statically linked Engine lib.rs dependency and its bounded pure-policy capacity retry. The v7 refreeze binds Engine build/native Base source generation and the immutable r2 release context after the verified exec enrollment, ordinary-exit, process-birth and connection-claim lifecycle fixes. The final v8 refreeze binds the r3 immutable CLI after the Windows-only Winsock startup fix; Linux Agent, Engine and native Base remain byte-identical with r2. v5, v6 and v7 raw evidence remain archived separately; no prior performance observations are pooled into this run.",
       "Self-reviewed complete category catalog; exclusions are local to this healthy-path timing experiment."
     ]
   }

@@ -1,9 +1,9 @@
 {
   "schema_version": "1.1",
   "target": "HyperHub native Engine component",
-  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v7 worktree snapshot)",
-  "model_digest": "f408c8d3cff99a1b177285b51a2647a1df16ee71364f053b33a91d0d93dd7166",
-  "plan_digest": "db70268e46a5bc5df081911e9e8e8a48c84ddade9a57f8b51c9705f9f96d2ddc",
+  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v8 worktree snapshot)",
+  "model_digest": "17ae45fb135e3fda926ffedad9b01e0598d2b81ae65e8e0f7e1e09225b1a9066",
+  "plan_digest": "05ef0b65ea2106514d47af29f68affea0a506e23215064a0abbc70a6f2cf9072",
   "environment": {
     "description": "Actual optimized native component run; fixed four-worker/32-rule workload, shared local runner.",
     "evidence": [
@@ -25,7 +25,7 @@
       "evidence": [
         {
           "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+          "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
         }
       ],
       "checks": [],
@@ -53,31 +53,31 @@
       },
       "samples": {
         "units_per_second": [
-          18144.721423724444,
-          20567.28310630514,
-          18567.460386742823,
-          12094.071454845052,
-          15513.147374695473
+          14288.952666968136,
+          16599.548054589457,
+          12751.371940638297,
+          6052.3660761236,
+          7979.054407010283
         ],
         "unit_latency_ns_p50": [
-          169343,
-          166848,
-          166047,
-          166403,
-          165938
+          167555,
+          166607,
+          168175,
+          168433,
+          170655
         ],
         "unit_latency_ns_p99": [
-          938472,
-          226111,
-          184138,
-          181484,
-          1197957
+          3176419,
+          995731,
+          3212722,
+          4192934,
+          2187459
         ]
       },
       "evidence": [
         {
           "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+          "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
         }
       ],
       "checks": [
@@ -117,9 +117,9 @@
       "measurement_context_digest": "3971a8c229c8bbf14be9ab5efc096aeb2672b4919a565a5fbe5c896b1cc28061",
       "accounting": {
         "work_unit_id": "decision_unit",
-        "offered": 21648,
-        "accepted": 21648,
-        "succeeded": 21648,
+        "offered": 14710,
+        "accepted": 14710,
+        "succeeded": 14710,
         "failed": 0,
         "rejected": 0,
         "cancelled": 0,
@@ -138,31 +138,31 @@
       },
       "samples": {
         "units_per_second": [
-          14344.214381448199,
-          20905.80462736558,
-          12896.634388933733,
-          15724.585405056663,
-          22448.72245805892
+          12308.034944328183,
+          12464.486704554052,
+          5515.730668381677,
+          8530.482346145134,
+          6014.809451789374
         ],
         "unit_latency_ns_p50": [
-          173026,
-          169972,
-          172128,
-          170165,
-          171627
+          172033,
+          170939,
+          168587,
+          171874,
+          172404
         ],
         "unit_latency_ns_p99": [
-          3019729,
-          223100,
-          2188026,
-          225283,
-          424166
+          1533564,
+          3181520,
+          179774,
+          4209536,
+          192807
         ]
       },
       "evidence": [
         {
           "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+          "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
         }
       ],
       "checks": [
@@ -202,9 +202,9 @@
       "measurement_context_digest": "bddaa85267a694c2a041846e4055cb02a42aa7d1b3b674b7bcc5bba52d5c6d6a",
       "accounting": {
         "work_unit_id": "decision_unit",
-        "offered": 21808,
-        "accepted": 21808,
-        "succeeded": 21808,
+        "offered": 11636,
+        "accepted": 11636,
+        "succeeded": 11636,
         "failed": 0,
         "rejected": 0,
         "cancelled": 0,
@@ -221,24 +221,24 @@
       "parameters": {},
       "samples": {
         "prepare_ns": [
-          67752261,
-          61057987,
-          76268923,
-          68985266,
-          58191492
+          62868438,
+          60358322,
+          85640721,
+          56098930,
+          53538912
         ],
         "commit_ns": [
-          1296,
-          988,
-          1073,
-          1019,
-          1139
+          1095,
+          1121,
+          1488,
+          1087,
+          973
         ]
       },
       "evidence": [
         {
           "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-          "sha256": "e6b3b733adb2620d0d57fd70d120849932a0f5a8844d2576f33a4fa168cd6987"
+          "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
         }
       ],
       "checks": [

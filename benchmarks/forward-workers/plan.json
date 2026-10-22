@@ -2,7 +2,7 @@
   "schema_version": "1.1",
   "target": "HyperHub forwarding-worker local component",
   "revision": "0.2.13 working tree; content-fingerprinted component snapshot",
-  "model_digest": "6ec4c18b1e24d970e0d92e61c788a834d5d2e4a79205f630c2c210ad7df4dfe9",
+  "model_digest": "dc63d466b15e31f0f000d8ce4b5cde3948cd94c954aad3ddf52fce177a3ea7f8",
   "cases": [
     {
       "id": "C-native-suite",
@@ -15,7 +15,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         },
         {
           "path": "crates/hyperhub-core/tests/forward_workers.rs",
@@ -51,6 +51,11 @@
           "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
           "first": 4,
           "last": 53
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/cancellation.rs",
+          "first": 128,
+          "last": 138
         }
       ],
       "parameters": {},
@@ -95,7 +100,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": null,
@@ -335,6 +341,27 @@
               "last": 53
             }
           ]
+        },
+        {
+          "id": "V-B-winsock-boolean",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-winsock-boolean",
+          "trigger": "The named source regression executes its controlled fault or state transition.",
+          "assertion": "Native boolean decoder accepts the exact supported one-byte BOOLEAN and four-byte DWORD representations, ignores bytes outside optlen, and rejects every unsupported length.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/cancellation.rs",
+              "first": 128,
+              "last": 138
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/cancellation.rs",
+              "first": 128,
+              "last": 138
+            }
+          ]
         }
       ],
       "boundary_ids": [
@@ -348,7 +375,8 @@
         "B-health-deadline",
         "B-native-preflight",
         "B-probe-exhaustion",
-        "B-ungranted-disconnect"
+        "B-ungranted-disconnect",
+        "B-winsock-boolean"
       ]
     },
     {
@@ -362,7 +390,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {},
@@ -407,7 +435,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": null,
@@ -449,7 +478,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -499,7 +528,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -621,7 +651,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -671,7 +701,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -841,7 +872,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -891,7 +922,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -1013,7 +1045,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -1063,7 +1095,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -1233,7 +1266,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         },
         {
           "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -1293,7 +1326,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -1415,7 +1449,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -1465,7 +1499,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -1587,7 +1622,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -1637,7 +1672,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -1807,7 +1843,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         },
         {
           "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -1867,7 +1903,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -1989,7 +2026,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -2039,7 +2076,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -2161,7 +2199,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "parameters": {
@@ -2211,7 +2249,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -2381,7 +2420,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         },
         {
           "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -2441,7 +2480,8 @@
           "benchmarks/forward-workers/sensitivity.py",
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
-          "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs"
         ]
       },
       "protocol": {
@@ -2617,6 +2657,10 @@
     {
       "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
       "sha256": "afbd22ac9d807059375136e34592b1ffec06610f86cf057ef286f9454470c3a4"
+    },
+    {
+      "path": "crates/hyperhub-core/src/forward/cancellation.rs",
+      "sha256": "addc1a953abd35513e95da9bf86d9e871b5106ae4991916674c955674ddec9e0"
     }
   ],
   "limitations": [

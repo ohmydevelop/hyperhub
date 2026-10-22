@@ -1,6 +1,6 @@
 # Worker component model freeze
 
-Model digest: `6ec4c18b1e24d970e0d92e61c788a834d5d2e4a79205f630c2c210ad7df4dfe9`
+Model digest: `dc63d466b15e31f0f000d8ce4b5cde3948cd94c954aad3ddf52fce177a3ea7f8`
 
 Initial freeze: 2026-10-22. Repository base HEAD:
 `31b6caf96ffebc4f75cf3c318e3ade29504ec36f`; the model identifies the actual working
@@ -81,3 +81,19 @@ for the two new unit regression sources. The plan now includes those paths in
 each entrypoint. This metadata correction preceded any formal native execution;
 model digest, obligations, boundaries and acceptance criteria are unchanged.
 The rejected attempt remains under `target/benchmarks/forward-workers/formal-013-r2/`.
+
+Windows native ABI correction before formal r3 execution, 2026-10-22:
+CI39762239928 exposed four actual socket failures caused by assuming that
+Winsock GET returns a four-byte boolean. The strict decoder now supports only
+the known one-byte BOOLEAN and four-byte DWORD representations, while SET
+continues using four bytes. The model retains all five obligations, eleven
+existing boundaries and four workload states, and adds the explicit native
+boolean representation boundary. F03 becomes required for this narrow decoder
+boundary; general frame fuzzing is still excluded from this fixed-work report.
+The new cross-platform decoder unit brings Linux forwarding preflight to24tests.
+All existing native socket and actual12 integration tests remain enabled.
+No performance threshold, logical work or five-group sample budget changes.
+Prior r2 evidence remains evidence for its own source and binary snapshot.
+Prior model digest: `6ec4c18b1e24d970e0d92e61c788a834d5d2e4a79205f630c2c210ad7df4dfe9`. Reviewed changed bound sources:
+- `benchmarks/forward-workers/CONTRACT.md`
+- `crates/hyperhub-core/src/forward/cancellation.rs`

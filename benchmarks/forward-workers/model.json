@@ -13,7 +13,7 @@
     },
     {
       "path": "benchmarks/forward-workers/CONTRACT.md",
-      "sha256": "a58c3867d0e89f0467342c34390b00f79513fd5008a24cfae590b83333a13518"
+      "sha256": "75d76050df7e928f3c127ed90f19c6ea698a527ed3e38de2f8fd379a34665292"
     },
     {
       "path": "build_support/native_base.rs",
@@ -425,7 +425,7 @@
     },
     {
       "path": "crates/hyperhub-core/src/forward/cancellation.rs",
-      "sha256": "a0ae1ec210c7d6ed0b333eadfc28b66c632325787a3161d326ce0db5c2729455"
+      "sha256": "addc1a953abd35513e95da9bf86d9e871b5106ae4991916674c955674ddec9e0"
     },
     {
       "path": "crates/hyperhub-core/src/forward/deadline.rs",
@@ -791,7 +791,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           },
           {
             "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -821,7 +821,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ]
       }
@@ -840,7 +840,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         },
         {
           "path": "crates/hyperhub-core/tests/forward_workers.rs",
@@ -876,6 +876,11 @@
           "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
           "first": 4,
           "last": 53
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/cancellation.rs",
+          "first": 128,
+          "last": 138
         }
       ],
       "risk": "critical",
@@ -883,6 +888,7 @@
       "rationale": "Required to interpret fixed local worker measurements without false successful work.",
       "fault_ids": [
         "F01",
+        "F03",
         "F04",
         "F05",
         "F06",
@@ -963,6 +969,10 @@
         {
           "id": "B-ungranted-disconnect",
           "description": "Control loss immediately releases ungranted offer claims, preserves granted cancellation watchers, and remains idempotent."
+        },
+        {
+          "id": "B-winsock-boolean",
+          "description": "Native boolean decoder accepts the exact supported one-byte BOOLEAN and four-byte DWORD representations, ignores bytes outside optlen, and rejects every unsupported length."
         }
       ]
     },
@@ -978,7 +988,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "risk": "critical",
@@ -1020,7 +1030,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         },
         {
           "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -1072,7 +1082,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "risk": "normal",
@@ -1113,7 +1123,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 84
+          "last": 88
         }
       ],
       "risk": "normal",
@@ -1183,7 +1193,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1199,23 +1209,25 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": []
       },
       {
         "id": "F03",
-        "applicability": "not_applicable",
-        "rationale": "Malformed frame/parser fuzzing is covered by separate Wire unit tests and excluded from this fixed valid-work performance comparison.",
+        "applicability": "required",
+        "rationale": "Native socket boolean return lengths are a representation boundary: accept the two supported sizes and reject unsupported sizes. General private-frame fuzzing remains outside this fixed-work performance comparison.",
         "source_refs": [
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
-        "obligation_ids": []
+        "obligation_ids": [
+          "O-flows"
+        ]
       },
       {
         "id": "F04",
@@ -1225,7 +1237,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1240,7 +1252,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1256,7 +1268,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1272,7 +1284,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1288,7 +1300,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1305,7 +1317,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1320,7 +1332,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1335,7 +1347,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": []
@@ -1348,7 +1360,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1363,7 +1375,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1378,7 +1390,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [
@@ -1393,7 +1405,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": []
@@ -1406,7 +1418,7 @@
           {
             "path": "benchmarks/forward-workers/CONTRACT.md",
             "first": 1,
-            "last": 84
+            "last": 88
           }
         ],
         "obligation_ids": [

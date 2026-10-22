@@ -67,6 +67,10 @@ in the same batch. A Unix subprocess exercises actual descriptor exhaustion:
 failure to create the granted socket's cancellation probe must mark its original
 shared socket complete. Control-loss state tests require immediate release of
 ungranted claims while granted cancellation watchers remain available.
+Native boolean decoding accepts exactly the one-byte BOOLEAN and four-byte
+DWORD representations returned by Winsock providers, uses only the reported
+bytes, and rejects all unsupported lengths. Its decoder regression runs on
+every platform; Linux execution is not a claim of native Windows socket IO.
 It covers actual TCP, stable Fake-IP lookup, centralized cancellation, retained
 capacity, failed candidate preparation, control disconnection, TLS authority,
 WebSocket and SSH flows. Each timed scenario also performs its own untimed byte

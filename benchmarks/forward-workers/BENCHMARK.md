@@ -7,8 +7,8 @@
 - schema_version: 1\.1
 - target: HyperHub forwarding\-worker local component
 - version_or_revision: 0\.2\.13 working tree; content\-fingerprinted component snapshot
-- model_digest: 6ec4c18b1e24d970e0d92e61c788a834d5d2e4a79205f630c2c210ad7df4dfe9
-- plan_digest: 51e1a8ae5261a9fe2fb92557df70450084d5f8b88195f1faeac1f6ef0c9b1eda
+- model_digest: dc63d466b15e31f0f000d8ce4b5cde3948cd94c954aad3ddf52fce177a3ea7f8
+- plan_digest: cbbfe45742194359b107d1652da65e7231aa25c52111f5b7fcb35e11bd004c64
 
 导航：[准备](#准备) · [可靠性场景](#可靠性场景) · [性能场景](#性能场景) · [覆盖映射](#覆盖映射) · [未覆盖与后续](#未覆盖与后续)
 
@@ -85,7 +85,7 @@
       "source_refs": [
         {
           "first": 1,
-          "last": 84,
+          "last": 88,
           "path": "benchmarks/forward-workers/CONTRACT.md"
         },
         {
@@ -115,7 +115,7 @@
       "source_refs": [
         {
           "first": 1,
-          "last": 84,
+          "last": 88,
           "path": "benchmarks/forward-workers/CONTRACT.md"
         }
       ]
@@ -132,22 +132,22 @@
 
 | 类别 | 适用性 | 关联义务 | 理由 | 源码依据 |
 |---|---|---|---|---|
-| F01 | required | O\-flows, O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F02 | not\_applicable | 无 | Production numerical algorithms are not the requested worker switch/transport workload; benchmark duration and accounting checks are measurement quality, not a claim about all application arithmetic\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F03 | not\_applicable | 无 | Malformed frame/parser fuzzing is covered by separate Wire unit tests and excluded from this fixed valid\-work performance comparison\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F04 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F05 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F06 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F07 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F08 | required | O\-admission, O\-echo, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F09 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F10 | required | O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F11 | not\_applicable | 无 | Resident durable release journal, installer publication and power\-loss recovery are owned by project coordinator tests; this worker component measurement does not time or claim those mechanisms\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F12 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F13 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F14 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F15 | not\_applicable | 无 | Adversarial authorization/privacy and credential leakage validation remain independent project security obligations; this benchmark uses task\-owned sessions and no real secrets\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
-| F16 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-84 |
+| F01 | required | O\-flows, O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F02 | not\_applicable | 无 | Production numerical algorithms are not the requested worker switch/transport workload; benchmark duration and accounting checks are measurement quality, not a claim about all application arithmetic\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F03 | required | O\-flows | Native socket boolean return lengths are a representation boundary: accept the two supported sizes and reject unsupported sizes\. General private\-frame fuzzing remains outside this fixed\-work performance comparison\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F04 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F05 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F06 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F07 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F08 | required | O\-admission, O\-echo, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F09 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F10 | required | O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F11 | not\_applicable | 无 | Resident durable release journal, installer publication and power\-loss recovery are owned by project coordinator tests; this worker component measurement does not time or claim those mechanisms\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F12 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F13 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F14 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F15 | not\_applicable | 无 | Adversarial authorization/privacy and credential leakage validation remain independent project security obligations; this benchmark uses task\-owned sessions and no real secrets\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F16 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
 
 ### 基线
 
@@ -179,7 +179,7 @@
   },
   {
     "path": "benchmarks/forward-workers/CONTRACT.md",
-    "sha256": "a58c3867d0e89f0467342c34390b00f79513fd5008a24cfae590b83333a13518"
+    "sha256": "75d76050df7e928f3c127ed90f19c6ea698a527ed3e38de2f8fd379a34665292"
   },
   {
     "path": "build_support/native_base.rs",
@@ -591,7 +591,7 @@
   },
   {
     "path": "crates/hyperhub-core/src/forward/cancellation.rs",
-    "sha256": "a0ae1ec210c7d6ed0b333eadfc28b66c632325787a3161d326ce0db5c2729455"
+    "sha256": "addc1a953abd35513e95da9bf86d9e871b5106ae4991916674c955674ddec9e0"
   },
   {
     "path": "crates/hyperhub-core/src/forward/deadline.rs",
@@ -950,7 +950,7 @@
 - origin: generated
 - goal: Actual old/new TCP, TLS, WebSocket and SSH flows survive switching; cancellation and candidate/control failures release owned resources without corrupting future dispatch\.
 - obligation_ids: O\-flows
-- boundary_ids: B\-bootstrap\-deadline, B\-capacity, B\-control\-loss, B\-health\-deadline, B\-native\-preflight, B\-probe\-exhaustion, B\-ssh, B\-tls\-ws\-audit, B\-transfer, B\-ungranted\-disconnect, B\-worker\-crash
+- boundary_ids: B\-bootstrap\-deadline, B\-capacity, B\-control\-loss, B\-health\-deadline, B\-native\-preflight, B\-probe\-exhaustion, B\-ssh, B\-tls\-ws\-audit, B\-transfer, B\-ungranted\-disconnect, B\-winsock\-boolean, B\-worker\-crash
 - preconditions: 见共用前提与场景输入；性能 preflight: 不适用
 - inputs: Task\-owned native worker subprocesses; local deterministic TCP origin; no external services or real credentials\.
 - steps:
@@ -1176,6 +1176,27 @@
     ]
   },
   {
+    "assertion": "Native boolean decoder accepts the exact supported one-byte BOOLEAN and four-byte DWORD representations, ignores bytes outside optlen, and rejects every unsupported length.",
+    "assertion_refs": [
+      {
+        "first": 128,
+        "last": 138,
+        "path": "crates/hyperhub-core/src/forward/cancellation.rs"
+      }
+    ],
+    "boundary_id": "B-winsock-boolean",
+    "id": "V-B-winsock-boolean",
+    "obligation_id": "O-flows",
+    "trigger": "The named source regression executes its controlled fault or state transition.",
+    "trigger_refs": [
+      {
+        "first": 128,
+        "last": 138,
+        "path": "crates/hyperhub-core/src/forward/cancellation.rs"
+      }
+    ]
+  },
+  {
     "assertion": "Confirmed candidate crash permits rollback of future dispatch while prior generation stream survives.",
     "assertion_refs": [
       {
@@ -1205,8 +1226,13 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
+  },
+  {
+    "first": 128,
+    "last": 138,
+    "path": "crates/hyperhub-core/src/forward/cancellation.rs"
   },
   {
     "first": 4,
@@ -1282,7 +1308,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -1347,7 +1374,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -1389,7 +1416,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -1470,7 +1498,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -1514,7 +1542,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -1713,7 +1742,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -1757,7 +1786,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -1956,7 +1986,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -2000,7 +2030,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -2199,7 +2230,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -2243,7 +2274,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -2442,7 +2474,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   },
   {
@@ -2496,7 +2528,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -2647,7 +2680,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   },
   {
@@ -2701,7 +2734,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -2852,7 +2886,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   },
   {
@@ -2906,7 +2940,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -3057,7 +3092,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3101,7 +3136,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -3252,7 +3288,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3296,7 +3332,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -3447,7 +3484,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3491,7 +3528,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -3642,7 +3680,7 @@
 [
   {
     "first": 1,
-    "last": 84,
+    "last": 88,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3686,7 +3724,8 @@
     "benchmarks/forward-workers/sensitivity.py",
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
-    "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs"
   ],
   "cwd": "."
 }
@@ -3786,10 +3825,10 @@
 
 | 阶段 | 义务覆盖 | 子边界覆盖 | 关键缺口 | 完整模型门槛 |
 |---|---|---|---|---|
-| 设计 | 5/5 | 11/11 | 无 | 满足 |
-| 实现 | 5/5 | 11/11 | 无 | 满足 |
-| 申报执行 | 0/5 | 0/11 | O\-flows, O\-oracle | 未满足 |
-| 申报有效测量 | 0/5 | 0/11 | O\-flows, O\-oracle | 未满足 |
+| 设计 | 5/5 | 12/12 | 无 | 满足 |
+| 实现 | 5/5 | 12/12 | 无 | 满足 |
+| 申报执行 | 0/5 | 0/12 | O\-flows, O\-oracle | 未满足 |
+| 申报有效测量 | 0/5 | 0/12 | O\-flows, O\-oracle | 未满足 |
 
 ### 义务与子边界
 
@@ -3809,6 +3848,7 @@
 | B\-tls\-ws\-audit | 子边界 | Both generations retain live TLS/WebSocket streams, original CA/custom roots and one contiguous resident audit sequence\. | 已覆盖 |
 | B\-transfer | 子边界 | Actual parent/child TCP transfers preserve Fake\-IP session authority and centralized cancellation\. | 已覆盖 |
 | B\-ungranted\-disconnect | 子边界 | Control loss immediately releases ungranted offer claims, preserves granted cancellation watchers, and remains idempotent\. | 已覆盖 |
+| B\-winsock\-boolean | 子边界 | Native boolean decoder accepts the exact supported one\-byte BOOLEAN and four\-byte DWORD representations, ignores bytes outside optlen, and rejects every unsupported length\. | 已覆盖 |
 | B\-worker\-crash | 子边界 | Confirmed candidate crash permits rollback of future dispatch while prior generation stream survives\. | 已覆盖 |
 | O\-oracle | correctness / critical / required | Every offered timed echo and admission token has independent exact byte validation; failed or incomplete work cannot count as successful throughput\. / contract / benchmarks/forward\-workers/CONTRACT\.md; maintainer accepted worker scope and 30s/100ms soft budgets | 已覆盖 |
 
@@ -3942,6 +3982,7 @@
   ],
   "fault_ids": [
     "F01",
+    "F03",
     "F04",
     "F05",
     "F06",
@@ -4003,10 +4044,10 @@
 
 | 阶段 | 类别审查完成 | 适用类别覆盖 |
 |---|---|---|
-| 设计 | 完成 | 12/12 |
-| 实现 | 完成 | 12/12 |
-| 申报执行 | 完成 | 0/12 |
-| 申报有效测量 | 完成 | 0/12 |
+| 设计 | 完成 | 13/13 |
+| 实现 | 完成 | 13/13 |
+| 申报执行 | 完成 | 0/13 |
+| 申报有效测量 | 完成 | 0/13 |
 
 ### 工作负载覆盖与范围一致性
 
@@ -4167,6 +4208,10 @@
           "obligation_id": "O-flows"
         },
         {
+          "boundary_id": "B-winsock-boolean",
+          "obligation_id": "O-flows"
+        },
+        {
           "boundary_id": "B-worker-crash",
           "obligation_id": "O-flows"
         },
@@ -4226,6 +4271,10 @@
         },
         {
           "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-winsock-boolean",
           "obligation_id": "O-flows"
         },
         {
@@ -4308,6 +4357,10 @@
           "obligation_id": "O-flows"
         },
         {
+          "boundary_id": "B-winsock-boolean",
+          "obligation_id": "O-flows"
+        },
+        {
           "boundary_id": "B-worker-crash",
           "obligation_id": "O-flows"
         },
@@ -4367,6 +4420,10 @@
         },
         {
           "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-winsock-boolean",
           "obligation_id": "O-flows"
         },
         {
@@ -4435,6 +4492,7 @@
     "B-tls-ws-audit",
     "B-transfer",
     "B-ungranted-disconnect",
+    "B-winsock-boolean",
     "B-worker-crash"
   ],
   "interactions": [
@@ -4486,6 +4544,7 @@
     "B-tls-ws-audit",
     "B-transfer",
     "B-ungranted-disconnect",
+    "B-winsock-boolean",
     "B-worker-crash"
   ],
   "interactions": [
