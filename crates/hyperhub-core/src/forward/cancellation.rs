@@ -98,12 +98,24 @@ fn option(stream: &TcpStream, set: Option<bool>) -> io::Result<bool> {
     if result != 0 {
         return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
     }
-    if length != std::mem::size_of_val(&value) as i32 {
-        return Err(io::Error::other(
-            "invalid forwarding socket close marker size",
-        ));
+    if set.is_some() {
+        return Ok(value != 0);
     }
-    Ok(value != 0)
+    windows_boolean(value.to_ne_bytes(), length)
+}
+
+#[cfg(any(windows, test))]
+fn windows_boolean(bytes: [u8; 4], length: i32) -> io::Result<bool> {
+    // Winsock SET requires a DWORD-sized boolean. GET providers return either
+    // a BOOLEAN byte or a DWORD, as socket2's Windows Bool implementation also
+    // documents. Decode only the bytes identified by the returned optlen.
+    match length {
+        1 => Ok(bytes[0] != 0),
+        4 => Ok(i32::from_ne_bytes(bytes) != 0),
+        _ => Err(io::Error::other(format!(
+            "invalid forwarding socket close marker size: {length} (expected 1 or 4)"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +124,18 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
+    #[test]
+    fn windows_boolean_result_uses_the_exact_supported_returned_size() {
+        assert!(!windows_boolean([0, 0xff, 0xff, 0xff], 1).unwrap());
+        assert!(windows_boolean([1, 0xff, 0xff, 0xff], 1).unwrap());
+        assert!(windows_boolean([0xff, 0, 0, 0], 1).unwrap());
+        assert!(!windows_boolean(0i32.to_ne_bytes(), 4).unwrap());
+        assert!(windows_boolean(0x100i32.to_ne_bytes(), 4).unwrap());
+        assert!(windows_boolean((-1i32).to_ne_bytes(), 4).unwrap());
+        for length in [-1, 0, 2, 3, 5, i32::MAX] {
+            assert!(windows_boolean([0; 4], length).is_err(), "size {length}");
+        }
+    }
     fn pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
