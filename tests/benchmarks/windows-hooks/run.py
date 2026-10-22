@@ -84,18 +84,45 @@ rules = []
                     thread = threading.Thread(target=server.serve_forever, daemon=True)
                     thread.start()
                     try:
+                        # Fixed exploration budget, never retry a failed process.
+                        # Each concurrent process issues 256 requests then calls
+                        # WSACleanup immediately. Fresh processes exercise exit
+                        # and teardown independently of caller-storage reuse.
+                        modes = [(mode, 0) for mode in (
+                            "dns-event", "dns-poll", "dns-callback", "dns-cancel",
+                            "dns-cancel-callback", "dns-cancel-poll",
+                            "connectex-empty", "connectex-data")]
+                        modes.extend(("dns-cancel-concurrent", index) for index in range(8))
                         for managed in (False, True):
-                            for mode in ("dns-event", "dns-poll", "dns-callback", "dns-cancel", "connectex-empty", "connectex-data"):
+                            for mode, iteration in modes:
                                 command = [str(probe), mode, str(server.server_address[1])]
                                 if managed:
                                     command = [str(hyperhub), "run", "--", *command]
-                                result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
-                                item = {"mode": mode, "managed": managed, "exit_code": result.returncode,
-                                        "stdout": result.stdout, "stderr": result.stderr}
+                                try:
+                                    result = subprocess.run(command, env=environment, capture_output=True,
+                                                            text=True, timeout=60)
+                                except subprocess.TimeoutExpired as error:
+                                    decode = lambda value: value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+                                    item = {"mode": mode, "iteration": iteration, "managed": managed,
+                                            "exit_code": None, "timed_out": True,
+                                            "stdout": decode(error.stdout), "stderr": decode(error.stderr)}
+                                    results.append(item)
+                                    raise AssertionError("Windows Hook target exceeded 60 seconds", item) from error
+                                item = {"mode": mode, "iteration": iteration, "managed": managed,
+                                        "exit_code": result.returncode, "stdout": result.stdout,
+                                        "stderr": result.stderr}
                                 results.append(item)
                                 assert result.returncode == 0, item
+                                assert "dns_cleanup stage=done" in result.stderr, item
+                                if mode.startswith("dns-cancel"):
+                                    expected = 256 if mode == "dns-cancel-concurrent" else 64
+                                    item["terminal_count"] = result.stdout.count("dns=terminal status=")
+                                    item["cancel_accepted_count"] = result.stdout.count("cancel_status=0\n")
+                                    assert item["terminal_count"] == expected, item
+                                    assert item["cancel_accepted_count"] > 0, (
+                                        "Cancellation did not occur; coverage is unproven", item)
                                 marker = ("connectex=unsupported-initial-data" if managed and mode == "connectex-data"
-                                          else "dns=terminal" if mode == "dns-cancel"
+                                          else "dns=terminal" if mode.startswith("dns-cancel")
                                           else "dns=ok" if mode.startswith("dns-") else "connectex=ok")
                                 assert marker in result.stdout, item
                     finally:

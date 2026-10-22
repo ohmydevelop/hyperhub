@@ -15,14 +15,23 @@ mod probe {
     use windows_sys::Win32::System::Threading::{CreateEventW, SleepEx, WaitForSingleObject};
     use windows_sys::Win32::System::IO::OVERLAPPED;
 
-    static COMPLETED: AtomicBool = AtomicBool::new(false);
-    static COMPLETION_STATUS: AtomicU32 = AtomicU32::new(u32::MAX);
-    static COMPLETION_IDENTITY: AtomicUsize = AtomicUsize::new(0);
+    // The callback identity belongs to each request. Global completion flags
+    // would hide cross-request delivery when requests run concurrently.
+    #[repr(C)]
+    struct Request {
+        overlapped: OVERLAPPED,
+        completed: AtomicBool,
+        status: AtomicU32,
+        identity: AtomicUsize,
+    }
 
     unsafe extern "system" fn completed(error: u32, _: u32, overlapped: *const OVERLAPPED) {
-        COMPLETION_IDENTITY.store(overlapped as usize, Ordering::Release);
-        COMPLETION_STATUS.store(error, Ordering::Release);
-        COMPLETED.store(true, Ordering::Release);
+        let request = &*overlapped.cast::<Request>();
+        request
+            .identity
+            .store(overlapped as usize, Ordering::Release);
+        request.status.store(error, Ordering::Release);
+        request.completed.store(true, Ordering::Release);
     }
 
     unsafe fn exchange(socket: SOCKET, already_sent: bool) {
@@ -55,13 +64,20 @@ mod probe {
         hints.ai_family = AF_INET as i32;
         hints.ai_socktype = SOCK_STREAM;
         let mut result = null_mut();
-        let callback = mode == "dns-callback";
+        let callback = mode == "dns-callback" || mode == "dns-cancel-callback";
+        let cancelled = mode.starts_with("dns-cancel");
         let event = CreateEventW(null(), 1, 0, null());
         assert!(!event.is_null());
-        let mut overlapped: OVERLAPPED = zeroed();
+        let mut request = Request {
+            overlapped: zeroed(),
+            completed: AtomicBool::new(false),
+            status: AtomicU32::new(u32::MAX),
+            identity: AtomicUsize::new(0),
+        };
         if !callback {
-            overlapped.hEvent = event;
+            request.overlapped.hEvent = event;
         }
+        let overlapped = &mut request.overlapped as *mut OVERLAPPED;
         let mut handle = null_mut();
         let status = GetAddrInfoExW(
             name.as_ptr(),
@@ -71,7 +87,7 @@ mod probe {
             &hints,
             &mut result,
             null(),
-            &overlapped,
+            overlapped,
             if callback { Some(completed) } else { None },
             &mut handle,
         );
@@ -79,26 +95,45 @@ mod probe {
             status == 0 || status == WSA_IO_PENDING,
             "resolve status={status}"
         );
-        if mode == "dns-cancel" && status == WSA_IO_PENDING && !handle.is_null() {
+        if status == WSA_IO_PENDING && !callback {
+            let progress = GetAddrInfoExOverlappedResult(overlapped);
+            assert!(
+                progress == WSAEINPROGRESS || progress == 0,
+                "invalid pending accessor status={progress}"
+            );
+        }
+        if cancelled && status == WSA_IO_PENDING && !handle.is_null() {
             let cancel_status = GetAddrInfoExCancel(&handle);
             // Completion can win the cancellation race. Either terminal result is valid.
+            assert!(
+                cancel_status == 0 || cancel_status == WSA_INVALID_HANDLE,
+                "unexpected cancel status={cancel_status}"
+            );
             println!("cancel_status={cancel_status}");
         }
         if status == WSA_IO_PENDING {
             if callback {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                while !COMPLETED.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                while !request.completed.load(Ordering::Acquire)
+                    && std::time::Instant::now() < deadline
+                {
                     SleepEx(10, 1);
                 }
                 assert!(
-                    COMPLETED.load(Ordering::Acquire),
+                    request.completed.load(Ordering::Acquire),
                     "completion callback missing"
                 );
-                assert_eq!(COMPLETION_STATUS.load(Ordering::Acquire), 0);
                 assert_eq!(
-                    COMPLETION_IDENTITY.load(Ordering::Acquire),
-                    &overlapped as *const OVERLAPPED as usize
+                    request.identity.load(Ordering::Acquire),
+                    overlapped as usize
                 );
+            } else if mode == "dns-cancel-poll" {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while GetAddrInfoExOverlappedResult(overlapped) == WSAEINPROGRESS
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
             } else {
                 assert_eq!(
                     WaitForSingleObject(event, 10000),
@@ -108,14 +143,16 @@ mod probe {
             }
         }
         if !callback {
-            assert_eq!(overlapped.hEvent, event, "caller event identity changed");
+            assert_eq!((*overlapped).hEvent, event, "caller event identity changed");
         }
-        let terminal = if mode == "dns-poll" {
-            overlapped.Internal as i32
+        let terminal = if callback && status == WSA_IO_PENDING {
+            request.status.load(Ordering::Acquire) as i32
+        } else if mode == "dns-poll" {
+            (*overlapped).Internal as i32
         } else {
-            GetAddrInfoExOverlappedResult(&overlapped)
+            GetAddrInfoExOverlappedResult(overlapped)
         };
-        if mode == "dns-cancel" {
+        if cancelled {
             assert!(
                 terminal == 0 || terminal == WSA_E_CANCELLED || terminal == WSA_OPERATION_ABORTED,
                 "unexpected cancellation result={terminal}"
@@ -138,7 +175,8 @@ mod probe {
             eprintln!("dns_cleanup stage=free_results");
             FreeAddrInfoExW(result);
         }
-        CloseHandle(event);
+        eprintln!("dns_cleanup stage=close_event");
+        assert_ne!(CloseHandle(event), 0);
     }
 
     unsafe fn connect_ex(mode: &str, port: u16) {
@@ -232,17 +270,38 @@ mod probe {
         let arguments: Vec<String> = std::env::args().collect();
         let mode = &arguments[1];
         let port = arguments[2].parse().unwrap();
-        if mode.starts_with("dns-") {
-            // Reuse caller storage across completed cancellations, then release
-            // Winsock immediately. This exposes lifetime races across requests.
-            for _ in 0..if mode == "dns-cancel" { 64 } else { 1 } {
+        if mode == "dns-cancel-concurrent" {
+            // Each thread reuses caller storage only after its own completion.
+            // A barrier overlaps native entry, cancellation and callback exit;
+            // it does not add synchronization inside the observed Hooks.
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            std::thread::scope(|scope| {
+                for thread in 0..4 {
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        for index in 0..64 {
+                            barrier.wait();
+                            let mode = ["dns-cancel", "dns-cancel-callback", "dns-cancel-poll"]
+                                [(thread + index) % 3];
+                            dns(mode, port);
+                        }
+                    });
+                }
+            });
+        } else if mode.starts_with("dns-") {
+            // Release Winsock immediately after repeated completed requests.
+            for _ in 0..if mode.starts_with("dns-cancel") {
+                64
+            } else {
+                1
+            } {
                 dns(mode, port);
             }
         } else {
             connect_ex(mode, port);
         }
         eprintln!("dns_cleanup stage=wsa_cleanup");
-        WSACleanup();
+        assert_eq!(WSACleanup(), 0);
         eprintln!("dns_cleanup stage=done");
     }
 }

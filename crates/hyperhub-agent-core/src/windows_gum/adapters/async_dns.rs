@@ -5,7 +5,9 @@ use crate::windows_gum::gum::{HookGuard, INSIDE_HOOK};
 use crate::windows_gum::shared::*;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
-use windows_sys::Win32::Networking::WinSock::{WSAEINVAL, WSAENOBUFS, WSA_IO_PENDING};
+use windows_sys::Win32::Networking::WinSock::{
+    WSAEINPROGRESS, WSAEINVAL, WSAENOBUFS, WSA_IO_PENDING,
+};
 use windows_sys::Win32::System::Threading::SetEvent;
 
 struct Pending {
@@ -28,6 +30,14 @@ impl Pending {
         self.shadow
             .as_ref()
             .map_or(self.caller as *const OVERLAPPED, |value| value.get())
+    }
+
+    unsafe fn publish_pending(&self) {
+        if self.shadow.is_some() {
+            // The async call returns WSA_IO_PENDING, but its status accessor
+            // reports WSAEINPROGRESS until completion. Keep both contracts.
+            (*(self.caller as *mut OVERLAPPED)).Internal = WSAEINPROGRESS as usize;
+        }
     }
 
     unsafe fn publish_event(&self, status: Option<i32>, notify: bool) {
@@ -210,10 +220,7 @@ pub(super) unsafe fn resolve(
         }
         requests.insert(key, Arc::clone(&request));
     }
-    if request.shadow.is_some() {
-        // A caller can poll Internal directly instead of using the accessor.
-        (*(request.caller as *mut OVERLAPPED)).Internal = WSA_IO_PENDING as usize;
-    }
+    request.publish_pending();
     let status = original(
         node,
         service,
@@ -270,6 +277,8 @@ mod tests {
                     event: event as usize,
                     shadow: Some(UnsafeCell::new(std::mem::zeroed())),
                 });
+                request.publish_pending();
+                assert_eq!(GetAddrInfoExOverlappedResult(&caller), WSAEINPROGRESS);
                 let native = request.native_overlapped();
                 pending().lock().unwrap().insert(native as usize, request);
                 completion(status as u32, 0, native);
@@ -331,7 +340,8 @@ mod tests {
                 event: event as usize,
                 shadow: Some(UnsafeCell::new(std::ptr::read(&caller))),
             };
-            caller.Internal = WSA_IO_PENDING as usize;
+            request.publish_pending();
+            assert_eq!(GetAddrInfoExOverlappedResult(&caller), WSAEINPROGRESS);
             request.publish_event(None, false);
             assert_eq!(caller.Internal, 123);
             assert_eq!(WaitForSingleObject(event, 0), WAIT_TIMEOUT);
