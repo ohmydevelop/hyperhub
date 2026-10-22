@@ -180,6 +180,25 @@ pub fn save_private_bytes(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     atomic_write(path, bytes)
 }
 
+/// Write-ahead coordinator records need directory durability as well as file
+/// durability. Windows replacement already uses MOVEFILE_WRITE_THROUGH.
+pub(crate) fn save_durable_private_bytes(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    atomic_write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| StoreError::Format("journal has no parent".into()))?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| StoreError::Io {
+                path: parent.to_owned(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
 /// Save runtime Session state encrypted with the stable session-auth key.
 /// This state is separate from configuration and approval data.
 pub fn save_session_state(path: &Path, bytes: &[u8], key: &[u8]) -> Result<(), StoreError> {
@@ -739,13 +758,13 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn restrict_file_to_current_user(path: &Path) -> io::Result<()> {
+pub(crate) fn restrict_file_to_current_user(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(windows)]
-fn restrict_file_to_current_user(path: &Path) -> io::Result<()> {
+pub(crate) fn restrict_file_to_current_user(path: &Path) -> io::Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;

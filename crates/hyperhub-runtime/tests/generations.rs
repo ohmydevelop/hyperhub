@@ -83,6 +83,70 @@ fn value(lease: &hyperhub_runtime::Lease) -> u8 {
 }
 
 #[test]
+fn bounded_reports_keep_the_pending_and_held_transaction_even_with_old_ids() {
+    let host = runtime();
+    let mut incompatible = manifest(1);
+    incompatible.state_schema += 1;
+    for n in 0..40 {
+        host.prepare(&format!("z-{n:02}"), &incompatible, || {
+            panic!("must reject before load")
+        })
+        .unwrap();
+    }
+    host.prepare("a-pending", &manifest(1), || Ok(good(1)))
+        .unwrap();
+    let report = host.snapshot_limited(4).unwrap();
+    assert_eq!(report.transactions.len(), 4);
+    assert_eq!(report.transactions_omitted, 37);
+    assert!(report
+        .transactions
+        .iter()
+        .any(|t| t.id == "a-pending" && t.stage == Stage::Prepared));
+    host.commit_held("a-pending").unwrap();
+    host.observe().unwrap();
+    let report = host.snapshot_limited(1).unwrap();
+    assert_eq!(report.transactions[0].id, "a-pending");
+    assert_eq!(report.transactions[0].stage, Stage::Draining);
+    assert!(host.snapshot_limited(0).unwrap().transactions.is_empty());
+}
+
+#[test]
+fn global_finalization_releases_only_its_reservation_and_keeps_old_leases() {
+    let host = runtime();
+    let old = host.acquire();
+    host.prepare("first", &manifest(1), || Ok(good(1))).unwrap();
+    host.commit_held("first").unwrap();
+    assert!(host.snapshot().unwrap().retired[0].rollback_reserved);
+    assert_eq!(
+        host.finalize_observation("first").unwrap().stage,
+        Stage::Draining
+    );
+    assert_eq!(value(&old), 0);
+    host.prepare("second", &manifest(2), || Ok(good(2)))
+        .unwrap();
+    host.commit_held("second").unwrap();
+    host.finalize_observation("first").unwrap();
+    host.observe().unwrap();
+    assert!(
+        host.snapshot()
+            .unwrap()
+            .retired
+            .iter()
+            .find(|g| g.generation == 1)
+            .unwrap()
+            .rollback_reserved
+    );
+    host.rollback("second", "group failure").unwrap();
+    assert_eq!(value(&host.acquire()), 1);
+    drop(old);
+    host.observe().unwrap();
+    assert_eq!(
+        host.finalize_observation("first").unwrap().stage,
+        Stage::Complete
+    );
+}
+
+#[test]
 fn partial_group_commit_keeps_rollback_code_until_the_coordinator_decides() {
     let first = runtime();
     let second = runtime();

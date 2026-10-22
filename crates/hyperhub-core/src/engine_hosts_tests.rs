@@ -171,4 +171,43 @@ fn command_history_rejects_new_work_when_full_without_evicting_idempotency() {
     };
     assert!(registry.dispatch(oversized).is_err());
     assert!(host.receiver.try_recv().is_err());
+
+    // A full manual history must not strand a partially committed coordinated
+    // transaction. Its durable log replaces the transport's result history.
+    let first = request(&host, "rollout-capacity-0-1");
+    assert!(registry.dispatch(first.clone()).is_err());
+    for sequence in 1..=MAX_REQUESTS + 16 {
+        let id = format!("rollout-capacity-0-{sequence}");
+        let coordinated = request(&host, &id);
+        registry.dispatch_coordinated(coordinated.clone()).unwrap();
+        registry.dispatch_coordinated(coordinated.clone()).unwrap();
+        assert_eq!(host.receiver.try_recv().unwrap().request_id, id);
+        assert!(host.receiver.try_recv().is_err());
+        registry.retire_coordinated(&Default::default());
+        assert!(
+            registry.command(&id).is_some(),
+            "pending delivery was removed"
+        );
+        registry.delivered(&host.id, &id).unwrap();
+        registry
+            .acknowledge(
+                &host.id,
+                Acknowledgement {
+                    request_id: id.clone(),
+                    reply: Reply::Ok,
+                    snapshot: snapshot.clone(),
+                },
+                false,
+            )
+            .unwrap();
+        registry.retire_coordinated(&std::collections::BTreeSet::from([id.clone()]));
+        assert!(
+            registry.command(&id).is_some(),
+            "unapplied result was removed"
+        );
+        registry.retire_coordinated(&Default::default());
+        assert_eq!(registry.commands().len(), MAX_REQUESTS);
+        assert!(registry.dispatch_coordinated(coordinated).is_err());
+        assert!(registry.dispatch_coordinated(first.clone()).is_err());
+    }
 }

@@ -30,6 +30,9 @@ pub enum Command {
     BeginObservation {
         id: String,
     },
+    FinalizeObservation {
+        id: String,
+    },
     Abort {
         id: String,
     },
@@ -46,10 +49,18 @@ pub enum Command {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
-    Transaction { transaction: Transaction },
-    Snapshot { snapshot: Snapshot },
+    Transaction {
+        transaction: Transaction,
+    },
+    Snapshot {
+        snapshot: Snapshot,
+    },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+        #[serde(default)]
+        code: String,
+    },
 }
 /// # Safety
 /// Prepare manifests and native code must come from the trusted upgrade owner.
@@ -79,6 +90,9 @@ pub unsafe fn execute(runtime: &Runtime, command: Command) -> Reply {
         Command::BeginObservation { id } => runtime
             .begin_observation(&id)
             .map(|transaction| Reply::Transaction { transaction }),
+        Command::FinalizeObservation { id } => runtime
+            .finalize_observation(&id)
+            .map(|transaction| Reply::Transaction { transaction }),
         Command::Abort { id } => runtime
             .abort(&id)
             .map(|transaction| Reply::Transaction { transaction }),
@@ -94,6 +108,15 @@ pub unsafe fn execute(runtime: &Runtime, command: Command) -> Reply {
             .map(|transaction| Reply::Transaction { transaction }),
     };
     result.unwrap_or_else(|error| Reply::Error {
+        code: match &error {
+            hyperhub_runtime::Error::NotPrepared => "not_prepared",
+            hyperhub_runtime::Error::RequiresRestart => "requires_restart",
+            hyperhub_runtime::Error::Busy => "busy",
+            hyperhub_runtime::Error::TimedOut => "timed_out",
+            hyperhub_runtime::Error::AlreadyCommitted => "already_committed",
+            _ => "failed",
+        }
+        .into(),
         message: error.to_string().chars().take(1024).collect(),
     })
 }

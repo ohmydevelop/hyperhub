@@ -146,6 +146,8 @@ pub struct ControlService {
     session_state_path: Option<PathBuf>,
     session_state_key: Option<Zeroizing<Vec<u8>>>,
     engine_hosts: crate::engine_hosts::EngineHosts,
+    engine_owner_key: Zeroizing<Vec<u8>>,
+    engine_upgrades: Option<crate::upgrade::Coordinator>,
 }
 
 impl ControlService {
@@ -163,6 +165,7 @@ impl ControlService {
             tls_ca_pem: Arc::new(tls_ca_pem),
             audit,
             runtime,
+            engine_owner_key: session_auth_key.clone(),
             session_auth_key,
             started_at_ms: unix_timestamp_ms(),
             debug_forced: false,
@@ -172,12 +175,35 @@ impl ControlService {
             session_state_path: None,
             session_state_key: None,
             engine_hosts: Default::default(),
+            engine_upgrades: None,
         }
     }
 
     pub fn with_forced_debug(mut self, forced: bool) -> Self {
         self.debug_forced = forced;
         self
+    }
+
+    pub fn with_engine_upgrades(
+        mut self,
+        directory: &std::path::Path,
+        api_key: Zeroizing<Vec<u8>>,
+    ) -> io::Result<Self> {
+        self.engine_upgrades = Some(crate::upgrade::Coordinator::open(
+            directory,
+            api_key.clone(),
+            self.engine_hosts.clone(),
+        )?);
+        self.engine_owner_key = api_key;
+        Ok(self)
+    }
+    fn start_engine_upgrades(&self) {
+        if let Some(coordinator) = &self.engine_upgrades {
+            let _ = coordinator.spawn();
+        }
+    }
+    pub fn engine_upgrade_coordinator(&self) -> Option<crate::upgrade::Coordinator> {
+        self.engine_upgrades.clone()
     }
 
     pub fn with_socks_listener(mut self, listener: SocksListenerController) -> Self {
@@ -286,9 +312,23 @@ impl ControlService {
         let mut shutdown_requested = false;
         let response = match request {
             ControlRequest::EngineHostCommand { request, proof } => {
-                if !request.authenticate(&self.session_auth_key, &proof, unix_timestamp_ms()) {
+                if !request.authenticate(&self.engine_owner_key, &proof, unix_timestamp_ms()) {
                     ControlResponse::Error {
                         message: "invalid engine upgrade owner proof".into(),
+                    }
+                } else if self
+                    .engine_upgrades
+                    .as_ref()
+                    .is_some_and(|coordinator| coordinator.busy())
+                    && !matches!(
+                        request.command,
+                        hyperhub_engine::management::Command::Query
+                            | hyperhub_engine::management::Command::QueryTransaction { .. }
+                            | hyperhub_engine::management::Command::Observe
+                    )
+                {
+                    ControlResponse::Error {
+                        message: "an upgrade transaction owns Host mutations".into(),
                     }
                 } else {
                     match self.engine_hosts.dispatch(request) {
@@ -299,6 +339,38 @@ impl ControlService {
                     }
                 }
             }
+            ControlRequest::EngineUpgrade { request, proof } => {
+                if !request.authenticate(&self.engine_owner_key, &proof) {
+                    ControlResponse::Error {
+                        message: "invalid upgrade owner proof".into(),
+                    }
+                } else if let Some(coordinator) = &self.engine_upgrades {
+                    let recovery = matches!(request.action, crate::upgrade::Action::Recover);
+                    match coordinator.submit(request).await {
+                        Ok(record) => {
+                            if recovery {
+                                let _ = coordinator.spawn();
+                            }
+                            ControlResponse::EngineUpgrade {
+                                record: crate::upgrade::RecordView::from_record(&record, true),
+                            }
+                        }
+                        Err(error) => ControlResponse::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                } else {
+                    ControlResponse::Error {
+                        message: "durable upgrade coordinator unavailable; requires_restart".into(),
+                    }
+                }
+            }
+            ControlRequest::GetEngineUpgrades { id } => ControlResponse::EngineUpgrades {
+                status: self
+                    .engine_upgrades
+                    .as_ref()
+                    .map(|coordinator| coordinator.status(id.as_deref())),
+            },
             ControlRequest::GetEngineHosts {
                 request_id,
                 host_id,
@@ -1601,6 +1673,10 @@ impl ControlService {
                 sessions: self.sessions.snapshot(),
                 connections: self.connections.snapshot(),
                 engine_hosts: self.engine_hosts.hosts(),
+                engine_upgrades: self
+                    .engine_upgrades
+                    .as_ref()
+                    .map(|coordinator| coordinator.status(None)),
             },
             ControlRequest::SubscribeSandbox { .. } => {
                 unreachable!("subscription handled before request dispatch")
@@ -2311,6 +2387,7 @@ fn same_requested_executable(left: &str, right: &str) -> bool {
 #[cfg(windows)]
 pub async fn run_control_server(endpoint: String, service: ControlService) -> io::Result<()> {
     let mut first = true;
+    service.start_engine_upgrades();
     loop {
         let server = create_current_user_pipe(&endpoint, first)?;
         first = false;
@@ -2392,6 +2469,7 @@ fn create_current_user_pipe(
 #[cfg(unix)]
 pub async fn run_control_server(endpoint: String, service: ControlService) -> io::Result<()> {
     use tokio::net::UnixListener;
+    service.start_engine_upgrades();
     let path = std::path::Path::new(&endpoint);
     if let Some(parent) = path.parent() {
         #[cfg(target_os = "linux")]

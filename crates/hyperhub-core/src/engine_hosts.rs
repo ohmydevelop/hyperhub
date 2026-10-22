@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 
 const MAX_HOSTS: usize = 256;
 const MAX_REQUESTS: usize = 4096;
+const MAX_COORDINATED_REQUESTS: usize = 8192;
+const MAX_COORDINATED_STREAMS: usize = 128 * 256;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +93,7 @@ struct Host {
 struct State {
     hosts: BTreeMap<String, Host>,
     requests: BTreeMap<String, (Vec<u8>, CommandStatus)>,
+    coordinated_high_water: BTreeMap<String, u64>,
 }
 #[derive(Clone, Default)]
 pub struct EngineHosts(Arc<Mutex<State>>);
@@ -183,6 +186,19 @@ impl EngineHosts {
     /// Authentication must precede this method. Request IDs have bounded,
     /// non-evicting idempotency history. A full registry rejects new commands.
     pub(crate) fn dispatch(&self, request: OwnerCommand) -> io::Result<CommandStatus> {
+        if request.request_id.starts_with("rollout-") {
+            return Err(io::Error::other("reserved coordinator request ID"));
+        }
+        self.dispatch_inner(request, false)
+    }
+    pub(crate) fn dispatch_coordinated(&self, request: OwnerCommand) -> io::Result<CommandStatus> {
+        self.dispatch_inner(request, true)
+    }
+    fn dispatch_inner(
+        &self,
+        request: OwnerCommand,
+        coordinated: bool,
+    ) -> io::Result<CommandStatus> {
         if serde_json::to_vec(&request.command)
             .map_err(io::Error::other)?
             .len()
@@ -201,7 +217,44 @@ impl EngineHosts {
             }
             return Ok(status.clone());
         }
-        if state.requests.len() >= MAX_REQUESTS {
+        let sequence = if coordinated {
+            let (stream, sequence) = request
+                .request_id
+                .rsplit_once('-')
+                .filter(|(stream, _)| stream.starts_with("rollout-"))
+                .ok_or_else(|| io::Error::other("invalid coordinator sequence"))?;
+            let sequence: u64 = sequence
+                .parse()
+                .map_err(|_| io::Error::other("invalid coordinator sequence"))?;
+            if sequence == 0
+                || state
+                    .coordinated_high_water
+                    .get(stream)
+                    .is_some_and(|old| sequence <= *old)
+            {
+                return Err(io::Error::other("coordinator request was superseded"));
+            }
+            if !state.coordinated_high_water.contains_key(stream)
+                && state.coordinated_high_water.len() >= MAX_COORDINATED_STREAMS
+            {
+                return Err(io::Error::other("coordinator stream limit reached"));
+            }
+            Some((stream.to_owned(), sequence))
+        } else {
+            None
+        };
+        let count = state
+            .requests
+            .keys()
+            .filter(|id| id.starts_with("rollout-") == coordinated)
+            .count();
+        if count
+            >= if coordinated {
+                MAX_COORDINATED_REQUESTS
+            } else {
+                MAX_REQUESTS
+            }
+        {
             return Err(io::Error::other("engine request limit reached"));
         }
         let host = state
@@ -226,7 +279,26 @@ impl EngineHosts {
         state
             .requests
             .insert(request.request_id, (bytes, status.clone()));
+        if let Some((stream, sequence)) = sequence {
+            state.coordinated_high_water.insert(stream, sequence);
+        }
         Ok(status)
+    }
+    /// Call only after the journal no longer needs these results. Keep a compact
+    /// sequence watermark to reject replay, and retain every unacknowledged
+    /// delivery until it completes or its channel is lost. Manual history is
+    /// non-evicting and cannot consume the coordinator's recovery capacity.
+    pub(crate) fn retire_coordinated(&self, pending: &std::collections::BTreeSet<String>) {
+        if let Ok(mut state) = self.0.lock() {
+            state.requests.retain(|id, (_, status)| {
+                !id.starts_with("rollout-")
+                    || pending.contains(id)
+                    || !matches!(
+                        status.state,
+                        DeliveryState::Acknowledged | DeliveryState::Unknown
+                    )
+            });
+        }
     }
     pub(crate) fn delivered(&self, host_id: &str, request_id: &str) -> io::Result<()> {
         let mut state = self

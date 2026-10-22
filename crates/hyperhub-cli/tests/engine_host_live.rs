@@ -23,6 +23,9 @@ use std::{
     time::Duration,
 };
 use zeroize::Zeroizing;
+#[path = "support/engine_rollout.rs"]
+mod rollout;
+use hyperhub_core::upgrade::{Action, Phase};
 
 struct Target(Child);
 impl Drop for Target {
@@ -42,6 +45,28 @@ impl Drop for Root {
             );
             return;
         }
+        #[cfg(windows)]
+        fn writable(path: &Path) {
+            let Ok(metadata) = fs::symlink_metadata(path) else {
+                return;
+            };
+            if metadata.file_type().is_symlink() {
+                return;
+            }
+            if metadata.is_dir() {
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        writable(&entry.path());
+                    }
+                }
+            } else if metadata.is_file() {
+                let mut permissions = metadata.permissions();
+                permissions.set_readonly(false);
+                let _ = fs::set_permissions(path, permissions);
+            }
+        }
+        #[cfg(windows)]
+        writable(&self.0);
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -106,7 +131,7 @@ async fn dispatch(endpoint: &str, host_id: &str, id: &str, command: Command) -> 
         command,
         issued_at_ms: hyperhub_core::session::unix_timestamp_ms(),
     };
-    let proof = request.proof(&[0; 32]).unwrap();
+    let proof = request.proof(rollout::api_key().as_bytes()).unwrap();
     let response = exchange(
         endpoint,
         &ControlRequest::EngineHostCommand { request, proof },
@@ -227,10 +252,7 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         rand::random::<u32>()
     )));
     fs::create_dir_all(root.0.join("runtime")).unwrap();
-    let api_key = format!(
-        "hhk_{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7; 32])
-    );
+    let api_key = rollout::api_key();
     hyperhub_core::config_store::save_private_bytes(
         &root.0.join("runtime/api-key"),
         api_key.as_bytes(),
@@ -283,8 +305,14 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         AuditWriter::open(None).unwrap(),
         RuntimeState::new(Arc::new(config)).unwrap(),
         Zeroizing::new(vec![0; 32]),
-    );
+    )
+    .with_engine_upgrades(
+        &root.0.join("upgrades"),
+        Zeroizing::new(api_key.as_bytes().to_vec()),
+    )
+    .unwrap();
     let endpoint = control::instance_control_endpoint(&root.0);
+    let (coordinator, runner) = rollout::start(&service);
     let server = tokio::spawn(control::run_control_server(endpoint.clone(), service));
     tokio::time::timeout(Duration::from_secs(10), async {
         while control::control_request(&endpoint, &ControlRequest::Ping)
@@ -335,6 +363,7 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         .unwrap()
         .to_string();
     let original = host(&endpoint).await;
+    rollout::reject_configuration_key(&endpoint).await;
     assert_eq!(original.root_pid, pid);
     input.write_all(b"open\n").unwrap();
     input.flush().unwrap();
@@ -391,14 +420,20 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         host(&endpoint).await.snapshot.active.version,
         original.snapshot.active.version
     );
-    assert!(
-        matches!(dispatch(&endpoint, &original.host_id, "prepare", Command::Prepare { id: "change".into(), manifest,
-        source: module, cache: root.0.join("cache") }).await, Reply::Transaction { transaction } if transaction.stage == Stage::Prepared)
-    );
-    assert!(
-        matches!(dispatch(&endpoint, &original.host_id, "commit", Command::CommitHeld { id: "change".into() }).await,
-        Reply::Transaction { transaction } if matches!(transaction.stage, Stage::Draining | Stage::Complete))
-    );
+    rollout::submit(
+        &endpoint,
+        Action::Prepare {
+            manifest,
+            source: module,
+            cache: root.0.join("cache"),
+            hosts: vec![original.host_id.clone()],
+        },
+    )
+    .await;
+    rollout::until(&endpoint, Phase::Prepared).await;
+    rollout::submit(&endpoint, Action::Commit).await;
+    rollout::interrupt_and_recover(&endpoint, runner).await;
+    rollout::until(&endpoint, Phase::Committed).await;
     input.write_all(b"ping\nopen\n").unwrap();
     input.flush().unwrap();
     assert_eq!(
@@ -433,15 +468,15 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         .retired
         .iter()
         .any(|g| g.generation == original.snapshot.active.generation && g.references > 0));
-    assert!(
-        matches!(dispatch(&endpoint, &original.host_id, "observe-start", Command::BeginObservation { id: "change".into() }).await,
-        Reply::Transaction { transaction } if transaction.stage == Stage::Draining)
-    );
-    assert!(
-        matches!(dispatch(&endpoint, &original.host_id, "rollback", Command::Rollback {
-        id: "change".into(), reason: "fixture observation failure".into(),
-    }).await, Reply::Transaction { transaction } if transaction.stage == Stage::RolledBack)
-    );
+    rollout::submit(&endpoint, Action::Observe).await;
+    rollout::submit(
+        &endpoint,
+        Action::Rollback {
+            reason: "fixture observation failure".into(),
+        },
+    )
+    .await;
+    rollout::until(&endpoint, Phase::RolledBack).await;
     input.write_all(b"ping\nopen\n").unwrap();
     input.flush().unwrap();
     assert_eq!(
@@ -476,5 +511,7 @@ async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
         fs::read_to_string(root.0.join("target.log")).unwrap()
     );
     mock.join().unwrap();
+    rollout::stop(coordinator).await;
     server.abort();
+    let _ = server.await;
 }

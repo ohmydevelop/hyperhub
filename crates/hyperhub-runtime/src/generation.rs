@@ -458,6 +458,26 @@ impl Runtime {
         Ok(state.transactions.get(id).unwrap().clone())
     }
 
+    /// Release a coordinated reservation after a durable global health decision.
+    /// This does not close leases or connections. Old transactions cannot release
+    /// the reservation of a newer transaction, and retries have no new effect.
+    pub fn finalize_observation(&self, id: &str) -> Result<Transaction, Error> {
+        let mut state = self.lock()?;
+        let transaction = state.transactions.get(id).ok_or(Error::NotPrepared)?;
+        if !matches!(transaction.stage, Stage::Draining | Stage::Complete) {
+            return Err(Error::NotPrepared);
+        }
+        if state
+            .observation
+            .as_ref()
+            .is_some_and(|observation| observation.id == id)
+        {
+            state.observation = None;
+        }
+        Self::collect(&mut state);
+        Ok(state.transactions.get(id).unwrap().clone())
+    }
+
     pub fn abort(&self, id: &str) -> Result<Transaction, Error> {
         let mut state = self.lock()?;
         let tx = state.transactions.get(id).ok_or(Error::NotPrepared)?;
@@ -574,14 +594,27 @@ impl Runtime {
             references: Arc::strong_count(g).saturating_sub(1 + extra),
             rollback_reserved: reserved == Some(g.id),
         };
-        let mut transaction_report: Vec<_> = state
-            .transactions
-            .values()
-            .rev()
-            .take(transactions)
-            .cloned()
-            .collect();
-        transaction_report.reverse();
+        let transaction_report = if transactions >= state.transactions.len() {
+            state.transactions.values().cloned().collect()
+        } else {
+            let mut ids = std::collections::BTreeSet::new();
+            for id in state
+                .pending
+                .as_ref()
+                .map(|p| &p.id)
+                .into_iter()
+                .chain(state.observation.as_ref().map(|o| &o.id))
+                .chain(state.transactions.keys().rev())
+            {
+                if ids.len() >= transactions {
+                    break;
+                }
+                ids.insert(id);
+            }
+            ids.into_iter()
+                .filter_map(|id| state.transactions.get(id).cloned())
+                .collect()
+        };
         Ok(Snapshot {
             host: self.host.clone(),
             active: status(&active, 1),

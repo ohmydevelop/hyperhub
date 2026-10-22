@@ -1512,6 +1512,13 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
+    EngineUpgrade {
+        request: crate::upgrade::Request,
+        proof: Vec<u8>,
+    },
+    GetEngineUpgrades {
+        id: Option<String>,
+    },
     SubscribeEngineHost {
         session_id: String,
         token: String,
@@ -1707,6 +1714,12 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlResponse {
+    EngineUpgrade {
+        record: crate::upgrade::RecordView,
+    },
+    EngineUpgrades {
+        status: Option<crate::upgrade::Status>,
+    },
     EngineHostCommand {
         status: crate::engine_hosts::CommandStatus,
     },
@@ -1797,6 +1810,8 @@ pub enum ControlResponse {
         connections: Vec<ConnectionSnapshot>,
         #[serde(default)]
         engine_hosts: Vec<crate::engine_hosts::HostStatus>,
+        #[serde(default)]
+        engine_upgrades: Option<crate::upgrade::Status>,
     },
     SmartProtectionDecision {
         action: crate::config::SandboxAction,

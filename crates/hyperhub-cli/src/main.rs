@@ -340,7 +340,14 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     .with_socks_listener(socks.listener_controller())
     .with_forced_debug(run.debug)
     .with_shutdown(shutdown)
-    .with_session_persistence(session_state_path.clone(), session_auth_key.clone());
+    .with_session_persistence(session_state_path.clone(), session_auth_key.clone())
+    .with_engine_upgrades(
+        &config_store::hyperhub_home()
+            .map_err(|error| error.to_string())?
+            .join("runtime/upgrades"),
+        Zeroizing::new(api_key.as_bytes().to_vec()),
+    )
+    .map_err(|error| format!("cannot open upgrade coordinator: {error}"))?;
     output.line(format!("HyperHub SOCKS5 listening on {}", socks_address))?;
     output.line(format!(
         "HyperHub control endpoint {}",
