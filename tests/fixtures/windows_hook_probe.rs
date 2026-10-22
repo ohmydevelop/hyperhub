@@ -2,6 +2,10 @@
 fn main() {}
 
 #[cfg(windows)]
+#[path = "windows_exception_diagnostics.rs"]
+mod diagnostics;
+
+#[cfg(windows)]
 mod probe {
     use std::mem::{size_of, zeroed};
     use std::ptr::{null, null_mut};
@@ -131,6 +135,7 @@ mod probe {
             println!("dns=ok mode={mode} native_status={status}");
         }
         if !result.is_null() {
+            eprintln!("dns_cleanup stage=free_results");
             FreeAddrInfoExW(result);
         }
         CloseHandle(event);
@@ -221,17 +226,24 @@ mod probe {
     }
 
     pub unsafe fn run() {
+        super::diagnostics::install();
         let mut data: WSADATA = zeroed();
         assert_eq!(WSAStartup(0x202, &mut data), 0);
         let arguments: Vec<String> = std::env::args().collect();
         let mode = &arguments[1];
         let port = arguments[2].parse().unwrap();
         if mode.starts_with("dns-") {
-            dns(mode, port);
+            // Reuse caller storage across completed cancellations, then release
+            // Winsock immediately. This exposes lifetime races across requests.
+            for _ in 0..if mode == "dns-cancel" { 64 } else { 1 } {
+                dns(mode, port);
+            }
         } else {
             connect_ex(mode, port);
         }
+        eprintln!("dns_cleanup stage=wsa_cleanup");
         WSACleanup();
+        eprintln!("dns_cleanup stage=done");
     }
 }
 
