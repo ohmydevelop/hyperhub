@@ -52,7 +52,8 @@ HYPERHUB_SKILL_AGENT_CMD='my-agent-adapter'
 - 检查回答中不存在真实凭证或测试用假 secret。
 - 验证普通操作可优先由 Skill、配置参考、脱敏 `show` 和 CLI 诊断完整指导，并能说明何时需要升级到实现调查，而不是设置绝对源码禁令；
 - 验证 `ssh_transcript=false` 只关闭内容文件，同一路由绑定 SSH 凭证与审计 Profile 时结构化命令事件仍保留；
-- 验证仅替换 `<redacted>` Secret 被 CLI 判为无变化时，Agent 报告限制且不删除重建凭证或改变 UUID；
+- 独立验证已有 SSH 密码的最小审批 Patch：先保护 UUID，仅替换目标 Secret 的审批占位符，保持账号和引用；Agent 主动提交，真实新值由人在审批中输入；
+- 验证旧 CLI 实际拒绝 Secret 更新时报告版本兼容性，不删除重建凭证、改变 UUID 或制造无关字段变化；
 - 验证 SSH 行为测试必须在审批完成、Serve 运行后通过 `hyperhub run -- ssh ...` 执行。
 - 验证 Serve 生命周期、目标运行、校验和导出使用运行 API Key；配置创建/修改、审批和导入使用管理员密码；运行封套与两种文件语义不会混淆。
 

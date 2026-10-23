@@ -40,6 +40,16 @@ struct PreparedPatch {
     config: Config,
     approval_token: String,
     changes: Vec<Value>,
+    secret_writes: Vec<SecretWrite>,
+}
+
+#[derive(Clone)]
+struct SecretWrite {
+    path: String,
+    operation_index: usize,
+    value_pointer: String,
+    placeholder: Option<String>,
+    test_binding: bool,
 }
 
 const APPROVAL_QUEUE_SCHEMA: u32 = 1;
@@ -162,6 +172,7 @@ pub(crate) fn save_direct_config(
         config,
         approval_token: String::new(),
         changes: Vec::new(),
+        secret_writes: Vec::new(),
     };
     let outcome = persist_prepared(path, &mut active, &prepared)?;
     Ok(DirectApplyOutcome {
@@ -252,7 +263,7 @@ fn patch_config(patch_path: &Path) -> Result<i32, String> {
 
     let planning = load_planning_config(&path)?;
     normalize_config_item_uuids(&planning, &mut patch)?;
-    let prepared = prepare_patch(&path, &planning, &patch)?;
+    let prepared = prepare_proposal_patch(&path, &planning, &patch)?;
     if prepared.changes.is_empty() {
         return Err("JSON patch does not change the configuration".into());
     }
@@ -346,8 +357,12 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
         let total = queue.requests.len();
         let request = queue.requests[index].clone();
         let patch = Value::Array(request.operations.clone());
-        let preview = prepare_patch(&path, &active.config, &patch);
-        let placeholders = collect_placeholders(&patch)?;
+        let preview = prepare_proposal_patch(&path, &active.config, &patch);
+        let secret_writes = preview
+            .as_ref()
+            .map(|prepared| prepared.secret_writes.clone())
+            .unwrap_or_default();
+        let placeholders = secret_input_names(&secret_writes);
         let current_value = config_value(&active.config)?;
         let description = describe_request(&current_value, &request.operations)?;
         display_request(
@@ -373,6 +388,11 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
             }
             ApprovalDecision::Edit => {
                 let edited = edit_request(&request, editor)?;
+                prepare_proposal_patch(
+                    &path,
+                    &active.config,
+                    &Value::Array(edited.operations.clone()),
+                )?;
                 queue.requests[index] = edited;
                 save_queue(&queue_path, &queue, &active)?;
             }
@@ -384,8 +404,7 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
             }
             ApprovalDecision::Approve => {
                 let mut approved_operations = request.operations.clone();
-                let placeholders =
-                    collect_placeholders(&Value::Array(approved_operations.clone()))?;
+                let placeholders = secret_input_names(&secret_writes);
                 for (secret_index, placeholder) in placeholders.iter().enumerate() {
                     eprintln!(
                         "Sensitive value {}/{} for request {}/{}: {}",
@@ -404,9 +423,12 @@ fn approve_config(password_file: Option<&Path>, editor: Option<&Path>) -> Result
                             total
                         ));
                     }
-                    for operation in &mut approved_operations {
-                        replace_placeholder(operation, placeholder, &value);
-                    }
+                    replace_secret_inputs(
+                        &mut approved_operations,
+                        &secret_writes,
+                        placeholder,
+                        &value,
+                    )?;
                 }
                 let approved_patch = Value::Array(approved_operations.clone());
                 let prepared = prepare_patch(&path, &active.config, &approved_patch).map_err(|error| {
@@ -790,6 +812,11 @@ fn prepare_approval_sequence(
     patch: &Value,
 ) -> Result<(Vec<ApprovalRequest>, Vec<ConfigChangeDescription>), String> {
     let requests = build_approval_requests(patch)?;
+    if requests.len() > 1 && secret_inputs_need_atomic(path, current, patch, &requests)? {
+        let requests = build_atomic_approval_request(patch)?;
+        let descriptions = describe_request_sequence(path, current, &requests)?;
+        return Ok((requests, descriptions));
+    }
     match describe_request_sequence(path, current, &requests) {
         Ok(descriptions) => Ok((requests, descriptions)),
         Err(granular_error) if requests.len() > 1 => {
@@ -807,6 +834,44 @@ fn prepare_approval_sequence(
     }
 }
 
+fn secret_inputs_need_atomic(
+    path: &Path,
+    current: &Config,
+    patch: &Value,
+    requests: &[ApprovalRequest],
+) -> Result<bool, String> {
+    let final_preview = prepare_proposal_patch(path, current, patch)?;
+    let final_inputs = final_preview
+        .secret_writes
+        .iter()
+        .filter(|write| write.placeholder.is_some() && !write.test_binding)
+        .collect::<Vec<_>>();
+    let mut config = current.clone();
+    for request in requests {
+        let Ok(preview) =
+            prepare_proposal_patch(path, &config, &Value::Array(request.operations.clone()))
+        else {
+            return Ok(false);
+        };
+        let first_index = request.source_index + 1 - request.operations.len();
+        if preview
+            .secret_writes
+            .iter()
+            .filter(|write| write.placeholder.is_some() && !write.test_binding)
+            .any(|write| {
+                !final_inputs.iter().any(|final_write| {
+                    final_write.operation_index == first_index + write.operation_index
+                        && final_write.value_pointer == write.value_pointer
+                })
+            })
+        {
+            return Ok(true);
+        }
+        config = preview.config;
+    }
+    Ok(false)
+}
+
 fn describe_request_sequence(
     path: &Path,
     current: &Config,
@@ -816,15 +881,18 @@ fn describe_request_sequence(
     let mut descriptions = Vec::with_capacity(requests.len());
     for (index, request) in requests.iter().enumerate() {
         let current_value = config_value(&config)?;
-        descriptions.push(describe_request(&current_value, &request.operations)?);
-        let prepared = prepare_patch(path, &config, &Value::Array(request.operations.clone()))
-            .map_err(|error| {
-                format!(
-                    "configuration request {}/{} is not independently valid: {error}",
-                    index + 1,
-                    requests.len()
-                )
-            })?;
+        let mut description = describe_request(&current_value, &request.operations)?;
+        let prepared =
+            prepare_proposal_patch(path, &config, &Value::Array(request.operations.clone()))
+                .map_err(|error| {
+                    format!(
+                        "configuration request {}/{} is not independently valid: {error}",
+                        index + 1,
+                        requests.len()
+                    )
+                })?;
+        describe_secret_inputs(&mut description, &prepared.secret_writes);
+        descriptions.push(description);
         config = prepared.config;
     }
     Ok(descriptions)
@@ -921,7 +989,7 @@ fn display_request(
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let rendered_description = match preview {
+    let mut rendered_description = match preview {
         Ok(prepared) if operation != "remove" => {
             let resulting = config_value(&prepared.config)?;
             describe_request(&resulting, &request.operations)
@@ -929,6 +997,9 @@ fn display_request(
         }
         _ => description.clone(),
     };
+    if let Ok(prepared) = preview {
+        describe_secret_inputs(&mut rendered_description, &prepared.secret_writes);
+    }
     let validation_error = preview.err().map(String::as_str);
     eprintln!("\n[{}/{}] 配置审批项", index + 1, total);
     eprintln!(
@@ -1242,34 +1313,341 @@ fn parse_placeholder(value: &str) -> Result<Option<&str>, String> {
         .strip_prefix("${APPROVE:")
         .and_then(|value| value.strip_suffix('}'))
     else {
-        return Err(format!("invalid approval placeholder '{value}'"));
+        return Err("invalid approval placeholder; expected ${APPROVE:name}".into());
     };
     if name.is_empty()
         || !name.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         })
     {
-        return Err(format!("invalid approval placeholder name '{name}'"));
+        return Err(
+            "invalid approval placeholder name; use letters, digits, dash, underscore, or period"
+                .into(),
+        );
     }
     Ok(Some(name))
 }
 
-fn replace_placeholder(value: &mut Value, name: &str, replacement: &str) {
+fn prepare_proposal_patch(
+    path: &Path,
+    current: &Config,
+    patch: &Value,
+) -> Result<PreparedPatch, String> {
+    let mut prepared = prepare_patch(path, current, patch)?;
+    let current_value = config_value(current)?;
+    prepared.secret_writes = secret_writes(&current_value, patch, &prepared.config)?;
+    for write in prepared
+        .secret_writes
+        .iter()
+        .filter(|write| write.placeholder.is_some() && !write.test_binding)
+    {
+        prepared.changes.push(
+            json!({"path":write.path, "kind":"secret_update", "status":"awaiting_human_input"}),
+        );
+    }
+    Ok(prepared)
+}
+
+// Carry origin labels through RFC 6902 mutations. Looking only at the final
+// string or patch pointer loses provenance after array shifts or overwrites.
+fn secret_writes(
+    current: &Value,
+    patch: &Value,
+    config: &Config,
+) -> Result<Vec<SecretWrite>, String> {
+    let marker = format!("__hyperhub_input_{}", new_uuid());
+    let mask = format!("__hyperhub_secret_{}", new_uuid());
+    let mut tracked = current.clone();
+    let mut intermediate = current.clone();
+    let mut origins = Vec::new();
+    let mut tests = Vec::new();
+    for (index, operation) in patch
+        .as_array()
+        .ok_or("JSON patch must be an array")?
+        .iter()
+        .enumerate()
+    {
+        if operation["op"] == "test" {
+            if let (Some(value), Some(path)) = (operation.get("value"), operation["path"].as_str())
+            {
+                if let Some(actual) = tracked.pointer(path) {
+                    collect_input_tests(
+                        value, actual, "/value", index, &marker, &origins, &mut tests,
+                    );
+                }
+            }
+            continue;
+        }
+        let mut marked = operation.clone();
+        if let Some(value) = marked.get_mut("value") {
+            mark_input_origins(value, &marker, index, "/value", &mut origins)?;
+        }
+        apply_json_patch(&mut tracked, &Value::Array(vec![marked]))?;
+        apply_json_patch(&mut intermediate, &Value::Array(vec![operation.clone()]))?;
+        // Validate all submitted typed inputs, including ones overwritten or
+        // removed later. Final surviving origins alone determine UI prompts.
+        if operation.get("value").is_some_and(contains_string) {
+            let masked_step = ConfigDocument::redacted_unvalidated_value(intermediate.clone(), &mask)
+                .map_err(|_| format!("patch operation {index} cannot be inspected; use an atomic object replacement for shape changes"))?;
+            let mut step_writes = Vec::new();
+            collect_secret_writes(
+                "",
+                &masked_step,
+                &tracked,
+                &mask,
+                &marker,
+                &origins,
+                &mut step_writes,
+            );
+            if let Some(write) = step_writes.iter().find(|write| write.placeholder.is_none()) {
+                return Err(format!("patch operation {} at {} contains an inline secret; use ${{APPROVE:name}}, an environment reference, or a protected file reference", write.operation_index, write.path));
+            }
+        }
+    }
+    let masked = config_value(&config.redacted_with_placeholder(&mask))?;
+    let mut result = Vec::new();
+    collect_secret_writes("", &masked, &tracked, &mask, &marker, &origins, &mut result);
+    for (origin_index, operation_index, value_pointer) in tests {
+        let origin = &origins[origin_index];
+        if let Some(selected) = result
+            .iter()
+            .find(|write| {
+                !write.test_binding
+                    && write.operation_index == origin.operation_index
+                    && write.value_pointer == origin.value_pointer
+            })
+            .cloned()
+        {
+            result.push(SecretWrite {
+                operation_index,
+                value_pointer,
+                test_binding: true,
+                ..selected
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn contains_string(value: &Value) -> bool {
     match value {
-        Value::String(value) if value == &format!("${{APPROVE:{name}}}") => {
-            *value = replacement.to_owned();
+        Value::String(_) => true,
+        Value::Array(values) => values.iter().any(contains_string),
+        Value::Object(values) => values.values().any(contains_string),
+        _ => false,
+    }
+}
+
+fn mark_input_origins(
+    value: &mut Value,
+    marker: &str,
+    operation_index: usize,
+    pointer: &str,
+    origins: &mut Vec<SecretWrite>,
+) -> Result<(), String> {
+    match value {
+        Value::String(text) => {
+            let placeholder = parse_placeholder(text)?.map(str::to_owned);
+            let index = origins.len();
+            origins.push(SecretWrite {
+                path: String::new(),
+                operation_index,
+                value_pointer: pointer.into(),
+                placeholder,
+                test_binding: false,
+            });
+            let mut tagged = serde_json::Map::new();
+            tagged.insert(marker.into(), Value::from(index));
+            *value = Value::Object(tagged);
         }
         Value::Array(values) => {
-            for value in values {
-                replace_placeholder(value, name, replacement);
+            for (index, value) in values.iter_mut().enumerate() {
+                mark_input_origins(
+                    value,
+                    marker,
+                    operation_index,
+                    &format!("{pointer}/{index}"),
+                    origins,
+                )?;
             }
         }
         Value::Object(values) => {
-            for value in values.values_mut() {
-                replace_placeholder(value, name, replacement);
+            for (key, value) in values {
+                mark_input_origins(
+                    value,
+                    marker,
+                    operation_index,
+                    &format!("{pointer}/{}", escape_pointer(key)),
+                    origins,
+                )?;
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn collect_input_tests(
+    expected: &Value,
+    tracked: &Value,
+    pointer: &str,
+    operation_index: usize,
+    marker: &str,
+    origins: &[SecretWrite],
+    tests: &mut Vec<(usize, usize, String)>,
+) {
+    if let Some(index) = tracked
+        .get(marker)
+        .and_then(Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
+    {
+        if let Some(origin) = origins.get(index) {
+            if expected
+                .as_str()
+                .and_then(|value| parse_placeholder(value).ok().flatten())
+                == origin.placeholder.as_deref()
+                && origin.placeholder.is_some()
+            {
+                tests.push((index, operation_index, pointer.into()));
+            }
+        }
+        return;
+    }
+    match expected {
+        Value::Object(values) => {
+            for (key, value) in values {
+                if let Some(tracked) = tracked.get(key) {
+                    collect_input_tests(
+                        value,
+                        tracked,
+                        &format!("{pointer}/{}", escape_pointer(key)),
+                        operation_index,
+                        marker,
+                        origins,
+                        tests,
+                    );
+                }
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                if let Some(tracked) = tracked.get(index) {
+                    collect_input_tests(
+                        value,
+                        tracked,
+                        &format!("{pointer}/{index}"),
+                        operation_index,
+                        marker,
+                        origins,
+                        tests,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_secret_writes(
+    path: &str,
+    masked: &Value,
+    tracked: &Value,
+    mask: &str,
+    marker: &str,
+    origins: &[SecretWrite],
+    result: &mut Vec<SecretWrite>,
+) {
+    if masked.as_str() == Some(mask) {
+        if let Some(index) = tracked
+            .get(marker)
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+        {
+            if let Some(origin) = origins.get(index) {
+                let mut write = origin.clone();
+                write.path = path.into();
+                result.push(write);
+            }
+        }
+        return;
+    }
+    match masked {
+        Value::Object(values) => {
+            for (key, value) in values {
+                if let Some(tracked) = tracked.get(key) {
+                    collect_secret_writes(
+                        &format!("{path}/{}", escape_pointer(key)),
+                        value,
+                        tracked,
+                        mask,
+                        marker,
+                        origins,
+                        result,
+                    );
+                }
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                if let Some(tracked) = tracked.get(index) {
+                    collect_secret_writes(
+                        &format!("{path}/{index}"),
+                        value,
+                        tracked,
+                        mask,
+                        marker,
+                        origins,
+                        result,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn secret_input_names(writes: &[SecretWrite]) -> Vec<String> {
+    let mut names = Vec::new();
+    for write in writes {
+        if let Some(name) = &write.placeholder {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    names
+}
+
+fn replace_secret_inputs(
+    operations: &mut [Value],
+    writes: &[SecretWrite],
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    for write in writes
+        .iter()
+        .filter(|write| write.placeholder.as_deref() == Some(name))
+    {
+        let slot = operations
+            .get_mut(write.operation_index)
+            .and_then(|operation| operation.pointer_mut(&write.value_pointer))
+            .ok_or("approved Secret input no longer matches its request")?;
+        if slot.as_str() != Some(&format!("${{APPROVE:{name}}}")) {
+            return Err("approved Secret placeholder no longer matches its request".into());
+        }
+        *slot = Value::String(value.into());
+    }
+    Ok(())
+}
+
+fn describe_secret_inputs(description: &mut ConfigChangeDescription, writes: &[SecretWrite]) {
+    for write in writes
+        .iter()
+        .filter(|write| write.placeholder.is_some() && !write.test_binding)
+    {
+        description
+            .details
+            .push(format!("更新 Secret：{}；待人工输入", write.path));
     }
 }
 
@@ -1300,6 +1678,7 @@ fn prepare_patch(path: &Path, current: &Config, patch: &Value) -> Result<Prepare
         config,
         approval_token,
         changes,
+        secret_writes: Vec::new(),
     })
 }
 
@@ -1643,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_only_secret_replacement_has_no_reviewable_change() {
+    fn secret_only_replacement_preserves_explicit_human_input_intent() {
         let path = std::env::temp_dir().join("hyperhub-secret-only-patch-test.bin");
         let mut config = Config::default();
         config
@@ -1655,7 +2034,7 @@ mod tests {
                     value: "existing-secret".into(),
                 },
             });
-        let prepared = prepare_patch(
+        let prepared = prepare_proposal_patch(
             &path,
             &config,
             &json!([{
@@ -1665,20 +2044,316 @@ mod tests {
             }]),
         )
         .unwrap();
-        assert!(prepared.changes.is_empty());
+        assert_eq!(
+            prepared.changes,
+            vec![
+                json!({"path":"/environment_variables/0/value/value", "kind":"secret_update", "status":"awaiting_human_input"})
+            ]
+        );
+        assert_eq!(
+            secret_input_names(&prepared.secret_writes),
+            ["replacement-token"]
+        );
+    }
+
+    fn secret_rotation_config() -> Config {
+        let mut value = config_value(&Config::default()).unwrap();
+        value["environment_variables"] =
+            json!([{"name":"DUMMY_TOKEN", "value":{"value":"canary-old-secret"}}]);
+        value["gateway"]["credentials"] = json!([
+            {"id":"basic", "type":"http_basic", "username":"dummy", "password":{"value":"canary-old-secret"}},
+            {"id":"bearer", "type":"http_bearer", "secret":{"value":"canary-old-secret"}},
+            {"id":"token", "type":"http_token", "username":"dummy", "secret":{"value":"canary-old-secret"}},
+            {"id":"api", "type":"http_x_api_key", "secret":{"value":"canary-old-secret"}},
+            {"id":"cookie", "type":"http_cookie", "name":"dummy", "secret":{"value":"canary-old-secret"}},
+            {"id":"query", "type":"http_query_parameter", "name":"dummy", "secret":{"value":"canary-old-secret"}},
+            {"id":"headers", "type":"http_custom_headers", "headers":{"X-Secret":{"value":"canary-old-secret"}}},
+            {"id":"ssh", "type":"ssh", "accounts":[{"username":"dummy", "private_keys":[{"name":"dummy", "value":{"value":"canary-old-secret"}}], "passwords":[{"value":"canary-old-secret"}]}]}
+        ]);
+        value["gateway"]["proxies"] = json!([{"id":"proxy", "type":"socks5", "address":"127.0.0.1:1080", "timeout_milliseconds":1000, "authentication":{"username":{"value":"canary-old-secret"},"password":{"value":"canary-old-secret"}}, "headers":{"X-Proxy":{"value":"canary-old-secret"}}}]);
+        value["gateway"]["protections"] = json!([{"id":"protection", "intelligence":{"provider":{"id":"provider", "protocol":"system_one", "endpoint":"https://127.0.0.1/v1/systemone", "model":"dummy", "api_key":{"value":"canary-old-secret"}}}}]);
+        value["gateway"]["routing"]["default"]["decision"]["credentials"] = json!(["basic"]);
+        ConfigDocument::from_value(value).unwrap()
     }
 
     #[test]
-    fn approval_placeholders_are_collected_and_replaced() {
+    fn all_schema_inline_secrets_rotate_without_changing_uuids_or_references() {
+        let path = std::env::temp_dir().join("hyperhub-secret-rotation-matrix.bin");
+        let config = secret_rotation_config();
+        let before = config_value(&config.redacted()).unwrap();
+        for field in [
+            "/environment_variables/0/value/value",
+            "/gateway/credentials/0/password/value",
+            "/gateway/credentials/1/secret/value",
+            "/gateway/credentials/2/secret/value",
+            "/gateway/credentials/3/secret/value",
+            "/gateway/credentials/4/secret/value",
+            "/gateway/credentials/5/secret/value",
+            "/gateway/credentials/6/headers/X-Secret/value",
+            "/gateway/credentials/7/accounts/0/private_keys/0/value/value",
+            "/gateway/credentials/7/accounts/0/passwords/0/value",
+            "/gateway/proxies/0/authentication/username/value",
+            "/gateway/proxies/0/authentication/password/value",
+            "/gateway/proxies/0/headers/X-Proxy/value",
+            "/gateway/protections/0/intelligence/provider/api_key/value",
+        ] {
+            let patch = json!([{"op":"replace", "path":field, "value":"${APPROVE:rotation}"}]);
+            let prepared = prepare_proposal_patch(&path, &config, &patch).unwrap();
+            assert_eq!(prepared.secret_writes.len(), 1, "{field}");
+            assert_eq!(
+                prepared.changes,
+                [json!({"path":field,"kind":"secret_update","status":"awaiting_human_input"})],
+                "{field}"
+            );
+            assert_eq!(
+                config_value(&prepared.config.redacted()).unwrap(),
+                before,
+                "{field}"
+            );
+            let (requests, descriptions) =
+                prepare_approval_sequence(&path, &config, &patch).unwrap();
+            let rendered = render_approval_review(
+                &requests[0],
+                &descriptions[0],
+                "replace",
+                field,
+                &["rotation".into()],
+                None,
+            );
+            assert!(rendered.contains("更新 Secret"));
+            assert!(rendered.contains("待人工输入"));
+            assert!(!rendered.contains("canary-old-secret"));
+            let literal = json!([{"op":"replace", "path":field, "value":"canary-new-secret"}]);
+            assert!(
+                prepare_proposal_patch(&path, &config, &literal)
+                    .err()
+                    .unwrap()
+                    .contains("inline secret"),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_input_origin_survives_arrays_and_drops_overwritten_or_removed_inputs() {
+        let path = std::env::temp_dir().join("hyperhub-secret-origin-test.bin");
+        let config = secret_rotation_config();
+        let patch = json!([
+            {"op":"add", "path":"/environment_variables/0", "value":{"name":"NEW_DUMMY", "value":{"value":"${APPROVE:shifted}"}}},
+            {"op":"remove", "path":"/environment_variables/1"}
+        ]);
+        let prepared = prepare_proposal_patch(&path, &config, &patch).unwrap();
+        assert_eq!(
+            prepared.secret_writes[0].path,
+            "/environment_variables/0/value/value"
+        );
+        assert_eq!(prepared.secret_writes[0].operation_index, 0);
+        assert_eq!(
+            prepared.secret_writes[0].value_pointer,
+            "/value/value/value"
+        );
+        for final_operation in [
+            json!({"op":"remove", "path":"/environment_variables/0"}),
+            json!({"op":"replace", "path":"/environment_variables/0/value", "value":{"env":"DUMMY_TOKEN"}}),
+        ] {
+            let patch = json!([{"op":"replace", "path":"/environment_variables/0/value/value", "value":"${APPROVE:discarded}"}, final_operation]);
+            let prepared = prepare_proposal_patch(&path, &config, &patch).unwrap();
+            assert!(prepared.secret_writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn secret_rotation_does_not_resolve_normal_fields_or_test_operands_with_same_name() {
+        let path = std::env::temp_dir().join("hyperhub-secret-origin-scope.bin");
+        let config = secret_rotation_config();
         let mut patch = json!([
+            {"op":"replace", "path":"/gateway/protections/0/intelligence/provider/model", "value":"${APPROVE:shared}"},
+            {"op":"test", "path":"/gateway/protections/0/intelligence/provider/model", "value":"${APPROVE:shared}"},
+            {"op":"replace", "path":"/environment_variables/0/value/value", "value":"${APPROVE:shared}"}
+        ]);
+        let prepared = prepare_proposal_patch(&path, &config, &patch).unwrap();
+        replace_secret_inputs(
+            patch.as_array_mut().unwrap(),
+            &prepared.secret_writes,
+            "shared",
+            "canary-old-secret",
+        )
+        .unwrap();
+        assert_eq!(patch[0]["value"], "${APPROVE:shared}");
+        assert_eq!(patch[1]["value"], "${APPROVE:shared}");
+        assert_eq!(patch[2]["value"], "canary-old-secret");
+        let approved = prepare_patch(&path, &config, &patch).unwrap();
+        assert_eq!(
+            config_value(&approved.config).unwrap()["environment_variables"],
+            config_value(&config).unwrap()["environment_variables"]
+        );
+        assert!(approved
+            .secret_writes
+            .iter()
+            .all(|write| write.placeholder.is_none()));
+        let noop = json!([{"op":"test", "path":"/gateway/protections/0/intelligence/provider/model", "value":"dummy"}]);
+        assert!(prepare_proposal_patch(&path, &config, &noop)
+            .unwrap()
+            .changes
+            .is_empty());
+        let normal = json!([{"op":"replace", "path":"/gateway/protections/0/intelligence/provider/model", "value":"${APPROVE:ordinary}"}]);
+        assert!(prepare_proposal_patch(&path, &config, &normal)
+            .unwrap()
+            .secret_writes
+            .is_empty());
+    }
+
+    #[test]
+    fn overwritten_secret_inputs_are_reviewed_atomically_and_tests_follow_the_input_origin() {
+        let path = std::env::temp_dir().join("hyperhub-secret-atomic.bin");
+        let config = secret_rotation_config();
+        let patch = json!([
+            {"op":"replace","path":"/environment_variables/0/value/value","value":"${APPROVE:discarded}"},
+            {"op":"replace","path":"/environment_variables/0/value/value","value":"${APPROVE:final}"},
+            {"op":"test","path":"/environment_variables/0/value/value","value":"${APPROVE:final}"},
+            {"op":"replace","path":"/gateway/debug","value":true}
+        ]);
+        let (requests, descriptions) = prepare_approval_sequence(&path, &config, &patch).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            descriptions[0]
+                .details
+                .iter()
+                .filter(|detail| detail.contains("待人工输入"))
+                .count(),
+            1
+        );
+        let preview = prepare_proposal_patch(&path, &config, &patch).unwrap();
+        assert_eq!(secret_input_names(&preview.secret_writes), ["final"]);
+        let mut approved = patch.as_array().unwrap().clone();
+        replace_secret_inputs(
+            &mut approved,
+            &preview.secret_writes,
+            "final",
+            "canary-old-secret",
+        )
+        .unwrap();
+        assert_eq!(approved[0]["value"], "${APPROVE:discarded}");
+        assert_eq!(approved[1]["value"], "canary-old-secret");
+        assert_eq!(approved[2]["value"], "canary-old-secret");
+        prepare_patch(&path, &config, &Value::Array(approved)).unwrap();
+    }
+
+    #[test]
+    fn every_intermediate_typed_secret_input_is_checked_before_proposal_storage() {
+        let path = std::env::temp_dir().join("hyperhub-intermediate-input-check.bin");
+        let config = secret_rotation_config();
+        let field = "/gateway/protections/0/intelligence/provider/api_key/value";
+        for ending in [
+            json!({"op":"replace","path":field,"value":"${APPROVE:final}"}),
+            json!({"op":"remove","path":"/gateway/protections/0/intelligence/provider"}),
+        ] {
+            let patch =
+                json!([{"op":"replace","path":field,"value":"dummy-intermediate-canary"}, ending]);
+            let error = prepare_proposal_patch(&path, &config, &patch)
+                .err()
+                .unwrap();
+            assert!(error.contains("inline secret"));
+            assert!(!error.contains("dummy-intermediate-canary"));
+        }
+        let patch = json!([
+            {"op":"replace","path":"/gateway/protections/0/intelligence/provider/api_key","value":{"value":"dummy-nested-canary","extra":true}},
+            {"op":"replace","path":"/gateway/protections/0/intelligence/provider/api_key","value":{"value":"${APPROVE:final}"}}
+        ]);
+        let error = prepare_proposal_patch(&path, &config, &patch)
+            .err()
+            .unwrap();
+        assert!(error.contains("inline secret"));
+        assert!(!error.contains("dummy-nested-canary"));
+        let patch = json!([
+            {"op":"remove","path":"/gateway/credentials/0/password"},
+            {"op":"test","path":"/gateway/debug","value":false},
+            {"op":"add","path":"/gateway/credentials/0/password","value":{"value":"${APPROVE:replacement}"}}
+        ]);
+        assert_eq!(
+            secret_input_names(
+                &prepare_proposal_patch(&path, &config, &patch)
+                    .unwrap()
+                    .secret_writes
+            ),
+            ["replacement"]
+        );
+    }
+
+    #[test]
+    fn approved_text_and_recovery_are_verbatim_without_placeholder_interpretation() {
+        let path = std::env::temp_dir().join("hyperhub-approved-text-test.bin");
+        let config = secret_rotation_config();
+        let patch = json!([{"op":"replace", "path":"/environment_variables/0/value/value", "value":"${APPROVE:input}"}]);
+        let preview = prepare_proposal_patch(&path, &config, &patch).unwrap();
+        for text in [
+            "${APPROVE:dummy-sensitive-canary",
+            "${APPROVE:dummy-sensitive-canary}",
+            "${APPROVE:dummy invalid canary}",
+        ] {
+            let mut operations = patch.as_array().unwrap().clone();
+            replace_secret_inputs(&mut operations, &preview.secret_writes, "input", text).unwrap();
+            let resolved = Value::Array(operations);
+            let approved = prepare_patch(&path, &config, &resolved).unwrap();
+            assert_eq!(
+                config_value(&approved.config)
+                    .unwrap()
+                    .pointer("/environment_variables/0/value/value")
+                    .and_then(Value::as_str),
+                Some(text)
+            );
+            assert!(approved.secret_writes.is_empty());
+            let recovery = prepare_patch(&path, &config, &resolved).unwrap();
+            assert_eq!(
+                config_digest(&recovery.config).unwrap(),
+                config_digest(&approved.config).unwrap()
+            );
+            let repeated = prepare_patch(&path, &approved.config, &resolved).unwrap();
+            assert_eq!(
+                config_digest(&repeated.config).unwrap(),
+                config_digest(&approved.config).unwrap()
+            );
+            assert!(repeated.changes.is_empty());
+            assert!(!serde_json::to_string(&approved.changes)
+                .unwrap()
+                .contains("dummy-sensitive-canary"));
+        }
+        let error = parse_placeholder("${APPROVE:dummy-sensitive-canary")
+            .err()
+            .unwrap();
+        assert!(!error.contains("dummy-sensitive-canary"));
+    }
+
+    #[test]
+    fn secret_references_and_noop_mutations_do_not_request_human_values() {
+        let path = std::env::temp_dir().join("hyperhub-secret-reference.bin");
+        let config = secret_rotation_config();
+        for reference in [
+            json!({"env":"DUMMY_REF"}),
+            json!({"file":"dummy-reference-file", "prefix":"Bearer "}),
+        ] {
+            let patch = json!([{"op":"replace", "path":"/environment_variables/0/value", "value":reference}]);
+            let prepared = prepare_proposal_patch(&path, &config, &patch).unwrap();
+            assert!(prepared.secret_writes.is_empty());
+            assert!(!prepared.changes.is_empty());
+        }
+        assert!(prepare_proposal_patch(
+            &path,
+            &config,
+            &json!([{"op":"replace","path":"/gateway/debug","value":false}])
+        )
+        .unwrap()
+        .changes
+        .is_empty());
+    }
+
+    #[test]
+    fn approval_placeholder_names_are_deduplicated() {
+        let patch = json!([
             {"op": "add", "path": "/one", "value": "${APPROVE:api-key}"},
             {"op": "add", "path": "/two", "value": "${APPROVE:api-key}"}
         ]);
         assert_eq!(collect_placeholders(&patch).unwrap(), ["api-key"]);
-        replace_placeholder(&mut patch, "api-key", "real-secret");
-        assert_eq!(collect_placeholders(&patch).unwrap(), Vec::<String>::new());
-        assert_eq!(patch[0]["value"], "real-secret");
-        assert_eq!(patch[1]["value"], "real-secret");
     }
 
     #[test]

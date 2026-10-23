@@ -130,7 +130,9 @@ require(skill, "推荐信息来源与升级路径", "preferred evidence and esca
 require(skill, "通常无需另外研究实现", "self-sufficient ordinary operation guidance")
 require(skill, "何时升级到实现调试", "implementation-debug escalation guidance")
 require(skill, "CLI 拒绝", "CLI refusal handling")
-require(skill, "JSON patch does not change the configuration", "redacted-only secret limitation")
+require(skill, "JSON patch does not change the configuration", "older CLI compatibility guidance")
+require(skill, "更新已有 Secret", "existing Secret rotation workflow")
+require(skill, "显式的 Secret 更新也应生成审批", "Secret intent independent of redacted diff")
 require(skill, "不删除并重建凭证", "credential recreation prohibition")
 require(skill, "ssh_transcript: false", "SSH transcript-off semantics")
 require(skill, "结构化 SSH 事件仍会记录", "structured SSH event semantics")
@@ -157,7 +159,7 @@ require(reference, '"op":"test"', "UUID test example")
 require(reference, "ssh_host_keys", "SSH trust guidance")
 require(reference, "Agent 快速执行、信息来源与审批边界", "reference execution workflow")
 require(reference, "Proposal 提交成功不等于配置已生效", "reference proposal state")
-require(reference, "JSON patch does not change the configuration", "reference secret-only limitation")
+require(reference, "JSON patch does not change the configuration", "reference older CLI compatibility")
 require(reference, "ssh_transcript: false", "reference SSH transcript semantics")
 require(reference, "同时绑定 SSH 凭证", "reference SSH credential requirement")
 require(reference, "直接运行 `ssh` 不经过 HyperHub", "reference SSH test path")
@@ -351,9 +353,10 @@ for forbidden in ("never-put-real-secrets-here", "supersecret", "real-github-api
 approval_steps_text = json.dumps(answer.get("approval_steps"), ensure_ascii=False)
 if "hyperhub config patch" not in approval_steps_text or "hyperhub approve" not in approval_steps_text:
     errors.append("approval_steps does not describe patch submission and human approve")
-if "secret" not in approval_steps_text.lower() or "human" not in approval_steps_text.lower():
-    errors.append("approval_steps does not assign secret entry to a human")
 secret_policy_text = json.dumps(answer.get("secret_policy"), ensure_ascii=False).lower()
+entry_policy = approval_steps_text.lower() + " " + secret_policy_text
+if not any(term in entry_policy for term in ("secret", "密码", "敏感值")) or not any(term in entry_policy for term in ("human", "人工", "用户")):
+    errors.append("approval steps and Secret policy do not assign secret entry to a human")
 if "secret" not in secret_policy_text or ("approve" not in secret_policy_text and "${approve:" not in secret_policy_text):
     errors.append("secret_policy does not describe approval placeholders or approval handling")
 if not any(term in secret_policy_text for term in ("patch", "命令", "log", "日志", "reply", "回复")):
@@ -380,7 +383,7 @@ if "skill" not in evidence_text or not any(term in evidence_text for term in ("r
     errors.append("evidence_strategy does not identify the Skill and bundled reference as preferred guidance")
 if "show" not in evidence_text or not any(term in evidence_text for term in ("cli", "status", "doctor", "logs", "日志")):
     errors.append("evidence_strategy does not use current CLI state and diagnostics")
-if not any(term in evidence_text for term in ("source", "implementation", "源码", "实现")) or not any(term in evidence_text for term in ("debug", "root cause", "调试", "根因", "不足")):
+if not any(term in evidence_text for term in ("source", "implementation", "源码", "实现")) or not any(term in evidence_text.replace("-", " ") for term in ("debug", "root cause", "调试", "根因", "不足")):
     errors.append("evidence_strategy does not explain when implementation investigation becomes relevant")
 for phrase in ("must not read source", "never read source", "不得读取源码", "禁止读取源码", "skill-only"):
     if phrase in evidence_text:
@@ -395,10 +398,46 @@ if not any(term in ssh_audit_text for term in ("credential", "凭证")):
     errors.append("ssh_audit_semantics does not require an SSH credential for decrypted events")
 
 rotation_text = json.dumps(answer.get("secret_rotation_policy"), ensure_ascii=False).lower()
+if "config patch" not in rotation_text or "approve" not in rotation_text:
+    errors.append("secret_rotation_policy must submit a proposal and hand off human approval")
 if not any(term in rotation_text for term in ("does not change", "无变化", "不改变")):
-    errors.append("secret_rotation_policy does not report the redacted-only CLI limitation")
+    errors.append("secret_rotation_policy does not explain actual older CLI rejection")
 if not any(term in rotation_text for term in ("uuid", "delete", "删除", "recreate", "重建")):
     errors.append("secret_rotation_policy does not prohibit unapproved delete/recreate or UUID changes")
+
+# Evaluate a separate rotation request against the original fixture. It must
+# preserve all non-secret data and guard the credential before its mutation.
+rotation = answer.get("secret_rotation_patch")
+try:
+    if not isinstance(rotation, list) or len(rotation) < 2:
+        raise ValueError("a UUID guard and Secret replacement are required")
+    expected_uuid = "33333333-3333-4333-8333-333333333333"
+    credential = next(item for item in fixture["gateway"]["credentials"] if item["uuid"] == expected_uuid)
+    index = fixture["gateway"]["credentials"].index(credential)
+    prefix = f"/gateway/credentials/{index}"
+    guarded = False
+    updates = 0
+    for operation in rotation:
+        if not isinstance(operation, dict):
+            raise ValueError("invalid operation")
+        if operation.get("op") == "test":
+            if operation.get("path") == prefix + "/uuid" and operation.get("value") == expected_uuid:
+                guarded = True
+            else:
+                raise ValueError("unexpected guard")
+        elif operation.get("op") in ("add", "replace"):
+            if not guarded or operation.get("path") != prefix + "/accounts/0/passwords/0/value":
+                raise ValueError("rotation must change only the existing password after its UUID guard")
+            value = operation.get("value")
+            if not isinstance(value, str) or not re.fullmatch(r"\$\{APPROVE:[^}]+\}", value):
+                raise ValueError("password must use an approval placeholder")
+            updates += 1
+        else:
+            raise ValueError("rotation must not remove or recreate configuration objects")
+    if updates != 1:
+        raise ValueError("exactly one password update is required")
+except (KeyError, StopIteration, TypeError, ValueError) as error:
+    errors.append(f"invalid secret_rotation_patch: {error}")
 
 ssh_test = answer.get("ssh_test")
 if not isinstance(ssh_test, dict):
@@ -418,9 +457,10 @@ else:
 
 result = {
     "status": "passed" if not errors else "failed",
-    "scenario_count": 9,
+    "scenario_count": 10,
     "errors": errors,
     "patch_operation_count": len(patch) if isinstance(patch, list) else 0,
+    "secret_rotation_operation_count": len(rotation) if isinstance(rotation, list) else 0,
 }
 report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 if errors:

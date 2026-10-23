@@ -526,6 +526,14 @@ impl ConfigDocument {
     }
 
     pub fn into_config(self) -> Result<Config, String> {
+        let config = self.into_unvalidated_config()?;
+        config.validate().map_err(|error| error.to_string())?;
+        Ok(config)
+    }
+
+    // Used only for inspecting typed input locations. Never expose an
+    // unvalidated Config to callers or use it as an executable configuration.
+    fn into_unvalidated_config(self) -> Result<Config, String> {
         if self.schema_version != CONFIG_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported configuration schema {}; expected {}",
@@ -671,8 +679,20 @@ impl ConfigDocument {
             legacy: HashMap::new(),
         };
         config.ensure_item_uuids();
-        config.validate().map_err(|error| error.to_string())?;
         Ok(config)
+    }
+
+    /// Inspect Secret fields even while a multi-operation patch has unresolved
+    /// references. The result is redacted; normal configuration loading still
+    /// requires full validation through into_config/from_value.
+    pub fn redacted_unvalidated_value(value: Value, placeholder: &str) -> Result<Value, String> {
+        let document: Self = serde_json::from_value(value)
+            .map_err(|_| "intermediate configuration has an uninspectable shape".to_string())?;
+        let config = document
+            .into_unvalidated_config()
+            .map_err(|_| "intermediate configuration has an uninspectable shape".to_string())?;
+        Self::to_value(&config.redacted_with_placeholder(placeholder))
+            .map_err(|_| "cannot serialize redacted intermediate configuration".to_string())
     }
 
     pub fn to_value(config: &Config) -> Result<Value, serde_json::Error> {
@@ -1059,6 +1079,32 @@ mod tests {
     use super::*;
     use crate::config::{new_config_uuid, PluginConfig};
     use serde_json::json;
+
+    #[test]
+    fn typed_intermediate_redaction_does_not_relax_configuration_validation() {
+        let mut value = ConfigDocument::to_value(&Config::default()).unwrap();
+        value["gateway"]["credentials"] = json!([{"id":"dummy", "type":"http_bearer", "secret":{"value":"dummy-intermediate-canary","extra":true}}]);
+        value["gateway"]["routing"]["routes"] = json!([{
+            "id":"dummy-route", "enabled":true, "priority":100,
+            "endpoints":[{"target":"dummy.invalid"}],
+            "decision":{"action":"allow", "credentials":["temporarily-unresolved"]}
+        }]);
+        assert!(ConfigDocument::from_value(value.clone())
+            .unwrap_err()
+            .contains("references unknown plugin"));
+        let masked =
+            ConfigDocument::redacted_unvalidated_value(value.clone(), "typed-mask").unwrap();
+        assert_eq!(
+            masked["gateway"]["credentials"][0]["secret"]["value"],
+            "typed-mask"
+        );
+        assert!(!serde_json::to_string(&masked)
+            .unwrap()
+            .contains("dummy-intermediate-canary"));
+        assert!(ConfigDocument::from_value(value)
+            .unwrap_err()
+            .contains("references unknown plugin"));
+    }
 
     #[test]
     fn schema_v2_separates_credentials_audit_and_routing() {

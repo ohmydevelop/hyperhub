@@ -12,6 +12,12 @@
         "id": "old-bearer",
         "type": "http_bearer",
         "secret": {"value": "<redacted>"}
+      },
+      {
+        "uuid": "33333333-3333-4333-8333-333333333333",
+        "id": "stable-ssh",
+        "type": "ssh",
+        "accounts": [{"username":"deploy","passwords":[{"value":"<redacted>"}],"private_keys":[]}]
       }
     ],
     "audit": {"settings":{"retention_days":7,"connections":true,"header_allowlist":[]},"profiles":[]},

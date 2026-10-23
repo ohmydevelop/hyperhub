@@ -275,44 +275,49 @@ impl Config {
     /// replaced. Environment and file secret references remain visible because
     /// they do not contain the referenced secret value.
     pub fn redacted(&self) -> Self {
+        self.redacted_with_placeholder("<redacted>")
+    }
+
+    /// Replace inline Secret values without changing their typed locations.
+    pub fn redacted_with_placeholder(&self, placeholder: &str) -> Self {
         let mut config = self.clone();
         for variable in &mut config.environment {
-            variable.value.redact();
+            variable.value.redact_with_placeholder(placeholder);
         }
         for upstream in &mut config.upstreams {
             if let Some(username) = &mut upstream.username {
-                username.redact();
+                username.redact_with_placeholder(placeholder);
             }
             if let Some(password) = &mut upstream.password {
-                password.redact();
+                password.redact_with_placeholder(placeholder);
             }
             for value in upstream.headers.values_mut() {
-                value.redact();
+                value.redact_with_placeholder(placeholder);
             }
         }
         for plugin in &mut config.plugins {
             if let Some(secret) = &mut plugin.secret {
-                secret.redact();
+                secret.redact_with_placeholder(placeholder);
             }
             if let Some(password) = &mut plugin.password {
-                password.redact();
+                password.redact_with_placeholder(placeholder);
             }
             for value in plugin.headers.values_mut() {
-                value.redact();
+                value.redact_with_placeholder(placeholder);
             }
             for account in &mut plugin.ssh_accounts {
                 for private_key in &mut account.private_keys {
-                    private_key.value.redact();
+                    private_key.value.redact_with_placeholder(placeholder);
                 }
                 for password in &mut account.passwords {
-                    password.redact();
+                    password.redact_with_placeholder(placeholder);
                 }
             }
         }
         for protection in &mut config.protections {
             if let Some(provider) = &mut protection.intelligence.provider {
                 if let Some(api_key) = &mut provider.api_key {
-                    api_key.redact();
+                    api_key.redact_with_placeholder(placeholder);
                 }
             }
         }
@@ -2194,9 +2199,9 @@ pub enum SecretValue {
 }
 
 impl SecretValue {
-    fn redact(&mut self) {
+    fn redact_with_placeholder(&mut self, placeholder: &str) {
         if let Self::Inline { value } = self {
-            *value = "<redacted>".into();
+            *value = placeholder.into();
         }
     }
 
@@ -2489,6 +2494,62 @@ targets = ["example.com"]"#,
             .unwrap_err()
             .to_string()
             .contains("invalid UUID"));
+    }
+
+    #[test]
+    fn typed_secret_redaction_marker_handles_existing_marker_empty_and_references() {
+        let mut config = Config::default();
+        for (name, value) in [
+            (
+                "MARKER",
+                SecretValue::Inline {
+                    value: "<redacted>".into(),
+                },
+            ),
+            (
+                "EMPTY",
+                SecretValue::Inline {
+                    value: String::new(),
+                },
+            ),
+            (
+                "ENV",
+                SecretValue::Env {
+                    env: "DUMMY_REF".into(),
+                    prefix: String::new(),
+                },
+            ),
+            (
+                "FILE",
+                SecretValue::File {
+                    file: "dummy-reference-file".into(),
+                    prefix: "Bearer ".into(),
+                },
+            ),
+        ] {
+            config.environment.push(EnvironmentVariable {
+                uuid: new_config_uuid(),
+                name: name.into(),
+                value,
+            });
+        }
+        let marked = config.redacted_with_placeholder("typed-secret-marker");
+        for variable in &marked.environment[..2] {
+            assert_eq!(
+                variable.value,
+                SecretValue::Inline {
+                    value: "typed-secret-marker".into()
+                }
+            );
+        }
+        assert_eq!(marked.environment[2].value, config.environment[2].value);
+        assert_eq!(marked.environment[3].value, config.environment[3].value);
+        assert_eq!(
+            config.redacted().environment[0].value,
+            SecretValue::Inline {
+                value: "<redacted>".into()
+            }
+        );
     }
 
     #[test]

@@ -50,11 +50,23 @@
   ```
 
 - 整体替换现有对象时必须保留原 UUID；不得复制其他对象的 UUID。
+- 切换对象类型等结构改动若使中间步骤无法按 Schema 解释，使用一次完整对象或子对象替换，保留 UUID 和所需引用；不要通过暂存无法检查的敏感字段来拼装最终对象。
 - 真实敏感值只能使用审批占位符：`{"value":"${APPROVE:meaningful-name}"}`。
 - `config patch` 不需要密码；它只提交禁止包含真实 Secret 的 Proposal。真实 Secret、Provider API Key 和私钥只能在人工 `approve` 时输入。
-- `<redacted>` 只表示已有 Secret 存在，不是原值。仅将现有 `<redacted>` 替换为 `${APPROVE:name}` 可能被 CLI 以 `JSON patch does not change the configuration` 拒绝，因为脱敏配置没有可展示差异。遇到此限制时直接报告，建议用户在真实终端运行 `hyperhub config` 修改现有 Secret；不得未经明确授权删除并重建凭证或改变 UUID。
-- 只有同一 Patch 本来就包含用户要求的可见配置变化时，才可同时携带现有 Secret 的审批占位符；不得添加无关字段来规避“无变化”检查。
+- `<redacted>` 只表示已有 Secret 存在，不是原值。新增或更新现有 Secret 都使用 `${APPROVE:name}`。即使没有其他可见变化，显式的 Secret 更新也应生成审批；Agent 应主动提交，人在 `hyperhub approve` 中输入新值。
+- 保留对象 UUID、ID 和引用，不删除并重建凭证，不添加无关字段。旧版本若实际以 `JSON patch does not change the configuration` 拒绝 Secret 更新，记录版本，升级后重提原 Patch；不要预先要求用户自行进入配置编辑器。
 - 如果修改被规则引用的 ID（例如 `/gateway/protections/0/id`），必须在同一 Patch 中同步更新所有 `protection`/引用字段，并使用 UUID `test` 保护每个修改对象。CLI 会在拆分请求无法独立校验时自动合并为一个原子审批请求；`request_count: 1` 表示该原子请求，不要把它拆成多个 Patch。
+
+仅重设已有 SSH 密码时，先从 `show` 找到实际凭证及账号索引，再提交例如以下 Patch。示例 UUID 和索引必须替换为当前对象；业务密码由人在审批中输入，Agent 不需要知道旧值或新值。
+
+```json
+[
+  {"op":"test","path":"/gateway/credentials/1/uuid","value":"33333333-3333-4333-8333-333333333333"},
+  {"op":"replace","path":"/gateway/credentials/1/accounts/0/passwords/0/value","value":"${APPROVE:ssh-password}"}
+]
+```
+
+其他现有 Secret 使用相同流程，替换对应字段路径即可；若原 Secret 是环境变量或受保护文件引用，先确认用户要修改引用还是改为审批输入的内联值，不把业务凭证密码与管理员主密码混淆。
 
 ## 环境变量
 

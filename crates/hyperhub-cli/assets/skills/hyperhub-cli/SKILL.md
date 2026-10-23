@@ -41,7 +41,7 @@ description: Use for HyperHub CLI configuration and runtime operations, includin
 | 查看配置 | `hyperhub show`，按 ID、UUID、引用和脱敏值做语义摘要 | `read_only_report` |
 | 查看运行态 | `status --json`；异常时补 `doctor` 和相关 `logs` | `read_only_report` 或诊断结论 |
 | 新增/修改/删除配置 | `show` + 配置参考相关章节，生成最小 RFC 6902 Patch，提交 `config patch` | `proposal_submitted` |
-| 修改 Secret | 使用 `${APPROVE:name}`；先读“Secret、脱敏值与 UUID”和参考中的同名章节 | Proposal，或明确 Secret-only CLI 限制 |
+| 修改 Secret | 使用 `${APPROVE:name}`，以 UUID 保护现有对象并提交 `config patch`；由人在审批时输入 | `proposal_submitted` |
 | 配置智能防护 | 参考“智能防护 Profile”“路由与智能防护绑定”“沙盒与智能防护”，确认 observe/enforce 与失败动作 | Proposal + 审批后 Provider/引用验证 |
 | 配置 SSH 审计 | 同时核对 SSH 凭证、SSH 审计 Profile、路由绑定与 transcript 语义 | Proposal + 审批后结构化事件验证 |
 | 启停 Serve | `start`、`stop`、`restart`、`status --json`；冷启动和重启使用 API Key | 实际运行态 |
@@ -195,28 +195,23 @@ hyperhub doctor
 - CLI 自动读取当前 Home 的 API Key，不接受 API Key 文件参数。多实例通过 `HYPERHUB_HOME` 选择，所有命令保持同一 Home；Key 缺失、无效或运行封套过期时按错误提示处理，不绕过认证。
 - 已有旧配置没有运行封套时，执行一次 `hyperhub start --admin-password-file /path/to/admin-password` 完成迁移；之后常规启动只用 API Key。
 - 不把 Secret 写入回复、命令参数、日志或普通临时文件。
-- 新 Secret 使用 `{"value":"${APPROVE:meaningful-name}"}`，由人工在 `approve` 中填写。
+- 新增或更新现有 Secret 都使用 `{"value":"${APPROVE:meaningful-name}"}`，由人工在 `approve` 中填写。
 - 不使用 `export --plain` 获取真实值。
 
-### `<redacted>` 不是可修改的真实值
+### 更新已有 Secret
 
 `hyperhub show` 把已有 inline Secret 显示为 `<redacted>`。Agent不知道原值，也不能用 `<redacted>` 做相等性、复制或恢复判断。
 
-仅把现有 `<redacted>` Secret 替换为 `${APPROVE:name}` 时，`config patch` 可能返回：
+用户要求重设密码、轮换 Token、替换私钥或更新其他现有 Secret 时，创建审批是 Agent 的工作，不需要用户另行要求“创建审批”：
 
-```text
-JSON patch does not change the configuration
-```
+1. 从 `show` 确认目标对象、账号和 Secret 字段路径，用原 UUID 的 `test` 保护对象。
+2. 仅将目标 Secret 的 `value` 替换为 `${APPROVE:meaningful-name}`，提交 `config patch`；保留 UUID、ID、账号和引用，不删除并重建凭证，也不添加无关字段。
+3. 即使脱敏配置前后都显示 `<redacted>`，显式的 Secret 更新也应生成审批。审批展示字段更新意图，真实新值由人在 `hyperhub approve` 中输入。
+4. 报告 `proposal_submitted` 和实际请求结果，提示用户运行 `hyperhub approve`。不要把创建审批推回给用户；不要声称密码已经改变。
 
-这是 Agent Patch 流程的明确限制：脱敏前后没有可展示的配置差异。遇到该错误时：
+该流程适用于当前 Schema 的所有 Secret 字段，包括 SSH 密码和私钥、HTTP 凭证、代理认证、Provider API Key 和敏感环境变量，路径以 `show` 和配置参考为准。管理员主密码属于配置加密设置，不是这些业务 Secret 的轮换接口。
 
-1. 返回 `cli_limitation` 并报告 CLI 原因；
-2. 不删除并重建凭证；
-3. 不添加无关可见字段来强行制造差异；
-4. 不改变 UUID；
-5. 建议用户在真实终端运行 `hyperhub config` 修改现有 Secret；若用户明确要求删除重建，先说明引用与 UUID 会变化，再取得明确授权。
-
-如果同一原子 Patch 中本来就包含用户要求的可见字段变化，可以同时携带 Secret 审批占位符，但不得为了绕过限制制造无关变化。
+若当前 CLI 实际返回 `JSON patch does not change the configuration`，记录版本并报告旧版本兼容性限制，建议升级后重新提交同一最小 Patch。不要预先判定请求不受支持，不猜测新密码，不通过删除重建、修改 UUID 或无关字段绕过限制。只有用户选择直接编辑配置时，才引导其使用 `hyperhub config`。
 
 ## SSH 审计的精确语义
 
@@ -299,7 +294,7 @@ hyperhub run -- program args...
 | CLI 结果 | Agent 行为 |
 | --- | --- |
 | `approval_pending` | 报告已有 Proposal，停止提交不同 Patch |
-| `JSON patch does not change the configuration` | 返回 `cli_limitation`；不删除重建、不改变 UUID |
+| `JSON patch does not change the configuration` | 真正同值的普通字段无需审批；显式 Secret 更新遇此错误时记录 CLI 版本，升级后重提原 Patch，不删除重建或制造无关变化 |
 | Schema/validation error | 报告具体字段；根据 Skill 参考修正一次确定性错误，语义不明确则询问 |
 | Provider/网络错误 | 查看脱敏日志与 doctor；不猜 Secret、不重复盲试 |
 | SSH 测试失败 | 报告退出码与本次日志；不自动关闭主机校验或改凭证 |

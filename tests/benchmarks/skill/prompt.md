@@ -38,9 +38,13 @@ The JSON object must also contain:
 - `ssh_audit_semantics`: explain whether structured SSH command events remain when
   `ssh_transcript=false`, and that those events require both an SSH audit Profile and an SSH
   credential on the route so HyperHub can decrypt the session.
-- `secret_rotation_policy`: explain how to respond if replacing only an existing `<redacted>`
-  password is rejected as "does not change the configuration". Do not propose deleting and
-  recreating the credential or changing its UUID without explicit user authorization.
+- `secret_rotation_patch`: a separate RFC 6902 patch for the independent request "Reset the
+  deploy password in stable-ssh". Keep the credential UUID, account and references. Use the
+  fixture before applying the main `patch`; do not combine this request with other changes.
+- `secret_rotation_policy`: explain what the Agent submits for that request and what the human
+  must do next. Explain how to handle a CLI version that actually rejects this request as
+  "does not change the configuration". Do not delete and recreate the credential, change its
+  UUID, or add an unrelated field to make a visible difference.
 - `ssh_test`: an object with `prerequisites`, `command`, and `failure_action`. The command must run
   SSH through `hyperhub run ... -- ssh ...`; it must not disable host-key checking. Testing may
   happen only after human approval is confirmed and Serve is running.
