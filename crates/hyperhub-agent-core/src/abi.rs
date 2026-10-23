@@ -64,13 +64,14 @@ pub extern "C" fn hh_agent_abi_version() -> u32 {
 #[no_mangle]
 pub extern "C" fn hh_agent_initialize_from_env() -> i32 {
     ffi_result(|| {
+        let deadline = crate::control::StartupDeadline::new();
         state()
             .lock()
             .map_err(|_| HH_ERR_INVALID)?
-            .initialize_from_env()?;
+            .initialize_from_env(&deadline)?;
         #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
         {
-            crate::control::initialize_engine_control()?;
+            crate::control::initialize_engine_control(deadline)?;
             crate::subscribe_sandbox();
         }
         Ok(HH_OK)

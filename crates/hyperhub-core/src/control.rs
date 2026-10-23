@@ -188,6 +188,44 @@ impl ControlService {
         self
     }
 
+    pub fn monitor_restored_sessions(
+        &self,
+        snapshot: &crate::session::DurableSessionState,
+    ) -> io::Result<()> {
+        for record in &snapshot.sessions {
+            for member in &record.members {
+                if !self
+                    .sessions
+                    .authenticate_member(&record.session_id, &record.token, member.pid)
+                {
+                    continue;
+                }
+                if let Err(error) = monitor_new_session_member_at_birth(
+                    &self.sessions,
+                    &self.engine_hosts,
+                    &record.session_id,
+                    &record.token,
+                    member.pid,
+                    &member.executable,
+                    Some(member.start_time),
+                ) {
+                    // A process can exit between snapshot validation and opening
+                    // its monitor. Losing that member is a normal restart race.
+                    if crate::session::process_start_time(member.pid) != Some(member.start_time)
+                        || crate::engine_hosts::EngineHosts::process_is_gone(
+                            member.pid,
+                            member.start_time,
+                        )
+                    {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn with_engine_upgrades(
         mut self,
         directory: &std::path::Path,
@@ -269,10 +307,30 @@ impl ControlService {
             return false;
         };
         self.sessions.engine_manager_start(session, token, pid) == Some(start)
-            && self
+            && (self
                 .engine_hosts
                 .known_ptrace(session, pid, start, root_pid)
                 .is_some()
+                || self
+                    .restored_ptrace_binding(session, token, pid, start, root_pid)
+                    .is_some())
+    }
+
+    fn restored_ptrace_binding(
+        &self,
+        session: &str,
+        token: &str,
+        pid: u32,
+        start: u64,
+        root: u32,
+    ) -> Option<crate::session::DurablePtraceRoot> {
+        self.sessions
+            .has_traced_member(session, token, pid)
+            .then(|| {
+                self.sessions
+                    .ptrace_root_binding(session, token, pid, start, root)
+            })
+            .flatten()
     }
 
     fn socks_address(&self, runtime: &RuntimeSnapshot) -> String {
@@ -488,12 +546,14 @@ impl ControlService {
                         || (cfg!(target_os = "linux")
                             && process_ancestors(root_pid).contains(&pid)));
                 let known_tracer = peer_pid == Some(pid)
-                    && crate::session::process_start_time(pid)
-                        .and_then(|start| {
-                            self.engine_hosts
-                                .known_ptrace(&session_id, pid, start, root_pid)
-                        })
-                        .is_some()
+                    && crate::session::process_start_time(pid).is_some_and(|start| {
+                        self.engine_hosts
+                            .known_ptrace(&session_id, pid, start, root_pid)
+                            .is_some()
+                            || self
+                                .restored_ptrace_binding(&session_id, &token, pid, start, root_pid)
+                                .is_some()
+                    })
                     && self.sessions.authenticate_control(&session_id, &token);
                 if !(peer_matches
                     && self
@@ -1069,10 +1129,6 @@ impl ControlService {
                     rule_id: process_rule_id,
                     decision_source: process_decision_source,
                 };
-                let refreshing = peer_pid == Some(child_pid)
-                    && self
-                        .sessions
-                        .authenticate_member(&session_id, &token, child_pid);
                 let manager = peer_pid.and_then(|peer| {
                     self.sessions
                         .engine_manager_start(&session_id, &token, peer)
@@ -1087,6 +1143,24 @@ impl ControlService {
                         })
                         .map(|start| (peer, start))
                 });
+                // A ptrace manager observes exec before the tracee can report
+                // its new image. Its authenticated refresh must preserve the
+                // existing member incarnation and original OS birth.
+                let same_birth = self
+                    .sessions
+                    .member_birth_matches(&session_id, &token, child_pid);
+                let parent_refresh = peer_pid == Some(parent_pid)
+                    && same_birth
+                    && self
+                        .sessions
+                        .authenticate_member(&session_id, &token, parent_pid)
+                    && validate_child_process(parent_pid, child_pid, &executable).is_ok();
+                let refreshing = (peer_pid == Some(child_pid)
+                    || (manager.is_some() && same_birth)
+                    || parent_refresh)
+                    && self
+                        .sessions
+                        .authenticate_member(&session_id, &token, child_pid);
                 let valid_process = if refreshing || manager.is_some() {
                     validate_process_path(child_pid, &executable)
                 } else {
@@ -2027,18 +2101,25 @@ impl ControlService {
                 })
                 .flatten()
         });
+        let restored = peer_pid.zip(host_start_time).and_then(|(pid, start)| {
+            (backend == Backend::LinuxPtrace)
+                .then(|| self.restored_ptrace_binding(&session_id, &token, pid, start, root_pid))
+                .flatten()
+        });
         let initial = peer_pid.is_some_and(|pid| match backend {
             Backend::LinuxGum | Backend::WindowsGum => pid == root_pid,
             Backend::LinuxPtrace => process_ancestors(root_pid).contains(&pid),
         }) && self
             .sessions
             .authenticate_member(&session_id, &token, root_pid);
-        let recovered = known.is_some() && self.sessions.authenticate_control(&session_id, &token);
+        let recovered = (known.is_some() || restored.is_some())
+            && self.sessions.authenticate_control(&session_id, &token);
         let authenticated = platform_matches && host_start_time.is_some() && (initial || recovered);
         let instance = self
             .sessions
             .member_instance(&session_id, &token, root_pid)
-            .or_else(|| recovered.then(|| known.as_ref().unwrap().member_instance));
+            .or_else(|| known.as_ref().map(|host| host.member_instance))
+            .or_else(|| restored.as_ref().map(|binding| binding.member_instance));
         if !authenticated || instance.is_none() {
             return write_frame(
                 &mut stream,
@@ -2060,6 +2141,26 @@ impl ControlService {
                 io::ErrorKind::PermissionDenied,
                 "engine manager session expired",
             ));
+        }
+        if backend == Backend::LinuxPtrace && initial {
+            if let Some(root_start_time) = crate::session::process_start_time(root_pid) {
+                if !self.sessions.remember_ptrace_root(
+                    &session_id,
+                    &token,
+                    peer_pid.unwrap(),
+                    host_start_time.unwrap(),
+                    crate::session::DurablePtraceRoot {
+                        root_pid,
+                        root_start_time,
+                        member_instance: instance.unwrap(),
+                    },
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "cannot retain authenticated ptrace root identity",
+                    ));
+                }
+            }
         }
         // exec preserves PID and process birth, but closes the previous image's
         // control socket. Wait for that connection to actually leave instead of
@@ -2087,8 +2188,14 @@ impl ControlService {
                 peer_pid.unwrap(),
                 root_pid,
                 instance.unwrap(),
-                crate::session::process_start_time(root_pid)
-                    .or_else(|| known.as_ref().and_then(|host| host.root_start_time)),
+                if initial {
+                    crate::session::process_start_time(root_pid)
+                } else {
+                    known
+                        .as_ref()
+                        .and_then(|host| host.root_start_time)
+                        .or_else(|| restored.as_ref().map(|binding| binding.root_start_time))
+                },
                 host_start_time,
                 snapshot.clone(),
             ) {
@@ -2105,7 +2212,15 @@ impl ControlService {
                 Err(error) => return Err(error),
             }
         };
-        for reporter in process_ancestors(root_pid) {
+        let original_root_is_current = known
+            .as_ref()
+            .and_then(|host| host.root_start_time)
+            .or_else(|| restored.as_ref().map(|binding| binding.root_start_time))
+            .is_none_or(|birth| crate::session::process_start_time(root_pid) == Some(birth));
+        for reporter in process_ancestors(root_pid)
+            .into_iter()
+            .filter(|_| initial || original_root_is_current)
+        {
             if let Some(start) = crate::session::process_start_time(reporter) {
                 self.engine_hosts
                     .authorize_exit_reporter(&registration.id, reporter, start)?;
@@ -2316,9 +2431,26 @@ fn monitor_new_session_member(
     pid: u32,
     executable: &str,
 ) -> io::Result<()> {
-    if let Some(start) = crate::session::process_start_time(pid) {
-        engine_hosts.note_member_birth(session_id, pid, start)?;
-    }
+    monitor_new_session_member_at_birth(
+        sessions,
+        engine_hosts,
+        session_id,
+        token,
+        pid,
+        executable,
+        None,
+    )
+}
+
+fn monitor_new_session_member_at_birth(
+    sessions: &SessionRegistry,
+    engine_hosts: &crate::engine_hosts::EngineHosts,
+    session_id: &str,
+    token: &str,
+    pid: u32,
+    executable: &str,
+    expected_birth: Option<u64>,
+) -> io::Result<()> {
     let instance = sessions
         .member_instance(session_id, token, pid)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "session member disappeared"))?;
@@ -2329,6 +2461,22 @@ fn monitor_new_session_member(
             return Err(error);
         }
     };
+    let birth = process_handle_birth(handle);
+    if expected_birth.is_some_and(|expected| birth != Some(expected)) {
+        close_process_handle(handle);
+        sessions.member_exited(session_id, pid, instance);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "restored session member process identity changed",
+        ));
+    }
+    if let Some(start) = birth {
+        if let Err(error) = engine_hosts.note_member_birth(session_id, pid, start) {
+            close_process_handle(handle);
+            sessions.member_exited(session_id, pid, instance);
+            return Err(error);
+        }
+    }
     if let Err(error) = monitor_session_member(
         handle,
         session_id.to_owned(),
@@ -2343,6 +2491,62 @@ fn monitor_new_session_member(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn process_handle_birth(handle: usize) -> Option<u64> {
+    Some(unsafe { &*(handle as *const LinuxProcessHandle) }.start_time)
+}
+
+#[cfg(windows)]
+fn process_handle_birth(handle: usize) -> Option<u64> {
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+    unsafe {
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut ended = creation;
+        let mut kernel = creation;
+        let mut user = creation;
+        (GetProcessTimes(
+            handle as _,
+            &mut creation,
+            &mut ended,
+            &mut kernel,
+            &mut user,
+        ) != 0)
+            .then_some(
+                (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime),
+            )
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn process_handle_birth(_handle: usize) -> Option<u64> {
+    None
+}
+
+fn claim_process_monitor(
+    handle: usize,
+    session_id: &str,
+    pid: u32,
+    instance: u64,
+    sessions: &SessionRegistry,
+) -> io::Result<bool> {
+    if sessions
+        .recorded_member_birth(session_id, pid, instance)
+        .is_some_and(|birth| birth != 0 && process_handle_birth(handle) != Some(birth))
+    {
+        close_process_handle(handle);
+        sessions.member_exited(session_id, pid, instance);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "session member process identity changed",
+        ));
+    }
+    if !sessions.claim_member_monitor(session_id, pid, instance) {
+        close_process_handle(handle);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 #[cfg(windows)]
 fn monitor_session_member(
     handle: usize,
@@ -2352,6 +2556,9 @@ fn monitor_session_member(
     sessions: SessionRegistry,
     engine_hosts: crate::engine_hosts::EngineHosts,
 ) -> io::Result<()> {
+    if !claim_process_monitor(handle, &session_id, pid, instance, &sessions)? {
+        return Ok(());
+    }
     let result = std::thread::Builder::new()
         .name(format!("hyperhub-session-{session_id}-{pid}"))
         .spawn(move || {
@@ -2504,6 +2711,9 @@ fn monitor_session_member(
     sessions: SessionRegistry,
     _engine_hosts: crate::engine_hosts::EngineHosts,
 ) -> io::Result<()> {
+    if !claim_process_monitor(handle, &session_id, pid, instance, &sessions)? {
+        return Ok(());
+    }
     let handle = unsafe { Box::from_raw(handle as *mut LinuxProcessHandle) };
     std::thread::Builder::new()
         .name(format!("hyperhub-session-{session_id}-{pid}"))
@@ -2622,7 +2832,7 @@ fn process_ancestors(client_pid: u32) -> Vec<u32> {
 
 // Kernel ptrace ownership remains authoritative after a target is reparented.
 // TracerPid can name a thread; authenticate its TGID against the OS control peer.
-fn process_traced_by(child: u32, manager: u32) -> bool {
+pub(crate) fn process_traced_by(child: u32, manager: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
         fn field(pid: u32, key: &str) -> Option<u32> {
@@ -2692,7 +2902,7 @@ fn validate_process_path(pid: u32, executable: &str) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn process_path(pid: u32) -> io::Result<std::path::PathBuf> {
+pub(crate) fn process_path(pid: u32) -> io::Result<std::path::PathBuf> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -2713,7 +2923,7 @@ fn process_path(pid: u32) -> io::Result<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn process_path(pid: u32) -> io::Result<std::path::PathBuf> {
+pub(crate) fn process_path(pid: u32) -> io::Result<std::path::PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe"))
 }
 
@@ -2726,7 +2936,7 @@ fn process_path(_pid: u32) -> io::Result<std::path::PathBuf> {
 }
 
 #[cfg(windows)]
-fn same_executable(left: &std::path::Path, right: &std::path::Path) -> bool {
+pub(crate) fn same_executable(left: &std::path::Path, right: &std::path::Path) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_owned());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_owned());
     left.to_string_lossy()
@@ -2735,7 +2945,7 @@ fn same_executable(left: &std::path::Path, right: &std::path::Path) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn same_executable(left: &std::path::Path, right: &std::path::Path) -> bool {
+pub(crate) fn same_executable(left: &std::path::Path, right: &std::path::Path) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_owned());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_owned());
     left == right
@@ -3059,6 +3269,37 @@ mod tests {
         assert!(linux_process_start_time(pid).unwrap() > 0);
         assert_eq!(process_path(pid).unwrap(), executable);
         close_process_handle(handle);
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn restored_member_monitor_rejects_a_different_process_birth() {
+        let pid = std::process::id();
+        let executable = std::env::current_exe().unwrap().display().to_string();
+        let birth = crate::session::process_start_time(pid).unwrap();
+        let handle = open_validated_root_process(pid, &executable).unwrap();
+        assert_eq!(process_handle_birth(handle), Some(birth));
+        close_process_handle(handle);
+        let sessions = SessionRegistry::default();
+        let challenge = sessions
+            .begin_auth("restored-monitor".into(), executable.clone(), [9; 32])
+            .unwrap();
+        let proof = crate::session::session_proof(&[0; 32], &challenge).unwrap();
+        let record = sessions
+            .finish_auth(&challenge.challenge_id, &proof, Duration::from_secs(10))
+            .unwrap();
+        assert!(sessions.activate("restored-monitor", &record.token, pid));
+        assert!(monitor_new_session_member_at_birth(
+            &sessions,
+            &Default::default(),
+            "restored-monitor",
+            &record.token,
+            pid,
+            &executable,
+            Some(birth + 1)
+        )
+        .is_err());
+        assert!(!sessions.authenticate_control("restored-monitor", &record.token));
     }
 
     #[cfg(windows)]

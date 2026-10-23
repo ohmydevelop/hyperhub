@@ -101,8 +101,9 @@ pub(in crate::windows_gum) fn rebuild_after_msys_fork(lease_id: &str) -> Result<
         return Err(crate::HH_ERR_PROTOCOL);
     }
     let generation = RUNTIME_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let deadline = crate::control::StartupDeadline::new();
     let mut rebuilt = crate::runtime::AgentRuntime::default();
-    if let Err(error) = rebuilt.initialize_after_fork() {
+    if let Err(error) = rebuilt.initialize_after_fork(&deadline) {
         crate::report_child_injection_failure(
             current_pid,
             current_pid,
@@ -114,7 +115,7 @@ pub(in crate::windows_gum) fn rebuild_after_msys_fork(lease_id: &str) -> Result<
     }
     crate::runtime::replace_state_after_fork(rebuilt);
     crate::engine_call::initialize_thread_slots()?;
-    crate::control::initialize_engine_control()?;
+    crate::control::initialize_engine_control(deadline)?;
     if rebuild_builtin_plugins_after_fork().is_err() {
         crate::report_child_injection_failure(
             current_pid,

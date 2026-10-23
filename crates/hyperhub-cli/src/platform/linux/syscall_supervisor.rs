@@ -250,10 +250,7 @@ where
         return Err("HyperHub SOCKS password exceeds RFC 1929 limits".into());
     }
 
-    let control = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|error| format!("cannot start static supervisor control runtime: {error}"))?;
+    let control = super::engine_control::control_runtime()?;
     let child = spawn_traced(target, argv0, args, environment)?;
     let initial_status = wait_for(child)?;
     if !libc::WIFSTOPPED(initial_status) || libc::WSTOPSIG(initial_status) != libc::SIGTRAP {
@@ -707,6 +704,7 @@ impl Supervisor {
                 self.thread_groups.insert(tid, process_pid);
                 self.detach_file_table(tid);
                 self.reconcile_descriptors(tid, self.descriptor_table(tid));
+                self.refresh_exec_member(process_pid)?;
             }
             _ => {}
         }
@@ -2199,13 +2197,27 @@ impl Supervisor {
         }
 
         for (parent, child) in chain.into_iter().rev() {
-            let executable = std::fs::read_link(format!("/proc/{child}/exe"))
-                .map_err(|error| format!("cannot resolve static child {child}: {error}"))?
-                .to_string_lossy()
-                .into_owned();
-            let response = self
-                .control
-                .block_on(control_request(
+            self.register_member(parent, child, "static-supervisor", Duration::from_secs(30))
+                .map_err(|error| format!("cannot register static child {child}: {error}"))?;
+            self.members.insert(child);
+        }
+        Ok(process_pid)
+    }
+
+    fn register_member(
+        &self,
+        parent: libc::pid_t,
+        child: libc::pid_t,
+        source: &str,
+        timeout: Duration,
+    ) -> std::io::Result<()> {
+        let executable = std::fs::read_link(format!("/proc/{child}/exe"))?
+            .to_string_lossy()
+            .into_owned();
+        let response = self.control.block_on(async {
+            tokio::time::timeout(
+                timeout,
+                control_request(
                     &self.endpoint,
                     &ControlRequest::RegisterChild {
                         session_id: self.session_id.clone(),
@@ -2215,16 +2227,75 @@ impl Supervisor {
                         executable,
                         process_policy_version: 0,
                         process_rule_id: None,
-                        process_decision_source: "static-supervisor".into(),
+                        process_decision_source: source.into(),
                     },
-                ))
-                .map_err(|error| format!("cannot register static child {child}: {error}"))?;
-            if !matches!(response, ControlResponse::Ok) {
-                return Err(format!("serve rejected static child {child}"));
-            }
-            self.members.insert(child);
+                ),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "static process registration timed out",
+                )
+            })?
+        })?;
+        if matches!(response, ControlResponse::Ok) {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Serve rejected static process registration",
+            ))
         }
-        Ok(process_pid)
+    }
+
+    fn refresh_exec_member(&self, process: libc::pid_t) -> Result<(), String> {
+        // Successful exec keeps PID and birth, but changes the executable used
+        // for authenticated restart recovery. Refresh before this image runs.
+        if !self
+            .process_starts
+            .get(&process)
+            .is_some_and(|birth| *birth != 0 && process_birth(process) == Some(*birth))
+        {
+            return Err(format!(
+                "static exec process identity changed for {process}"
+            ));
+        }
+        let parent = self
+            .parents
+            .get(&process)
+            .copied()
+            .or_else(|| process_parent(process))
+            .ok_or_else(|| format!("cannot identify exec parent for {process}"))?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.register_member(
+                parent,
+                process,
+                "static-supervisor-exec",
+                deadline.saturating_duration_since(Instant::now()),
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if Instant::now() < deadline
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound
+                                | std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::Interrupted
+                        ) =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => {
+                    return Err(format!("cannot refresh static exec {process}: {error}"));
+                }
+            }
+        }
     }
 
     fn record_hooks(&mut self, number: i64) {

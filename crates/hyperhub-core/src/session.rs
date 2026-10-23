@@ -31,6 +31,8 @@ pub struct SessionRecord {
     pub lifecycle: SessionLifecycle,
     pending_expires_at: Option<Instant>,
     members: HashMap<u32, String>,
+    member_births: HashMap<u32, u64>,
+    member_monitors: HashMap<u32, u64>,
     member_instances: HashMap<u32, u64>,
     process_policies: HashMap<u32, ProcessHookMetadata>,
     agent_heartbeats: HashMap<u32, AgentHeartbeat>,
@@ -84,7 +86,7 @@ struct SessionState {
     sessions: HashMap<String, SessionRecord>,
     // An authenticated ptrace manager owns the whole tree, including descendants
     // that have not made their first control request when the original root exits.
-    engine_managers: HashMap<String, HashMap<u32, u64>>,
+    engine_managers: HashMap<String, HashMap<u32, DurableEngineManager>>,
     challenges: HashMap<String, ChallengeRecord>,
     password_authorized: bool,
     failed_attempts: u8,
@@ -135,8 +137,25 @@ pub struct DurableSessionRecord {
     pub root_start_time: u64,
     pub executable: String,
     pub members: Vec<DurableSessionMember>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_managers: Vec<DurableEngineManager>,
     pub fake_by_name: Vec<DurableFakeAddress>,
     pub next_fake_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurableEngineManager {
+    pub pid: u32,
+    pub start_time: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ptrace_root: Option<DurablePtraceRoot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurablePtraceRoot {
+    pub root_pid: u32,
+    pub root_start_time: u64,
+    pub member_instance: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -526,10 +545,14 @@ impl SessionRegistry {
         let mut state = self.0.lock().ok()?;
         cleanup(&mut state, Instant::now());
         state.sessions.values().find_map(|record| {
-            (record.lifecycle == SessionLifecycle::RootProcess)
-                .then(|| record.members.get(&pid))
-                .flatten()
-                .cloned()
+            (record.lifecycle == SessionLifecycle::RootProcess
+                && record
+                    .member_births
+                    .get(&pid)
+                    .is_none_or(|birth| *birth == 0 || process_start_time(pid) == Some(*birth)))
+            .then(|| record.members.get(&pid))
+            .flatten()
+            .cloned()
         })
     }
 
@@ -576,17 +599,30 @@ impl SessionRegistry {
         let record = state.sessions.values_mut().find(|record| {
             record.lifecycle == SessionLifecycle::RootProcess
                 && record.members.contains_key(&authorizing_pid)
+                && record
+                    .member_births
+                    .get(&authorizing_pid)
+                    .is_none_or(|birth| {
+                        *birth == 0 || process_start_time(authorizing_pid) == Some(*birth)
+                    })
         })?;
-        match record.members.get(&child_pid) {
-            Some(existing) if existing != &executable => return None,
-            Some(_) => {}
-            None => {
-                record.members.insert(child_pid, executable);
-                record.member_instances.insert(child_pid, instance);
-                record
-                    .process_policies
-                    .insert(child_pid, ProcessHookMetadata::default());
-            }
+        let birth = process_start_time(child_pid).unwrap_or(0);
+        let same_birth = birth != 0 && record.member_births.get(&child_pid) == Some(&birth);
+        if record
+            .members
+            .get(&child_pid)
+            .is_some_and(|old| old != &executable)
+            && (birth == 0 || same_birth)
+        {
+            return None;
+        }
+        if !same_birth {
+            record.members.insert(child_pid, executable);
+            record.member_births.insert(child_pid, birth);
+            record.member_instances.insert(child_pid, instance);
+            record
+                .process_policies
+                .insert(child_pid, ProcessHookMetadata::default());
         }
         Some(record.clone())
     }
@@ -628,6 +664,9 @@ impl SessionRegistry {
         }
         record.root_pid = root_pid;
         record.members.insert(root_pid, record.executable.clone());
+        record
+            .member_births
+            .insert(root_pid, process_start_time(root_pid).unwrap_or(0));
         record.member_instances.insert(root_pid, instance);
         record.process_policies.insert(root_pid, policy);
         record.lifecycle = SessionLifecycle::RootProcess;
@@ -679,20 +718,24 @@ impl SessionRegistry {
         {
             return false;
         }
-        match record.members.get(&child_pid) {
-            Some(existing) if existing != &executable => false,
-            Some(_) => {
-                record.member_instances.insert(child_pid, instance);
-                record.process_policies.insert(child_pid, policy);
-                true
-            }
-            None => {
-                record.members.insert(child_pid, executable);
-                record.member_instances.insert(child_pid, instance);
-                record.process_policies.insert(child_pid, policy);
-                true
-            }
+        let birth = process_start_time(child_pid).unwrap_or(0);
+        let same_birth = birth != 0 && record.member_births.get(&child_pid) == Some(&birth);
+        let new_birth = birth != 0 && !same_birth;
+        if record
+            .members
+            .get(&child_pid)
+            .is_some_and(|old| old != &executable)
+            && !new_birth
+        {
+            return false;
         }
+        record.members.insert(child_pid, executable);
+        if !same_birth {
+            record.member_births.insert(child_pid, birth);
+            record.member_instances.insert(child_pid, instance);
+        }
+        record.process_policies.insert(child_pid, policy);
+        true
     }
 
     pub fn begin_fork_lease(
@@ -763,6 +806,9 @@ impl SessionRegistry {
         }
         lease.candidate_pid = Some(child_pid);
         record.members.insert(child_pid, executable);
+        record
+            .member_births
+            .insert(child_pid, process_start_time(child_pid).unwrap_or(0));
         record.member_instances.insert(child_pid, instance);
         record.process_policies.insert(
             child_pid,
@@ -943,6 +989,8 @@ impl SessionRegistry {
                 return false;
             }
             record.members.remove(&pid);
+            record.member_births.remove(&pid);
+            record.member_monitors.remove(&pid);
             record.member_instances.remove(&pid);
             record.process_policies.remove(&pid);
             record.agent_heartbeats.remove(&pid);
@@ -972,18 +1020,30 @@ impl SessionRegistry {
         {
             return false;
         }
-        state
-            .engine_managers
-            .entry(session_id.into())
-            .or_default()
-            .insert(pid, start);
+        let managers = state.engine_managers.entry(session_id.into()).or_default();
+        if managers
+            .get(&pid)
+            .is_none_or(|manager| manager.start_time != start)
+        {
+            managers.insert(
+                pid,
+                DurableEngineManager {
+                    pid,
+                    start_time: start,
+                    ptrace_root: None,
+                },
+            );
+        }
         true
     }
 
     pub(crate) fn release_engine_manager(&self, session_id: &str, pid: u32, start: u64) {
         if let Ok(mut state) = self.0.lock() {
             if let Some(managers) = state.engine_managers.get_mut(session_id) {
-                if managers.get(&pid) == Some(&start) {
+                if managers
+                    .get(&pid)
+                    .is_some_and(|manager| manager.start_time == start)
+                {
                     managers.remove(&pid);
                 }
             }
@@ -1003,7 +1063,127 @@ impl SessionRegistry {
         if !constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
             return None;
         }
-        state.engine_managers.get(session_id)?.get(&pid).copied()
+        state
+            .engine_managers
+            .get(session_id)?
+            .get(&pid)
+            .map(|manager| manager.start_time)
+    }
+
+    pub(crate) fn remember_ptrace_root(
+        &self,
+        session_id: &str,
+        token: &str,
+        pid: u32,
+        start: u64,
+        binding: DurablePtraceRoot,
+    ) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        let Some(record) = state.sessions.get(session_id) else {
+            return false;
+        };
+        if !constant_time_eq(record.token.as_bytes(), token.as_bytes())
+            || record.member_instances.get(&binding.root_pid) != Some(&binding.member_instance)
+            || record.member_births.get(&binding.root_pid) != Some(&binding.root_start_time)
+            || process_start_time(binding.root_pid) != Some(binding.root_start_time)
+            || binding.root_start_time == 0
+        {
+            return false;
+        }
+        let Some(manager) = state
+            .engine_managers
+            .get_mut(session_id)
+            .and_then(|m| m.get_mut(&pid))
+        else {
+            return false;
+        };
+        if manager.start_time != start || process_start_time(pid) != Some(start) {
+            return false;
+        }
+        manager.ptrace_root = Some(binding);
+        true
+    }
+
+    pub(crate) fn ptrace_root_binding(
+        &self,
+        session_id: &str,
+        token: &str,
+        pid: u32,
+        start: u64,
+        root_pid: u32,
+    ) -> Option<DurablePtraceRoot> {
+        let mut state = self.0.lock().ok()?;
+        cleanup(&mut state, Instant::now());
+        let record = state.sessions.get(session_id)?;
+        if !constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
+            return None;
+        }
+        let manager = state.engine_managers.get(session_id)?.get(&pid)?;
+        let binding = manager.ptrace_root.as_ref()?;
+        (manager.start_time == start
+            && process_start_time(pid) == Some(start)
+            && binding.root_pid == root_pid
+            && binding.root_start_time != 0
+            && binding.member_instance != 0)
+            .then(|| binding.clone())
+    }
+
+    pub(crate) fn has_traced_member(&self, session_id: &str, token: &str, manager: u32) -> bool {
+        let Ok(state) = self.0.lock() else {
+            return false;
+        };
+        state.sessions.get(session_id).is_some_and(|record| {
+            constant_time_eq(record.token.as_bytes(), token.as_bytes())
+                && record.members.keys().any(|pid| {
+                    record.member_births.get(pid).is_some_and(|birth| {
+                        *birth != 0 && process_start_time(*pid) == Some(*birth)
+                    }) && crate::control::process_traced_by(*pid, manager)
+                })
+        })
+    }
+
+    pub(crate) fn member_birth_matches(&self, session_id: &str, token: &str, pid: u32) -> bool {
+        let Ok(state) = self.0.lock() else {
+            return false;
+        };
+        state.sessions.get(session_id).is_some_and(|record| {
+            constant_time_eq(record.token.as_bytes(), token.as_bytes())
+                && record
+                    .member_births
+                    .get(&pid)
+                    .is_some_and(|birth| *birth != 0 && process_start_time(pid) == Some(*birth))
+        })
+    }
+
+    pub(crate) fn claim_member_monitor(&self, session_id: &str, pid: u32, instance: u64) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        let Some(record) = state.sessions.get_mut(session_id) else {
+            return false;
+        };
+        if record.member_instances.get(&pid) != Some(&instance)
+            || record.member_monitors.get(&pid) == Some(&instance)
+        {
+            return false;
+        }
+        record.member_monitors.insert(pid, instance);
+        true
+    }
+
+    pub(crate) fn recorded_member_birth(
+        &self,
+        session_id: &str,
+        pid: u32,
+        instance: u64,
+    ) -> Option<u64> {
+        let state = self.0.lock().ok()?;
+        let record = state.sessions.get(session_id)?;
+        (record.member_instances.get(&pid) == Some(&instance))
+            .then(|| record.member_births.get(&pid).copied())
+            .flatten()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1025,7 +1205,8 @@ impl SessionRegistry {
             .engine_managers
             .get(session_id)
             .and_then(|m| m.get(&manager))
-            != Some(&start)
+            .map(|manager| manager.start_time)
+            != Some(start)
         {
             return false;
         }
@@ -1035,15 +1216,24 @@ impl SessionRegistry {
         };
         if record.lifecycle != SessionLifecycle::RootProcess
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
-            || record
-                .members
-                .get(&child)
-                .is_some_and(|old| old != &executable)
+        {
+            return false;
+        }
+        let birth = process_start_time(child).unwrap_or(0);
+        let same_birth = birth != 0 && record.member_births.get(&child) == Some(&birth);
+        if record
+            .members
+            .get(&child)
+            .is_some_and(|old| old != &executable)
+            && (birth == 0 || same_birth)
         {
             return false;
         }
         record.members.insert(child, executable);
-        record.member_instances.insert(child, instance);
+        if !same_birth {
+            record.member_births.insert(child, birth);
+            record.member_instances.insert(child, instance);
+        }
         record.process_policies.insert(child, policy);
         true
     }
@@ -1066,6 +1256,13 @@ impl SessionRegistry {
         if record.lifecycle != SessionLifecycle::RootProcess
             || !record.members.contains_key(&pid)
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
+        {
+            return false;
+        }
+        if record
+            .member_births
+            .get(&pid)
+            .is_some_and(|birth| *birth != 0 && process_start_time(pid) != Some(*birth))
         {
             return false;
         }
@@ -1295,7 +1492,11 @@ impl SessionRegistry {
                 session_id: record.session_id.clone(),
                 token: record.token.clone(),
                 root_pid: record.root_pid,
-                root_start_time: process_start_time(record.root_pid).unwrap_or(0),
+                root_start_time: record
+                    .member_births
+                    .get(&record.root_pid)
+                    .copied()
+                    .unwrap_or(0),
                 executable: record.executable.clone(),
                 members: record
                     .members
@@ -1303,8 +1504,15 @@ impl SessionRegistry {
                     .map(|(pid, executable)| DurableSessionMember {
                         pid: *pid,
                         executable: executable.clone(),
-                        start_time: process_start_time(*pid).unwrap_or(0),
+                        start_time: record.member_births.get(pid).copied().unwrap_or(0),
                     })
+                    .collect(),
+                engine_managers: state
+                    .engine_managers
+                    .get(&record.session_id)
+                    .into_iter()
+                    .flat_map(|managers| managers.iter())
+                    .map(|(_, manager)| manager.clone())
                     .collect(),
                 fake_by_name: record
                     .fake_by_name
@@ -1340,25 +1548,37 @@ impl SessionRegistry {
         let mut restored = 0usize;
         let mut discarded = 0usize;
         for durable in snapshot.sessions {
-            if durable.root_pid == 0
-                || !process_identity_matches(
-                    durable.root_pid,
-                    &durable.executable,
-                    durable.root_start_time,
-                )
-            {
+            if durable.root_pid == 0 {
                 discarded += 1;
                 continue;
             }
             let mut members = HashMap::new();
+            let mut member_births = HashMap::new();
             let mut member_instances = HashMap::new();
             for member in durable.members {
                 if process_identity_matches(member.pid, &member.executable, member.start_time) {
                     members.insert(member.pid, member.executable);
+                    member_births.insert(member.pid, member.start_time);
                     member_instances.insert(member.pid, next_member_instance(&mut state));
                 }
             }
-            if !members.contains_key(&durable.root_pid) {
+            let managers = durable
+                .engine_managers
+                .into_iter()
+                .filter(|manager| {
+                    manager.start_time != 0
+                        && process_start_time(manager.pid) == Some(manager.start_time)
+                        && !crate::engine_hosts::EngineHosts::process_is_gone(
+                            manager.pid,
+                            manager.start_time,
+                        )
+                })
+                .map(|manager| (manager.pid, manager))
+                .collect::<HashMap<_, _>>();
+            // The original launcher may have exited or exec'd while managed
+            // descendants remain alive. Each member has its own OS identity;
+            // historical root metadata must not revoke the surviving tree.
+            if members.is_empty() && managers.is_empty() {
                 discarded += 1;
                 continue;
             }
@@ -1367,6 +1587,11 @@ impl SessionRegistry {
             for fake in durable.fake_by_name {
                 fake_by_name.insert((fake.hostname.clone(), fake.family), fake.address);
                 name_by_fake.insert(fake.address, fake.hostname);
+            }
+            if !managers.is_empty() {
+                state
+                    .engine_managers
+                    .insert(durable.session_id.clone(), managers);
             }
             state.sessions.insert(
                 durable.session_id.clone(),
@@ -1378,6 +1603,8 @@ impl SessionRegistry {
                     lifecycle: SessionLifecycle::RootProcess,
                     pending_expires_at: None,
                     members,
+                    member_births,
+                    member_monitors: HashMap::new(),
                     member_instances,
                     process_policies: HashMap::new(),
                     agent_heartbeats: HashMap::new(),
@@ -1522,28 +1749,19 @@ pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
 }
 
 fn process_identity_matches(pid: u32, executable: &str, start_time: u64) -> bool {
-    if pid == 0 || executable.is_empty() {
+    if pid == 0 || executable.is_empty() || start_time == 0 {
         return false;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        let actual = std::fs::read_link(format!("/proc/{pid}/exe"))
-            .ok()
-            .map(|path| path.to_string_lossy().into_owned());
-        let expected = std::fs::canonicalize(executable)
-            .unwrap_or_else(|_| std::path::PathBuf::from(executable))
-            .to_string_lossy()
-            .into_owned();
-        let actual = actual.map(|path| {
-            std::fs::canonicalize(path)
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
-        return actual.as_deref() == Some(expected.as_str())
-            && (start_time == 0 || process_start_time(pid) == Some(start_time));
+        return process_start_time(pid) == Some(start_time)
+            && !crate::engine_hosts::EngineHosts::process_is_gone(pid, start_time)
+            && crate::control::process_path(pid).is_ok_and(|actual| {
+                crate::control::same_executable(&actual, std::path::Path::new(executable))
+            })
+            && process_start_time(pid) == Some(start_time);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (pid, executable, start_time);
         false
@@ -1564,6 +1782,8 @@ fn pending_session(
         lifecycle: SessionLifecycle::Pending,
         pending_expires_at: Some(now + pending_ttl),
         members: HashMap::new(),
+        member_births: HashMap::new(),
+        member_monitors: HashMap::new(),
         member_instances: HashMap::new(),
         process_policies: HashMap::new(),
         agent_heartbeats: HashMap::new(),
@@ -1584,8 +1804,9 @@ fn next_member_instance(state: &mut SessionState) -> u64 {
 fn cleanup(state: &mut SessionState, now: Instant) {
     state.challenges.retain(|_, value| value.expires_at > now);
     state.engine_managers.retain(|session, managers| {
-        managers
-            .retain(|pid, start| !crate::engine_hosts::EngineHosts::process_is_gone(*pid, *start));
+        managers.retain(|pid, manager| {
+            !crate::engine_hosts::EngineHosts::process_is_gone(*pid, manager.start_time)
+        });
         state.sessions.contains_key(session) && !managers.is_empty()
     });
     for record in state.sessions.values_mut() {
@@ -2066,6 +2287,345 @@ mod tests {
         (registry, record)
     }
 
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_live_member() -> DurableSessionState {
+        let pid = std::process::id();
+        let executable = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let start_time = process_start_time(pid).unwrap();
+        DurableSessionState {
+            schema_version: 1,
+            saved_at_ms: 10,
+            expires_at_ms: 100,
+            sessions: vec![DurableSessionRecord {
+                session_id: "restart-member".into(),
+                token: "restart-token".into(),
+                root_pid: pid,
+                root_start_time: start_time,
+                executable: executable.clone(),
+                members: vec![DurableSessionMember {
+                    pid,
+                    executable,
+                    start_time,
+                }],
+                engine_managers: Vec::new(),
+                fake_by_name: vec![DurableFakeAddress {
+                    hostname: "restart.example".into(),
+                    family: 4,
+                    address: "198.18.0.1".parse().unwrap(),
+                }],
+                next_fake_id: 2,
+            }],
+        }
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_restore_retains_live_child_after_original_root_exits() {
+        let mut snapshot = durable_live_member();
+        snapshot.sessions[0].root_pid = u32::MAX;
+        snapshot.sessions[0].root_start_time = 1;
+        let registry = SessionRegistry::default();
+        assert_eq!(registry.restore_durable_state(snapshot, 20), (1, 0));
+        assert!(registry.authenticate_member(
+            "restart-member",
+            "restart-token",
+            std::process::id()
+        ));
+        assert_eq!(
+            registry.restore_fake("restart-member", "198.18.0.1".parse().unwrap()),
+            Some("restart.example".into())
+        );
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_restore_uses_current_member_executable_after_root_exec() {
+        let mut snapshot = durable_live_member();
+        snapshot.sessions[0].executable = "the-original-launcher-before-exec".into();
+        let registry = SessionRegistry::default();
+        assert_eq!(registry.restore_durable_state(snapshot, 20), (1, 0));
+        assert!(registry.authenticate_member(
+            "restart-member",
+            "restart-token",
+            std::process::id()
+        ));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_restore_rejects_missing_or_reused_member_birth() {
+        for invalid_birth in [0, process_start_time(std::process::id()).unwrap() + 1] {
+            let mut snapshot = durable_live_member();
+            snapshot.sessions[0].members[0].start_time = invalid_birth;
+            let registry = SessionRegistry::default();
+            assert_eq!(registry.restore_durable_state(snapshot, 20), (0, 1));
+            assert!(!registry.authenticate_control("restart-member", "restart-token"));
+        }
+    }
+
+    #[test]
+    fn durable_snapshot_member_helper() {
+        if std::env::var_os("HYPERHUB_DURABLE_MEMBER_HELPER").is_some() {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_snapshot_keeps_authorized_birth_after_member_exit() {
+        let executable = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(&executable)
+            .args(["--exact", "session::tests::durable_snapshot_member_helper"])
+            .env("HYPERHUB_DURABLE_MEMBER_HELPER", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let birth = process_start_time(pid).unwrap();
+        let registry = SessionRegistry::default();
+        let challenge = registry
+            .begin_auth(
+                "exited-member".into(),
+                executable.display().to_string(),
+                [9; 32],
+            )
+            .unwrap();
+        let proof = session_proof(&[0; 32], &challenge).unwrap();
+        let record = registry
+            .finish_auth(&challenge.challenge_id, &proof, Duration::from_secs(10))
+            .unwrap();
+        assert!(registry.activate("exited-member", &record.token, pid));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // Model the period after OS exit but before the monitor removes this
+        // membership. Snapshotting must not capture a successor's OS identity.
+        let snapshot = registry.durable_snapshot(10, 90);
+        assert_eq!(snapshot.sessions[0].members[0].start_time, birth);
+        let restored = SessionRegistry::default();
+        assert_eq!(restored.restore_durable_state(snapshot, 20), (0, 1));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_snapshot_cannot_replace_a_stale_authorized_birth() {
+        let pid = std::process::id();
+        let birth = process_start_time(pid).unwrap();
+        let registry = SessionRegistry::default();
+        assert_eq!(
+            registry.restore_durable_state(durable_live_member(), 20),
+            (1, 0)
+        );
+        registry
+            .0
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut("restart-member")
+            .unwrap()
+            .member_births
+            .insert(pid, birth + 1);
+        // The process currently has the same PID and executable but a different
+        // birth from the recorded authorization. Do not replace the old birth.
+        let snapshot = registry.durable_snapshot(30, 90);
+        assert_eq!(snapshot.sessions[0].members[0].start_time, birth + 1);
+        assert_eq!(
+            SessionRegistry::default().restore_durable_state(snapshot, 40),
+            (0, 1)
+        );
+        assert!(!registry.refresh_member_with_policy(
+            "restart-member",
+            "restart-token",
+            pid,
+            std::env::current_exe().unwrap().display().to_string(),
+            ProcessHookMetadata::default()
+        ));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_manager_only_session_expires_when_the_last_manager_exits() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::tests::durable_snapshot_member_helper"])
+            .env("HYPERHUB_DURABLE_MEMBER_HELPER", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let manager = child.id();
+        let birth = process_start_time(manager).unwrap();
+        let (registry, record) = authenticated_registry();
+        assert!(registry.retain_engine_manager("s", &record.token, manager, birth));
+        let instance = registry.member_instance("s", &record.token, 7).unwrap();
+        assert!(registry.member_exited("s", 7, instance));
+        let snapshot = registry.durable_snapshot(10, 90);
+        let restored = SessionRegistry::default();
+        assert_eq!(restored.restore_durable_state(snapshot, 20), (1, 0));
+        assert!(restored.authenticate_control("s", &record.token));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!restored.authenticate_control("s", &record.token));
+        assert!(restored.snapshot().is_empty());
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_restore_retains_only_original_live_engine_manager() {
+        let (registry, record) = authenticated_registry();
+        let manager = std::process::id();
+        let birth = process_start_time(manager).unwrap();
+        assert!(registry.retain_engine_manager("s", &record.token, manager, birth));
+        let root = registry.member_instance("s", &record.token, 7).unwrap();
+        assert!(registry.member_exited("s", 7, root));
+        let snapshot = registry.durable_snapshot(10, 90);
+        let restored = SessionRegistry::default();
+        assert_eq!(restored.restore_durable_state(snapshot, 20), (1, 0));
+        assert_eq!(
+            restored.engine_manager_start("s", &record.token, manager),
+            Some(birth)
+        );
+        assert_eq!(
+            restored.engine_manager_start("s", "wrong-token", manager),
+            None
+        );
+        assert!(restored.register_engine_managed_child(
+            "s",
+            &record.token,
+            manager,
+            birth,
+            manager,
+            std::env::current_exe().unwrap().display().to_string(),
+            ProcessHookMetadata::default()
+        ));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_restore_rejects_missing_reused_or_gone_engine_manager() {
+        let birth = process_start_time(std::process::id()).unwrap();
+        for (pid, start_time) in [
+            (std::process::id(), 0),
+            (std::process::id(), birth + 1),
+            (u32::MAX, 1),
+        ] {
+            let mut snapshot = durable_live_member();
+            snapshot.sessions[0].members.clear();
+            snapshot.sessions[0].engine_managers = vec![DurableEngineManager {
+                pid,
+                start_time,
+                ptrace_root: None,
+            }];
+            let registry = SessionRegistry::default();
+            assert_eq!(registry.restore_durable_state(snapshot, 20), (0, 1));
+            assert!(!registry.authenticate_control("restart-member", "restart-token"));
+        }
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_ptrace_binding_preserves_exact_original_root_and_manager() {
+        let pid = std::process::id();
+        let birth = process_start_time(pid).unwrap();
+        let registry = SessionRegistry::default();
+        assert_eq!(
+            registry.restore_durable_state(durable_live_member(), 20),
+            (1, 0)
+        );
+        let instance = registry
+            .member_instance("restart-member", "restart-token", pid)
+            .unwrap();
+        assert!(registry.retain_engine_manager("restart-member", "restart-token", pid, birth));
+        let binding = DurablePtraceRoot {
+            root_pid: pid,
+            root_start_time: birth,
+            member_instance: instance,
+        };
+        assert!(registry.remember_ptrace_root(
+            "restart-member",
+            "restart-token",
+            pid,
+            birth,
+            binding.clone()
+        ));
+        let snapshot = registry.durable_snapshot(30, 90);
+        let restored = SessionRegistry::default();
+        assert_eq!(restored.restore_durable_state(snapshot, 40), (1, 0));
+        let saved = restored
+            .ptrace_root_binding("restart-member", "restart-token", pid, birth, pid)
+            .unwrap();
+        assert_eq!(saved.root_start_time, birth);
+        assert_eq!(saved.member_instance, instance);
+        assert!(restored
+            .ptrace_root_binding("restart-member", "bad-token", pid, birth, pid)
+            .is_none());
+        assert!(restored
+            .ptrace_root_binding("restart-member", "restart-token", pid, birth + 1, pid)
+            .is_none());
+        assert!(restored
+            .ptrace_root_binding("restart-member", "restart-token", pid + 1, birth, pid)
+            .is_none());
+        assert!(restored
+            .ptrace_root_binding("restart-member", "restart-token", pid, birth, pid + 1)
+            .is_none());
+        // A stored identity is not proof of current kernel tracing ownership.
+        assert!(!restored.has_traced_member("restart-member", "restart-token", pid));
+        registry
+            .0
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut("restart-member")
+            .unwrap()
+            .member_births
+            .insert(pid, birth + 1);
+        assert!(!registry.remember_ptrace_root(
+            "restart-member",
+            "restart-token",
+            pid,
+            birth,
+            binding.clone()
+        ));
+        assert!(registry.member_exited("restart-member", pid, instance));
+        assert!(!registry.remember_ptrace_root(
+            "restart-member",
+            "restart-token",
+            pid,
+            birth,
+            binding
+        ));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn durable_restore_accepts_legacy_snapshot_and_surviving_member_can_fork() {
+        let mut value = serde_json::to_value(durable_live_member()).unwrap();
+        value["sessions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("engine_managers");
+        let snapshot = serde_json::from_value(value).unwrap();
+        let registry = SessionRegistry::default();
+        assert_eq!(registry.restore_durable_state(snapshot, 20), (1, 0));
+        assert!(registry.register_child(
+            "restart-member",
+            "restart-token",
+            std::process::id(),
+            u32::MAX,
+            "authorized-child".into()
+        ));
+        assert!(registry.authenticate_member("restart-member", "restart-token", u32::MAX));
+        assert!(registry.refresh_member_with_policy(
+            "restart-member",
+            "restart-token",
+            std::process::id(),
+            "another-executable-after-exec".into(),
+            ProcessHookMetadata::default()
+        ));
+    }
+
     #[test]
     fn challenge_is_single_use_and_session_lives_until_revoke() {
         let (registry, record) = authenticated_registry();
@@ -2159,7 +2719,9 @@ mod tests {
             .engine_managers
             .get_mut("s")
             .unwrap()
-            .insert(pid, start + 1);
+            .get_mut(&pid)
+            .unwrap()
+            .start_time = start + 1;
         let root = registry.member_instance("s", &record.token, 7).unwrap();
         assert!(registry.member_exited("s", 7, root));
         assert!(!registry.authenticate_control("s", &record.token));
@@ -2213,6 +2775,18 @@ mod tests {
         let (registry, record) = authenticated_registry();
         assert!(registry.register_child("s", &record.token, 7, 8, "child".into()));
         let stale_instance = registry.member_instance("s", &record.token, 8).unwrap();
+        // Explicitly model a different OS incarnation. A repeated registration
+        // of the same nonzero birth is now intentionally idempotent.
+        let recorded = process_start_time(8).unwrap_or(0).saturating_add(1);
+        registry
+            .0
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut("s")
+            .unwrap()
+            .member_births
+            .insert(8, recorded);
         assert!(registry.register_child("s", &record.token, 7, 8, "child".into()));
         let current_instance = registry.member_instance("s", &record.token, 8).unwrap();
         assert_ne!(stale_instance, current_instance);
@@ -2226,6 +2800,8 @@ mod tests {
     fn registered_member_can_refresh_after_exec() {
         let (registry, record) = authenticated_registry();
         assert!(registry.register_child("s", &record.token, 7, 8, "child-old".into()));
+        let instance = registry.member_instance("s", &record.token, 8).unwrap();
+        let birth = registry.0.lock().unwrap().sessions["s"].member_births[&8];
         assert!(registry.refresh_member_with_policy(
             "s",
             &record.token,
@@ -2240,6 +2816,14 @@ mod tests {
         ));
         let child = registry.authenticate("hh2:s:8:1", &record.token).unwrap();
         assert_eq!(child.executable, "child-new");
+        assert_eq!(
+            registry.member_instance("s", &record.token, 8),
+            Some(instance)
+        );
+        assert_eq!(
+            registry.0.lock().unwrap().sessions["s"].member_births[&8],
+            birth
+        );
         assert!(registry.note_agent("s", &record.token, 8, 0));
         let snapshot = registry.snapshot();
         let child = snapshot[0]
@@ -2249,6 +2833,64 @@ mod tests {
             .unwrap();
         assert_eq!(child.process_policy_version, 12);
         assert_eq!(child.process_rule_id.as_deref(), Some("exec-rule"));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn duplicate_parent_registration_and_child_bootstrap_keep_one_monitor_identity() {
+        let (registry, record) = authenticated_registry();
+        let pid = std::process::id();
+        let executable = std::env::current_exe().unwrap().display().to_string();
+        assert!(registry.register_child("s", &record.token, 7, pid, executable.clone()));
+        let instance = registry.member_instance("s", &record.token, pid).unwrap();
+        assert!(registry.claim_member_monitor("s", pid, instance));
+        assert!(registry.register_child("s", &record.token, 7, pid, executable.clone()));
+        assert!(registry
+            .inherit_member(7, pid, executable.clone())
+            .is_some());
+        assert_eq!(
+            registry.member_instance("s", &record.token, pid),
+            Some(instance)
+        );
+        assert!(!registry.claim_member_monitor("s", pid, instance));
+        assert!(registry.member_exited("s", pid, instance));
+        assert!(registry.register_child("s", &record.token, 7, pid, executable));
+        let replacement = registry.member_instance("s", &record.token, pid).unwrap();
+        assert_ne!(replacement, instance);
+        assert!(registry.claim_member_monitor("s", pid, replacement));
+        assert!(!registry.member_exited("s", pid, instance));
+        assert!(!registry.claim_member_monitor("s", pid, replacement));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn authenticated_manager_registers_a_new_birth_as_a_new_member_instance() {
+        let (registry, record) = authenticated_registry();
+        let pid = std::process::id();
+        let birth = process_start_time(pid).unwrap();
+        let executable = std::env::current_exe().unwrap().display().to_string();
+        assert!(registry.register_child("s", &record.token, 7, pid, executable.clone()));
+        let old = registry.member_instance("s", &record.token, pid).unwrap();
+        assert!(registry.retain_engine_manager("s", &record.token, pid, birth));
+        {
+            let mut state = registry.0.lock().unwrap();
+            let member = state.sessions.get_mut("s").unwrap();
+            member.member_births.insert(pid, birth + 1);
+            member.members.insert(pid, "previous-executable".into());
+        }
+        assert!(!registry.member_birth_matches("s", &record.token, pid));
+        assert!(registry.register_engine_managed_child(
+            "s",
+            &record.token,
+            pid,
+            birth,
+            pid,
+            executable,
+            ProcessHookMetadata::default()
+        ));
+        assert_ne!(registry.member_instance("s", &record.token, pid), Some(old));
+        assert!(registry.member_birth_matches("s", &record.token, pid));
+        assert!(!registry.member_exited("s", pid, old));
     }
 
     #[test]

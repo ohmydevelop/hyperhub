@@ -14,6 +14,16 @@ pub(super) struct EngineControl {
     stop: Arc<AtomicBool>,
     stream: Arc<Mutex<Option<UnixStream>>>,
 }
+
+/// Control connections retry while Serve replaces its local socket. Both the
+/// I/O reactor and the timer driver are needed by those retry paths.
+pub(super) fn control_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("cannot create control runtime: {error}"))
+}
 impl Drop for EngineControl {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -197,6 +207,32 @@ pub(super) fn report_exit(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn control_runtime_retries_an_unavailable_serve_without_panicking() {
+        use hyperhub_core::{control::control_request, session::ControlRequest};
+        use std::os::unix::fs::DirBuilderExt;
+        let root = std::env::temp_dir().join(format!(
+            "hh-control-retry-{}-{:x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let socket = root.join("missing.sock");
+        let error = super::control_runtime()
+            .unwrap()
+            .block_on(control_request(
+                socket.to_str().unwrap(),
+                &ControlRequest::GetStatus,
+            ))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!socket.exists());
+        std::fs::remove_dir(root).unwrap();
+    }
+
     #[test]
     fn business_exit_codes_do_not_hide_signal_or_unknown_termination() {
         for code in 0..=255 {

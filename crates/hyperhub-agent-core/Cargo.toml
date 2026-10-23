@@ -47,5 +47,6 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Kernel",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
+  "Win32_System_Pipes",
   "Win32_System_Threading",
 ] }

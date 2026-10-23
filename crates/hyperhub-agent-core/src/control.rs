@@ -15,6 +15,11 @@ use crate::FirewallAuditEvent;
 #[cfg(all(windows, feature = "gum-agent"))]
 use crate::windows_gum;
 
+#[cfg(any(test, all(any(windows, target_os = "linux"), feature = "gum-agent")))]
+mod reconnect;
+mod startup;
+pub(crate) use startup::StartupDeadline;
+
 pub(crate) trait ControlStream: Read + Write {}
 impl<T: Read + Write> ControlStream for T {}
 
@@ -278,9 +283,11 @@ pub(crate) struct InheritedBootstrap {
 }
 
 #[cfg(all(windows, feature = "gum-agent"))]
-pub(crate) fn bootstrap_child_control() -> Result<InheritedBootstrap, i32> {
+pub(crate) fn bootstrap_child_control(
+    deadline: &StartupDeadline,
+) -> Result<InheritedBootstrap, i32> {
     const DISCOVERY_ENDPOINT: &str = r"\\.\pipe\hyperhub-control";
-    match exchange_control(DISCOVERY_ENDPOINT, &AgentControlRequest::BootstrapChild)? {
+    match deadline.exchange(DISCOVERY_ENDPOINT, &AgentControlRequest::BootstrapChild)? {
         AgentControlResponse::AgentBootstrap {
             socks_address,
             control_endpoint,
@@ -496,9 +503,10 @@ pub(crate) fn fetch_trust_control(
     endpoint: &str,
     session_id: &str,
     token: &str,
+    deadline: &StartupDeadline,
 ) -> Result<TrustBootstrapData, i32> {
     let request = AgentControlRequest::GetTrust { session_id, token };
-    let response = match exchange_control(endpoint, &request) {
+    let response = match deadline.exchange(endpoint, &request) {
         Ok(response) => response,
         Err(error) => {
             debug_bootstrap_failure(&format!(
@@ -697,6 +705,7 @@ pub(crate) fn register_unix_process(
     endpoint: &str,
     session_id: &str,
     token: &str,
+    deadline: &StartupDeadline,
 ) -> Result<(), i32> {
     let executable = std::env::current_exe()
         .map_err(|_| HH_ERR_PROTOCOL)?
@@ -712,7 +721,7 @@ pub(crate) fn register_unix_process(
         process_rule_id: None,
         process_decision_source: "inherited",
     };
-    match exchange_control(endpoint, &request)? {
+    match deadline.exchange(endpoint, &request)? {
         AgentControlResponse::Ok => Ok(()),
         _ => Err(HH_ERR_PROTOCOL),
     }
@@ -724,8 +733,7 @@ pub(crate) fn subscribe_sandbox() {
         .name("hyperhub-sandbox-subscription".into())
         .spawn(|| {
             crate::engine_call::background(|| {
-                let delays = [250u64, 1000, 2000, 5000, 10000, 30000];
-                let mut attempt = 0usize;
+                let mut backoff = reconnect::Backoff::default();
                 loop {
                     let values = crate::state().lock().ok().map(|c| {
                         (
@@ -769,34 +777,31 @@ pub(crate) fn subscribe_sandbox() {
                                 AgentControlResponse::SandboxUpdate {
                                     sandbox: Some(snapshot),
                                     ..
-                                } => crate::apply_sandbox_snapshot(snapshot),
-                                AgentControlResponse::SandboxUpdate { .. } => {}
+                                } => {
+                                    backoff.connected();
+                                    crate::apply_sandbox_snapshot(snapshot)
+                                }
+                                AgentControlResponse::SandboxUpdate { .. } => backoff.connected(),
                                 _ => return Err(HH_ERR_PROTOCOL),
                             }
                         }
                     })();
-                    if result.is_ok() {
-                        attempt = 0
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            delays[attempt.min(delays.len() - 1)],
-                        ));
-                        attempt = attempt.saturating_add(1);
+                    if result.is_err() {
+                        std::thread::sleep(backoff.disconnected());
                     }
                 }
             })
         });
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
-fn subscribe_engine() -> Result<(), i32> {
+fn subscribe_engine(deadline: StartupDeadline) -> Result<(), i32> {
     let (ready_send, ready_recv) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("hyperhub-engine-control".into())
         .spawn(move || {
             crate::engine_call::background(|| {
                 let mut ready_send = Some(ready_send);
-                let delays = [250u64, 1000, 2000, 5000, 10000, 30000];
-                let mut attempt = 0usize;
+                let mut backoff = reconnect::Backoff::default();
                 loop {
                     let values = crate::state().lock().ok().map(|c| {
                         (
@@ -809,39 +814,49 @@ fn subscribe_engine() -> Result<(), i32> {
                     let Some((endpoint, session_id, token, engine)) = values else {
                         return;
                     };
+                    let admission = if ready_send.is_some() {
+                        deadline
+                    } else {
+                        StartupDeadline::new()
+                    };
                     let result = (|| -> Result<(), i32> {
-                        let mut stream = open_control(&endpoint)?;
-                        let nonce = rand::random();
-                        let request = hyperhub_engine::host::Enrollment {
-                            kind: "subscribe_engine_host",
-                            session_id: &session_id,
-                            token: &token,
-                            root_pid: std::process::id(),
-                            #[cfg(target_os = "linux")]
-                            backend: hyperhub_engine::host::Backend::LinuxGum,
-                            #[cfg(windows)]
-                            backend: hyperhub_engine::host::Backend::WindowsGum,
-                            native_base_sha256: hyperhub_engine::NATIVE_BASE_SHA256,
-                            snapshot: hyperhub_engine::host::report(&engine)
-                                .map_err(|_| HH_ERR_PROTOCOL)?,
-                            nonce,
-                        };
-                        hyperhub_engine::host::write_frame(&mut *stream, &request)
+                        let (mut stream, nonce) = admission
+                            .retry(|| {
+                                let mut stream = admission.connect(&endpoint)?;
+                                let nonce = rand::random();
+                                let request = hyperhub_engine::host::Enrollment {
+                                    kind: "subscribe_engine_host",
+                                    session_id: &session_id,
+                                    token: &token,
+                                    root_pid: std::process::id(),
+                                    #[cfg(target_os = "linux")]
+                                    backend: hyperhub_engine::host::Backend::LinuxGum,
+                                    #[cfg(windows)]
+                                    backend: hyperhub_engine::host::Backend::WindowsGum,
+                                    native_base_sha256: hyperhub_engine::NATIVE_BASE_SHA256,
+                                    snapshot: hyperhub_engine::host::report(&engine)
+                                        .map_err(std::io::Error::other)?,
+                                    nonce,
+                                };
+                                hyperhub_engine::host::write_frame(&mut stream, &request)?;
+                                unsafe {
+                                    hyperhub_engine::host::await_enrollment(
+                                        &mut stream,
+                                        &engine,
+                                        &token,
+                                        &nonce,
+                                    )
+                                }?;
+                                stream.clear_deadline()?;
+                                Ok((stream, nonce))
+                            })
                             .map_err(|_| HH_ERR_PROTOCOL)?;
-                        unsafe {
-                            hyperhub_engine::host::await_enrollment(
-                                &mut *stream,
-                                &engine,
-                                &token,
-                                &nonce,
-                            )
-                        }
-                        .map_err(|_| HH_ERR_PROTOCOL)?;
+                        backoff.connected();
                         if let Some(sender) = ready_send.take() {
                             let _ = sender.send(Ok(()));
                         }
                         unsafe {
-                            hyperhub_engine::host::serve(&mut *stream, &engine, &token, &nonce)
+                            hyperhub_engine::host::serve(&mut stream, &engine, &token, &nonce)
                         }
                         .map_err(|_| HH_ERR_PROTOCOL)
                     })();
@@ -849,28 +864,25 @@ fn subscribe_engine() -> Result<(), i32> {
                         let _ = sender.send(result);
                         return;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        delays[attempt.min(delays.len() - 1)],
-                    ));
-                    attempt = attempt.saturating_add(1);
+                    std::thread::sleep(backoff.disconnected());
                 }
             });
         })
         .map_err(|_| HH_ERR_PROTOCOL)?;
     ready_recv
-        .recv_timeout(std::time::Duration::from_secs(30))
+        .recv_timeout(deadline.remaining().map_err(|_| HH_ERR_PROTOCOL)?)
         .map_err(|_| HH_ERR_PROTOCOL)?
 }
 /// Rebased fork Hosts retain their transaction history. Enrollment reconciles
 /// inherited held observations and installs any newer session deployment.
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn reenroll_fork_engine() -> Result<(), i32> {
-    subscribe_engine()
+    subscribe_engine(StartupDeadline::new())
 }
 /// Complete bootstrap and durable Host enrollment before target-ready signaling.
 /// This function must run outside the Agent-state mutex and native loader locks.
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
-pub(crate) fn initialize_engine_control() -> Result<(), i32> {
+pub(crate) fn initialize_engine_control(deadline: StartupDeadline) -> Result<(), i32> {
     crate::engine_call::background(|| {
         let (endpoint, session_id, token, engine) = {
             let core = crate::state().lock().map_err(|_| HH_ERR_PROTOCOL)?;
@@ -884,7 +896,7 @@ pub(crate) fn initialize_engine_control() -> Result<(), i32> {
         let host = engine.snapshot().map_err(|_| HH_ERR_PROTOCOL)?.host;
         let pid = std::process::id();
         let nonce = rand::random();
-        let response = exchange_control(
+        let response = deadline.exchange(
             &endpoint,
             &AgentControlRequest::GetEngineBootstrap {
                 session_id: &session_id,
@@ -911,7 +923,7 @@ pub(crate) fn initialize_engine_control() -> Result<(), i32> {
         }
         unsafe { hyperhub_engine::bootstrap::install(&engine, &bootstrap.selection) }
             .map_err(|_| HH_ERR_PROTOCOL)?;
-        subscribe_engine()
+        subscribe_engine(deadline)
     })
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]

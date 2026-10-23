@@ -63,16 +63,26 @@ impl Default for AgentRuntime {
 }
 
 impl AgentRuntime {
-    pub(crate) fn initialize_from_env(&mut self) -> Result<(), i32> {
-        self.initialize_from_env_inner(true)
+    pub(crate) fn initialize_from_env(
+        &mut self,
+        deadline: &crate::control::StartupDeadline,
+    ) -> Result<(), i32> {
+        self.initialize_from_env_inner(true, deadline)
     }
 
     #[cfg(all(windows, feature = "gum-agent"))]
-    pub(crate) fn initialize_after_fork(&mut self) -> Result<(), i32> {
-        self.initialize_from_env_inner(false)
+    pub(crate) fn initialize_after_fork(
+        &mut self,
+        deadline: &crate::control::StartupDeadline,
+    ) -> Result<(), i32> {
+        self.initialize_from_env_inner(false, deadline)
     }
 
-    fn initialize_from_env_inner(&mut self, _subscribe: bool) -> Result<(), i32> {
+    fn initialize_from_env_inner(
+        &mut self,
+        _subscribe: bool,
+        deadline: &crate::control::StartupDeadline,
+    ) -> Result<(), i32> {
         let inherited = (
             env::var("HYPERHUB_SESSION_ID"),
             env::var("HYPERHUB_SESSION_TOKEN"),
@@ -83,8 +93,9 @@ impl AgentRuntime {
             match inherited {
                 (Ok(session_id), Ok(token), Ok(_proxy), Ok(control_endpoint)) => {
                     #[cfg(all(target_os = "linux", feature = "gum-agent"))]
-                    let _ = crate::register_unix_process(&control_endpoint, &session_id, &token);
-                    let trust = fetch_trust_control(&control_endpoint, &session_id, &token)?;
+                    crate::register_unix_process(&control_endpoint, &session_id, &token, deadline)?;
+                    let trust =
+                        fetch_trust_control(&control_endpoint, &session_id, &token, deadline)?;
                     #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
                     // SAFETY: Agent initialization runs while the target main thread is
                     // suspended, before application code can observe the environment.
@@ -112,7 +123,7 @@ impl AgentRuntime {
                 _ => {
                     #[cfg(all(windows, feature = "gum-agent"))]
                     {
-                        let bootstrap = bootstrap_child_control()?;
+                        let bootstrap = bootstrap_child_control(deadline)?;
                         install_inherited_environment(&bootstrap)?;
                         (
                             bootstrap.session_id,

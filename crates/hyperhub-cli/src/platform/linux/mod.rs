@@ -5,6 +5,7 @@ mod hook_manifest;
 mod launcher;
 mod pty;
 mod syscall_supervisor;
+mod terminal_recovery;
 
 pub use launcher::{
     backend_trust_environment, doctor_target, run_injected, target_backend, validate_target_runtime,

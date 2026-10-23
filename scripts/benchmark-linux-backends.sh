@@ -336,6 +336,24 @@ record_check backend.forward_workers "real worker processes preserve resident id
 record_check backend.release_upgrade "ptrace and Gum joint Engine and worker finalize preserve target streams before verified helper installation"
 (
   cd "$root"
+  for restart_backend in ptrace gum; do
+    restart_test_args=()
+    if [[ $restart_backend == ptrace ]]; then
+      restart_test_args+=(--skip gum_unavailable_serve_never_resumes_an_unenrolled_child)
+    fi
+    HYPERHUB_TEST_RESTART_HYPERHUB="$standalone_hyperhub" \
+      HYPERHUB_TEST_RESTART_BACKEND="$restart_backend" \
+      cargo test -p hyperhub --test serve_restart_live --locked -- --ignored --nocapture --test-threads=1 "${restart_test_args[@]}" \
+      >"$result_dir/serve-restart-$restart_backend.log" 2>&1
+  done
+  HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" \
+    cargo test -p hyperhub --test executor_scope_live --locked -- --ignored --nocapture \
+    >"$result_dir/executor-scope.log" 2>&1
+)
+record_check backend.serve_restart "ptrace and Gum retain live executors through two restarts, root exit, exec and a temporary control outage; a permanently unenrolled Gum child never runs application code"
+record_check sandbox.executor_scope "managed direct reads are denied; delegation to a pre-existing external IPC executor is outside the registered tree"
+(
+  cd "$root"
   cargo run --release -p hyperhub-engine --example native_upgrade_bench --locked -- \
     "$result_dir/native-engine-performance" >"$result_dir/native-engine-performance.log" 2>&1
 )

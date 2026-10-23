@@ -216,6 +216,31 @@ pub fn restart(config: StartConfig) -> Result<i32, String> {
     start(config)
 }
 
+pub(crate) const PROCESS_SCOPE: &str = "registered process trees; not system-wide";
+pub(crate) const EXECUTOR_SCOPE: &str =
+    "existing executors reached through IPC require separate management";
+
+fn protection_scope(registered_processes: Option<usize>) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "registered_process_trees",
+        "system_wide": false,
+        "external_executor_delegation": "not_automatically_managed",
+        "registration_evidence": if registered_processes.is_some() {
+            "current_serve_snapshot"
+        } else {
+            "unavailable"
+        },
+        "registered_processes": registered_processes,
+        "specific_executor_protection": "not_assessed",
+    })
+}
+
+fn print_scope_notice() {
+    println!("scope: {PROCESS_SCOPE}");
+    println!("scope: {EXECUTOR_SCOPE}");
+    println!("registration is not a verdict on a specific executor; check all session members and process identity");
+}
+
 pub fn status(json: bool) -> Result<i32, String> {
     let Some(status) = query_status()? else {
         let home =
@@ -226,6 +251,7 @@ pub fn status(json: bool) -> Result<i32, String> {
                 "state": "stopped",
                 "hyperhub_home": home,
                 "control_endpoint": control_endpoint,
+                "protection_scope": protection_scope(None),
             });
             println!(
                 "{}",
@@ -235,9 +261,15 @@ pub fn status(json: bool) -> Result<i32, String> {
             println!("HyperHub serve is stopped");
             println!("home: {}", home.display());
             println!("control: {control_endpoint}");
+            print_scope_notice();
         }
         return Ok(3);
     };
+    let managed = status
+        .sessions
+        .iter()
+        .map(|session| session.processes.len())
+        .sum::<usize>();
     if json {
         let output = serde_json::json!({
             "state": "running",
@@ -253,6 +285,7 @@ pub fn status(json: bool) -> Result<i32, String> {
             "engine_upgrades": status.engine_upgrades,
             "release_upgrades": status.release_upgrades,
             "forward_workers": status.forward_workers,
+            "protection_scope": protection_scope(Some(managed)),
         });
         println!(
             "{}",
@@ -270,12 +303,8 @@ pub fn status(json: bool) -> Result<i32, String> {
         println!("control: {}", discovery_control_endpoint());
         println!("socks: {}", status.socks_address);
         println!("sessions: {}", status.sessions.len());
-        let managed = status
-            .sessions
-            .iter()
-            .map(|session| session.processes.len())
-            .sum::<usize>();
         println!("managed processes: {managed}");
+        print_scope_notice();
         for session in &status.sessions {
             for process in &session.processes {
                 println!(
@@ -469,6 +498,29 @@ fn configure_background_process(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_does_not_infer_executor_protection_from_registry_availability() {
+        for count in [None, Some(0), Some(3)] {
+            let scope = protection_scope(count);
+            assert_eq!(scope["kind"], "registered_process_trees");
+            assert_eq!(scope["system_wide"], false);
+            assert_eq!(
+                scope["external_executor_delegation"],
+                "not_automatically_managed"
+            );
+            assert_eq!(scope["specific_executor_protection"], "not_assessed");
+            assert_eq!(scope["registered_processes"], serde_json::json!(count));
+            assert_eq!(
+                scope["registration_evidence"],
+                if count.is_some() {
+                    "current_serve_snapshot"
+                } else {
+                    "unavailable"
+                }
+            );
+        }
+    }
 
     #[test]
     fn default_log_is_next_to_the_encrypted_config() {

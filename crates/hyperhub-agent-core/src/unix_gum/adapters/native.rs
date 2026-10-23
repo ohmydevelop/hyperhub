@@ -1585,14 +1585,36 @@ unsafe fn spawn_impl(
         .is_none_or(|(executable, _)| process_hook_enabled(executable));
     let (_values, pointers) =
         inherited_environment(envp as *const *const libc::c_char, should_hook);
-    original(
-        pid,
+    let mut child_pid = 0;
+    // Linux also accepts a null PID output. Obtain a private output in that
+    // case without changing what the caller supplied or receives.
+    let output_pid = if should_hook && pid.is_null() {
+        &mut child_pid
+    } else {
+        pid
+    };
+    let result = original(
+        output_pid,
         path,
         actions,
         attributes,
         argv,
         pointers.as_ptr() as *const *mut libc::c_char,
-    )
+    );
+    let saved_errno = *libc::__errno_location();
+    if result == 0 && should_hook {
+        let child_pid = *output_pid;
+        if super::spawn_admission::await_registration(child_pid).is_err()
+            && std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some()
+        {
+            eprintln!("hyperhub-gum: posix_spawn registration was not acknowledged pid={child_pid}; retaining the original spawn result");
+        }
+    }
+    drop(pointers);
+    drop(_values);
+    drop(_guard);
+    *libc::__errno_location() = saved_errno;
+    result
 }
 pub unsafe extern "C" fn posix_spawn(
     pid: *mut libc::pid_t,

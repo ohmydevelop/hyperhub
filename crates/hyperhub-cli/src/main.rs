@@ -285,6 +285,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     let sessions = SessionRegistry::new(unlocked.session_auth_key, unlocked.descriptor)
         .with_api_key(Zeroizing::new(api_key.as_bytes().to_vec()));
     let mut restored_sessions = None;
+    let mut restored_session_state = None;
     if session_state_path.is_file() {
         match config_store::load_session_state(&session_state_path, session_auth_key.as_slice())
             .and_then(|bytes| {
@@ -294,6 +295,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
                     })
             }) {
             Ok(snapshot) => {
+                restored_session_state = Some(snapshot.clone());
                 restored_sessions =
                     Some(sessions.restore_durable_state(snapshot, unix_timestamp_ms()));
             }
@@ -368,6 +370,11 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         &std::env::current_exe().map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("cannot open release coordinator: {error}"))?;
+    if let Some(snapshot) = restored_session_state {
+        control
+            .monitor_restored_sessions(&snapshot)
+            .map_err(|error| format!("cannot monitor restored session members: {error}"))?;
+    }
     output.line(format!("HyperHub SOCKS5 listening on {}", socks_address))?;
     output.line(format!(
         "HyperHub control endpoint {}",
@@ -1304,6 +1311,9 @@ fn new_session_id() -> String {
 
 fn print_doctor(target: Option<&Path>) -> Result<i32, String> {
     println!("HyperHub capability report");
+    println!("scope={}", lifecycle::PROCESS_SCOPE);
+    println!("scope={}", lifecycle::EXECUTOR_SCOPE);
+    println!("target-check=executable-capability-only; live-process-membership=not-checked");
     println!(
         "platform={} arch={} injector={}",
         std::env::consts::OS,
@@ -1316,9 +1326,12 @@ fn print_doctor(target: Option<&Path>) -> Result<i32, String> {
         "dns=fake-ip-per-session; windows=getaddrinfo,GetAddrInfoW; routing=server-side-domain"
     );
     println!("tcp=all-destinations; self-ingress=exact-bypass; client-proxy=http,socks5");
-    println!(
-        "descendants=createprocess,createprocessinternal,ntcreateuserprocess; recursive=true; brokered=false; protected=false"
-    );
+    #[cfg(windows)]
+    println!("descendants=createprocess,createprocessinternal,ntcreateuserprocess; recursive=true; brokered=false; protected=false");
+    #[cfg(target_os = "linux")]
+    println!("descendants=managed-fork-and-exec; recursive=true; brokered=false; protected=false");
+    #[cfg(not(any(windows, target_os = "linux")))]
+    println!("descendants=unavailable; recursive=false; brokered=false; protected=false");
     println!(
         "trust=server-root,schannel,rustls-ca-environment; file-bundle=bootstrap; sectrust=false; pinning=false"
     );

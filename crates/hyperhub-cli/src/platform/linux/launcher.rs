@@ -263,6 +263,29 @@ pub fn run_injected<F>(
 where
     F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
 {
+    let mut terminal = super::terminal_recovery::TerminalRecovery::capture();
+    let result = run_injected_inner(
+        target, argv0, args, backend, runtime, env, sandbox, activate,
+    );
+    if let Some(terminal) = terminal.as_mut() {
+        terminal.finish(&result);
+    }
+    result
+}
+
+fn run_injected_inner<F>(
+    target: &OsString,
+    argv0: &OsString,
+    args: &[OsString],
+    backend: TargetBackend,
+    runtime: Option<&Path>,
+    env: &[(OsString, OsString)],
+    sandbox: Option<&hyperhub_core::sandbox::SandboxSnapshot>,
+    activate: F,
+) -> Result<i32, String>
+where
+    F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
+{
     let mut environment = merged_environment(env);
     if backend == TargetBackend::PtraceSyscall {
         return super::syscall_supervisor::run(
@@ -834,10 +857,7 @@ fn register_fork_child(
         .map_err(|error| format!("cannot resolve fork child executable: {error}"))?
         .to_string_lossy()
         .into_owned();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|error| format!("cannot create child registration runtime: {error}"))?;
+    let runtime = super::engine_control::control_runtime()?;
     let response = runtime
         .block_on(control_request(
             &credentials.endpoint,
