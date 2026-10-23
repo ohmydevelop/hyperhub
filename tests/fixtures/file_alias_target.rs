@@ -51,7 +51,7 @@ fn create_read_result(path: &Path) -> String {
             os::{fd::FromRawFd, unix::ffi::OsStrExt},
         };
         unsafe extern "C" {
-            fn open(path: *const i8, flags: i32, ...) -> i32;
+            fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
         }
         let path = CString::new(path.as_os_str().as_bytes()).unwrap();
         let descriptor = unsafe { open(path.as_ptr(), 0x40, 0o600u32) };
@@ -393,7 +393,13 @@ fn write_mutation_result(result: io::Result<()>, alias: &Path) -> String {
 fn link_at(root: &Path, source: &str, alias: &str, flags: i32) -> io::Result<()> {
     use std::{ffi::CString, os::fd::AsRawFd};
     unsafe extern "C" {
-        fn linkat(old_dir: i32, old: *const i8, new_dir: i32, new: *const i8, flags: i32) -> i32;
+        fn linkat(
+            old_dir: i32,
+            old: *const std::ffi::c_char,
+            new_dir: i32,
+            new: *const std::ffi::c_char,
+            flags: i32,
+        ) -> i32;
     }
     let directory = fs::File::open(root).unwrap();
     let source = CString::new(source).unwrap();
@@ -418,7 +424,13 @@ fn link_at(root: &Path, source: &str, alias: &str, flags: i32) -> io::Result<()>
 fn link_empty(root: &Path, descriptor: i32) -> io::Result<()> {
     use std::{ffi::CString, os::fd::AsRawFd};
     unsafe extern "C" {
-        fn linkat(old_dir: i32, old: *const i8, new_dir: i32, new: *const i8, flags: i32) -> i32;
+        fn linkat(
+            old_dir: i32,
+            old: *const std::ffi::c_char,
+            new_dir: i32,
+            new: *const std::ffi::c_char,
+            flags: i32,
+        ) -> i32;
     }
     let directory = fs::File::open(root).unwrap();
     let alias = CString::new("empty.alias").unwrap();
@@ -439,18 +451,125 @@ fn link_empty(root: &Path, descriptor: i32) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn exchange(root: &Path) -> io::Result<()> {
+fn exchange(root: &Path, source: &str, destination: &str) -> io::Result<()> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     unsafe extern "C" {
-        fn renameat2(old_dir: i32, old: *const i8, new_dir: i32, new: *const i8, flags: u32)
-            -> i32;
+        fn renameat2(
+            old_dir: i32,
+            old: *const std::ffi::c_char,
+            new_dir: i32,
+            new: *const std::ffi::c_char,
+            flags: u32,
+        ) -> i32;
     }
-    let source = CString::new(root.join("exchange-ordinary.txt").as_os_str().as_bytes()).unwrap();
-    let destination = CString::new(root.join("exchange.key").as_os_str().as_bytes()).unwrap();
+    let source = CString::new(root.join(source).as_os_str().as_bytes()).unwrap();
+    let destination = CString::new(root.join(destination).as_os_str().as_bytes()).unwrap();
     if unsafe { renameat2(-100, source.as_ptr(), -100, destination.as_ptr(), 2) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bytepath_cases(root: &Path) {
+    use std::{
+        ffi::{CString, OsString},
+        os::{
+            fd::AsRawFd,
+            unix::ffi::{OsStrExt, OsStringExt},
+        },
+    };
+    unsafe extern "C" {
+        fn link(old: *const std::ffi::c_char, new: *const std::ffi::c_char) -> i32;
+        fn linkat(
+            od: i32,
+            old: *const std::ffi::c_char,
+            nd: i32,
+            new: *const std::ffi::c_char,
+            flags: i32,
+        ) -> i32;
+        fn rename(old: *const std::ffi::c_char, new: *const std::ffi::c_char) -> i32;
+        fn renameat(
+            od: i32,
+            old: *const std::ffi::c_char,
+            nd: i32,
+            new: *const std::ffi::c_char,
+        ) -> i32;
+        fn renameat2(
+            od: i32,
+            old: *const std::ffi::c_char,
+            nd: i32,
+            new: *const std::ffi::c_char,
+            flags: u32,
+        ) -> i32;
+        fn __errno_location() -> *mut i32;
+    }
+    for route in ["source-deny", "destination-deny", "unknown", "ordinary"] {
+        for operation in ["link", "linkat", "rename", "renameat", "renameat2"] {
+            let directory = root.join("bytepaths").join(route).join(operation);
+            let binary = |name: &[u8]| OsString::from_vec(name.to_vec());
+            let source = directory.join(match route {
+                "source-deny" => OsString::from("auth.key"),
+                "ordinary" => OsString::from("ordinary.data"),
+                _ => binary(b"source-\xff.data"),
+            });
+            let destination = directory.join(match route {
+                "destination-deny" => OsString::from("bytepath-destination.key"),
+                "ordinary" => OsString::from("ordinary.alias"),
+                _ => binary(b"alias-\xff.data"),
+            });
+            let source_c = CString::new(source.as_os_str().as_bytes()).unwrap();
+            let destination_c = CString::new(destination.as_os_str().as_bytes()).unwrap();
+            let old_relative = CString::new(source.file_name().unwrap().as_bytes()).unwrap();
+            let new_relative = CString::new(destination.file_name().unwrap().as_bytes()).unwrap();
+            let parent = fs::File::open(&directory).unwrap();
+            let status = unsafe {
+                *__errno_location() = 12345;
+                let status = match operation {
+                    "link" => link(source_c.as_ptr(), destination_c.as_ptr()),
+                    "linkat" => linkat(
+                        parent.as_raw_fd(),
+                        old_relative.as_ptr(),
+                        parent.as_raw_fd(),
+                        new_relative.as_ptr(),
+                        0,
+                    ),
+                    "rename" => rename(source_c.as_ptr(), destination_c.as_ptr()),
+                    "renameat" => renameat(
+                        parent.as_raw_fd(),
+                        old_relative.as_ptr(),
+                        parent.as_raw_fd(),
+                        new_relative.as_ptr(),
+                    ),
+                    "renameat2" => renameat2(
+                        parent.as_raw_fd(),
+                        old_relative.as_ptr(),
+                        parent.as_raw_fd(),
+                        new_relative.as_ptr(),
+                        0,
+                    ),
+                    _ => unreachable!(),
+                };
+                if status == 0 {
+                    assert_eq!(
+                        *__errno_location(),
+                        12345,
+                        "namespace success changed caller errno"
+                    );
+                }
+                status
+            };
+            let result = if status == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            };
+            emit(
+                &format!("bytepath-{route}-{operation}"),
+                &mutation_result(result, &destination),
+            );
+        }
     }
 }
 
@@ -506,214 +625,238 @@ fn main() {
         break;
     }
 
-    // This observation deliberately comes first. A prior deny must not seed an
-    // identity cache and make an existing alias appear more protected than it is.
-    emit(
-        "preexisting-hardlink-first",
-        &read_result(&root.join("existing.alias")),
-    );
-    emit("direct-read", &read_result(&root.join("auth.key")));
-    emit(
-        "combined-rw-open",
-        &opened_read_result(
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(root.join("auth.key")),
-        ),
-    );
-    emit(
-        "create-read-open",
-        &create_read_result(&root.join("auth.key")),
-    );
-    emit(
-        "allowed-combined-rw-open",
-        &opened_read_result(
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(root.join("ordinary.txt")),
-        ),
-    );
-    emit(
-        "allowed-create-read-open",
-        &create_read_result(&root.join("ordinary.txt")),
-    );
-    #[cfg(windows)]
-    {
-        mappings.run();
+    let bytepath_only = std::env::args_os()
+        .nth(2)
+        .is_some_and(|mode| mode == "bytepath-only");
+    if !bytepath_only {
+        // This observation deliberately comes first. A prior deny must not seed an
+        // identity cache and make an existing alias appear more protected than it is.
         emit(
-            "delete-on-close",
-            &windows_mapping::delete_on_close(&root.join("delete-close.data")),
+            "preexisting-hardlink-first",
+            &read_result(&root.join("existing.alias")),
         );
+        emit("direct-read", &read_result(&root.join("auth.key")));
         emit(
-            "supersede",
-            &windows_mapping::supersede(&root.join("supersede.data")),
-        );
-        emit(
-            "allowed-delete-on-close",
-            &windows_mapping::delete_on_close(&root.join("delete-allowed.data")),
-        );
-        emit(
-            "allowed-supersede",
-            &windows_mapping::supersede(&root.join("supersede-allowed.data")),
-        );
-    }
-    emit(
-        "write-only-direct-read",
-        &read_result(&root.join("write-link.data")),
-    );
-    emit(
-        "write-only-direct-write",
-        &write_result(&root.join("write-link.data")),
-    );
-    emit(
-        "write-only-hardlink",
-        &write_mutation_result(
-            fs::hard_link(
-                root.join("write-link.data"),
-                root.join("write-linked.alias"),
-            ),
-            &root.join("write-linked.alias"),
-        ),
-    );
-    emit(
-        "write-only-rename",
-        &write_mutation_result(
-            fs::rename(
-                root.join("write-rename.data"),
-                root.join("write-renamed.alias"),
-            ),
-            &root.join("write-renamed.alias"),
-        ),
-    );
-    let copy = root.join("copy.alias");
-    emit(
-        "copy",
-        &mutation_result(fs::copy(root.join("auth.key"), &copy).map(|_| ()), &copy),
-    );
-    let renamed = root.join("rename.alias");
-    emit(
-        "rename",
-        &mutation_result(fs::rename(root.join("rename.key"), &renamed), &renamed),
-    );
-    let linked = root.join("managed.alias");
-    emit(
-        "hardlink",
-        &mutation_result(fs::hard_link(root.join("auth.key"), &linked), &linked),
-    );
-    #[cfg(target_os = "linux")]
-    {
-        emit(
-            "exact-directory-alias-hardlink",
-            &mutation_result(
-                fs::hard_link(
-                    root.join("exact-directory.symlink/protected.data"),
-                    root.join("exact-linked.alias"),
-                ),
-                &root.join("exact-linked.alias"),
+            "combined-rw-open",
+            &opened_read_result(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(root.join("auth.key")),
             ),
         );
         emit(
-            "exact-directory-alias-rename",
-            &mutation_result(
-                fs::rename(
-                    root.join("exact-directory.symlink/protected.data"),
-                    root.join("exact-renamed.alias"),
-                ),
-                &root.join("exact-renamed.alias"),
+            "create-read-open",
+            &create_read_result(&root.join("auth.key")),
+        );
+        emit(
+            "allowed-combined-rw-open",
+            &opened_read_result(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(root.join("ordinary.txt")),
             ),
         );
         emit(
-            "rename-exchange",
-            &mutation_result(exchange(&root), &root.join("exchange-ordinary.txt")),
+            "allowed-create-read-open",
+            &create_read_result(&root.join("ordinary.txt")),
         );
-        emit(
-            "linkat-dirfd",
-            &mutation_result(
-                link_at(&root, "auth.key", "dirfd.alias", 0),
-                &root.join("dirfd.alias"),
-            ),
-        );
-        // AT_SYMLINK_FOLLOW tests the source referent rather than its new name.
-        emit(
-            "linkat-follow",
-            &mutation_result(
-                link_at(&root, "source.symlink", "follow.alias", 0x400),
-                &root.join("follow.alias"),
-            ),
-        );
-        emit(
-            "linkat-nofollow",
-            &mutation_result(
-                link_at(&root, "source.symlink", "nofollow.alias", 0),
-                &root.join("nofollow.alias"),
-            ),
-        );
-        emit(
-            "directory-symlink-read",
-            &read_result(&root.join("directory.symlink/../auth.key")),
-        );
-        emit(
-            "directory-symlink-hardlink",
-            &mutation_result(
-                fs::hard_link(
-                    root.join("directory.symlink/../auth.key"),
-                    root.join("directory.alias"),
-                ),
-                &root.join("directory.alias"),
-            ),
-        );
-        let inherited = std::env::var("HH_ALIAS_INHERITED_FD")
-            .unwrap()
-            .parse()
-            .unwrap();
-        emit(
-            "inherited-proc-fd-read",
-            &read_result(&PathBuf::from(format!("/proc/self/fd/{inherited}"))),
-        );
-        let empty = link_empty(&root, inherited);
-        if std::env::var("HH_ALIAS_EMPTY_SUPPORTED").unwrap() == "true" {
+        #[cfg(windows)]
+        {
+            mappings.run();
             emit(
-                "linkat-empty",
-                &mutation_result(empty, &root.join("empty.alias")),
+                "delete-on-close",
+                &windows_mapping::delete_on_close(&root.join("delete-close.data")),
             );
-        } else {
-            assert!(
-                empty.is_err(),
-                "unsupported empty-path operation unexpectedly succeeded"
+            emit(
+                "supersede",
+                &windows_mapping::supersede(&root.join("supersede.data")),
             );
-            emit("linkat-empty", "unsupported-by-unmanaged-preflight");
+            emit(
+                "allowed-delete-on-close",
+                &windows_mapping::delete_on_close(&root.join("delete-allowed.data")),
+            );
+            emit(
+                "allowed-supersede",
+                &windows_mapping::supersede(&root.join("supersede-allowed.data")),
+            );
         }
+        emit(
+            "write-only-direct-read",
+            &read_result(&root.join("write-link.data")),
+        );
+        emit(
+            "write-only-direct-write",
+            &write_result(&root.join("write-link.data")),
+        );
+        emit(
+            "write-only-hardlink",
+            &write_mutation_result(
+                fs::hard_link(
+                    root.join("write-link.data"),
+                    root.join("write-linked.alias"),
+                ),
+                &root.join("write-linked.alias"),
+            ),
+        );
+        emit(
+            "write-only-rename",
+            &write_mutation_result(
+                fs::rename(
+                    root.join("write-rename.data"),
+                    root.join("write-renamed.alias"),
+                ),
+                &root.join("write-renamed.alias"),
+            ),
+        );
+        let copy = root.join("copy.alias");
+        emit(
+            "copy",
+            &mutation_result(fs::copy(root.join("auth.key"), &copy).map(|_| ()), &copy),
+        );
+        let renamed = root.join("rename.alias");
+        emit(
+            "rename",
+            &mutation_result(fs::rename(root.join("rename.key"), &renamed), &renamed),
+        );
+        let linked = root.join("managed.alias");
+        emit(
+            "hardlink",
+            &mutation_result(fs::hard_link(root.join("auth.key"), &linked), &linked),
+        );
+        #[cfg(target_os = "linux")]
+        {
+            emit(
+                "exact-directory-alias-hardlink",
+                &mutation_result(
+                    fs::hard_link(
+                        root.join("exact-directory.symlink/protected.data"),
+                        root.join("exact-linked.alias"),
+                    ),
+                    &root.join("exact-linked.alias"),
+                ),
+            );
+            emit(
+                "exact-directory-alias-rename",
+                &mutation_result(
+                    fs::rename(
+                        root.join("exact-directory.symlink/protected.data"),
+                        root.join("exact-renamed.alias"),
+                    ),
+                    &root.join("exact-renamed.alias"),
+                ),
+            );
+            emit(
+                "rename-exchange",
+                &mutation_result(
+                    exchange(&root, "exchange-ordinary.txt", "exchange.key"),
+                    &root.join("exchange-ordinary.txt"),
+                ),
+            );
+            emit(
+                "rename-exchange-source-create",
+                &mutation_result(
+                    exchange(&root, "exchange-create.key", "exchange-create-ordinary.txt"),
+                    &root.join("exchange-create-ordinary.txt"),
+                ),
+            );
+            emit(
+                "allowed-rename-exchange",
+                &mutation_result(
+                    exchange(&root, "ordinary.txt", "exchange-create-ordinary.txt"),
+                    &root.join("ordinary.txt"),
+                ),
+            );
+            emit(
+                "linkat-dirfd",
+                &mutation_result(
+                    link_at(&root, "auth.key", "dirfd.alias", 0),
+                    &root.join("dirfd.alias"),
+                ),
+            );
+            // AT_SYMLINK_FOLLOW tests the source referent rather than its new name.
+            emit(
+                "linkat-follow",
+                &mutation_result(
+                    link_at(&root, "source.symlink", "follow.alias", 0x400),
+                    &root.join("follow.alias"),
+                ),
+            );
+            emit(
+                "linkat-nofollow",
+                &mutation_result(
+                    link_at(&root, "source.symlink", "nofollow.alias", 0),
+                    &root.join("nofollow.alias"),
+                ),
+            );
+            emit(
+                "directory-symlink-read",
+                &read_result(&root.join("directory.symlink/../auth.key")),
+            );
+            emit(
+                "directory-symlink-hardlink",
+                &mutation_result(
+                    fs::hard_link(
+                        root.join("directory.symlink/../auth.key"),
+                        root.join("directory.alias"),
+                    ),
+                    &root.join("directory.alias"),
+                ),
+            );
+            let inherited = std::env::var("HH_ALIAS_INHERITED_FD")
+                .unwrap()
+                .parse()
+                .unwrap();
+            emit(
+                "inherited-proc-fd-read",
+                &read_result(&PathBuf::from(format!("/proc/self/fd/{inherited}"))),
+            );
+            let empty = link_empty(&root, inherited);
+            if std::env::var("HH_ALIAS_EMPTY_SUPPORTED").unwrap() == "true" {
+                emit(
+                    "linkat-empty",
+                    &mutation_result(empty, &root.join("empty.alias")),
+                );
+            } else {
+                assert!(
+                    empty.is_err(),
+                    "unsupported empty-path operation unexpectedly succeeded"
+                );
+                emit("linkat-empty", "unsupported-by-unmanaged-preflight");
+            }
+        }
+        #[cfg(unix)]
+        emit("symlink-read", &read_result(&root.join("source.symlink")));
+        #[cfg(unix)]
+        emit(
+            "lexical-symlink-read",
+            &read_result(&root.join("lexical.key")),
+        );
+        let allowed = root.join("allowed.alias");
+        emit(
+            "allowed-hardlink",
+            &mutation_result(fs::hard_link(root.join("ordinary.txt"), &allowed), &allowed),
+        );
+        let renamed_allowed = root.join("allowed-rename.alias");
+        emit(
+            "allowed-rename",
+            &mutation_result(
+                fs::rename(root.join("ordinary-rename.txt"), &renamed_allowed),
+                &renamed_allowed,
+            ),
+        );
+        #[cfg(target_os = "linux")]
+        emit(
+            "allowed-linkat",
+            &mutation_result(
+                link_at(&root, "ordinary.txt", "allowed-dirfd.alias", 0),
+                &root.join("allowed-dirfd.alias"),
+            ),
+        );
     }
-    #[cfg(unix)]
-    emit("symlink-read", &read_result(&root.join("source.symlink")));
-    #[cfg(unix)]
-    emit(
-        "lexical-symlink-read",
-        &read_result(&root.join("lexical.key")),
-    );
-    let allowed = root.join("allowed.alias");
-    emit(
-        "allowed-hardlink",
-        &mutation_result(fs::hard_link(root.join("ordinary.txt"), &allowed), &allowed),
-    );
-    let renamed_allowed = root.join("allowed-rename.alias");
-    emit(
-        "allowed-rename",
-        &mutation_result(
-            fs::rename(root.join("ordinary-rename.txt"), &renamed_allowed),
-            &renamed_allowed,
-        ),
-    );
     #[cfg(target_os = "linux")]
-    emit(
-        "allowed-linkat",
-        &mutation_result(
-            link_at(&root, "ordinary.txt", "allowed-dirfd.alias", 0),
-            &root.join("allowed-dirfd.alias"),
-        ),
-    );
+    bytepath_cases(&root);
     println!("DONE");
     io::stdout().flush().unwrap();
     command.clear();

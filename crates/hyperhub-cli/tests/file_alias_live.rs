@@ -205,7 +205,7 @@ fn inherited_path(root: &std::path::Path) -> (std::os::fd::OwnedFd, bool) {
     (descriptor, supported)
 }
 
-fn scenario(backend: &str) {
+fn scenario(backend: &str, phase: &str) {
     let cli = PathBuf::from(
         std::env::var_os("HYPERHUB_TEST_ALIAS_HYPERHUB")
             .or_else(|| std::env::var_os("HYPERHUB_TEST_ENGINE_HYPERHUB"))
@@ -256,6 +256,8 @@ fn scenario(backend: &str) {
         "ordinary-rename.txt",
         "exchange-ordinary.txt",
         "exchange.key",
+        "exchange-create.key",
+        "exchange-create-ordinary.txt",
         "write-link.data",
         "write-rename.data",
     ] {
@@ -294,12 +296,33 @@ fn scenario(backend: &str) {
         .unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        for route in ["source-deny", "destination-deny", "unknown", "ordinary"] {
+            for operation in ["link", "linkat", "rename", "renameat", "renameat2"] {
+                let directory = fixture.root.join("bytepaths").join(route).join(operation);
+                fs::create_dir_all(&directory).unwrap();
+                let name = match route {
+                    "source-deny" => OsString::from("auth.key"),
+                    "ordinary" => OsString::from("ordinary.data"),
+                    _ => OsString::from_vec(b"source-\xff.data".to_vec()),
+                };
+                fs::write(directory.join(name), DUMMY).unwrap();
+            }
+        }
+    }
+
     let mut config = Config::default();
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
     config.listener.socks_listen = reservation.local_addr().unwrap().to_string();
     drop(reservation);
-    config.sandbox.file.enabled = true;
-    config.sandbox.file.error_action = SandboxAction::Deny;
+    config.sandbox.file.enabled = phase != "disabled";
+    config.sandbox.file.error_action = if phase == "allow" {
+        SandboxAction::Pass
+    } else {
+        SandboxAction::Deny
+    };
     config.sandbox.file.rules.push(FileSandboxRule {
         uuid: String::new(),
         id: "deny-dummy-file-alias-read".into(),
@@ -319,6 +342,15 @@ fn scenario(backend: &str) {
     write_only.patterns[0].pattern = r"(?:^|[/\\])write-(?:link|rename)\.data$".into();
     write_only.operations = vec![FileSandboxOperation::Write];
     config.sandbox.file.rules.push(write_only);
+    #[cfg(target_os = "linux")]
+    {
+        let mut destination = config.sandbox.file.rules[0].clone();
+        destination.id = "deny-known-bytepath-destination-create".into();
+        destination.patterns[0].pattern =
+            r"(?:^|/)(?:bytepath-destination|exchange-create)\.key$".into();
+        destination.operations = vec![FileSandboxOperation::Create];
+        config.sandbox.file.rules.push(destination);
+    }
     #[cfg(windows)]
     {
         let mut deletion = config.sandbox.file.rules[0].clone();
@@ -389,6 +421,11 @@ fn scenario(backend: &str) {
         .arg("--")
         .arg(&target)
         .arg(&fixture.root)
+        .arg(if phase == "full" {
+            "full"
+        } else {
+            "bytepath-only"
+        })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(fs::File::create(fixture.root.join("target.stderr")).unwrap());
@@ -479,104 +516,144 @@ fn scenario(backend: &str) {
             .insert(fields[1].to_owned(), fields[2].to_owned())
             .is_none());
     }
-    // Record the gap explicitly: arbitrary filename regex rules do not imply
-    // that all hard links created outside the managed tree have an identity rule.
-    match outcomes["preexisting-hardlink-first"].as_str() {
+    let mut failures = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        let mut bytepaths = BTreeMap::new();
+        for route in ["source-deny", "destination-deny", "unknown", "ordinary"] {
+            for operation in ["link", "linkat", "rename", "renameat", "renameat2"] {
+                let name = format!("bytepath-{route}-{operation}");
+                let expected = if phase == "disabled"
+                    || route == "ordinary"
+                    || (phase == "allow" && route == "unknown")
+                {
+                    "created:readable"
+                } else {
+                    "denied"
+                };
+                let actual = outcomes.get(&name).expect("missing bytepath outcome");
+                bytepaths.insert(name.clone(), actual.clone());
+                if actual != expected {
+                    failures.push(format!("{name}={actual}, expected={expected}"));
+                }
+            }
+        }
+        eprintln!("FILE_ALIAS_BYTEPATH_OUTCOMES backend={backend} phase={phase} {bytepaths:?}");
+        assert_eq!(bytepaths.len(), 20);
+        assert!(
+            failures.is_empty(),
+            "bytepath endpoint failures: {failures:?}"
+        );
+        eprintln!("FILE_ALIAS_BYTEPATH_VERIFIED backend={backend} phase={phase} cases=20");
+        if phase != "full" {
+            assert_eq!(outcomes.len(), 20);
+        }
+    }
+    if phase == "full" {
+        // Record the gap explicitly: arbitrary filename regex rules do not imply
+        // that all hard links created outside the managed tree have an identity rule.
+        match outcomes["preexisting-hardlink-first"].as_str() {
         "readable" => eprintln!("FILE_ALIAS_SCOPE_GAP backend={backend} preexisting-hardlink-first=unprotected property=filename-regex private_root={}", fixture.root.display()),
         "denied" => eprintln!("FILE_ALIAS_SCOPE_PROTECTED backend={backend} preexisting-hardlink-first=denied private_root={}", fixture.root.display()),
         other => panic!("invalid preexisting alias diagnostic: {other}"),
     }
-    let mut expected = vec![
-        "direct-read",
-        "copy",
-        "rename",
-        "hardlink",
-        "write-only-direct-write",
-        "write-only-hardlink",
-        "write-only-rename",
-        "combined-rw-open",
-        "create-read-open",
-    ];
-    #[cfg(windows)]
-    expected.extend([
-        "create-rw-read-deny",
-        "map-rw-read-deny",
-        "map-copy-read-deny",
-        "map-rw-write-deny",
-        "delete-on-close",
-        "supersede",
-    ]);
-    assert_eq!(outcomes["write-only-direct-read"], "readable");
-    #[cfg(target_os = "linux")]
-    {
-        expected.extend([
-            "exact-directory-alias-hardlink",
-            "exact-directory-alias-rename",
-            "rename-exchange",
-            "linkat-dirfd",
-            "linkat-follow",
-            "directory-symlink-read",
-            "directory-symlink-hardlink",
-            "inherited-proc-fd-read",
-        ]);
-        if empty_supported {
-            expected.push("linkat-empty");
-        } else {
-            assert_eq!(
-                outcomes["linkat-empty"],
-                "unsupported-by-unmanaged-preflight"
-            );
-        }
-        assert!(
-            matches!(
-                outcomes["linkat-nofollow"].as_str(),
-                "denied" | "created:denied"
-            ),
-            "nofollow hard-linked symlink exposed content: {}",
-            outcomes["linkat-nofollow"]
-        );
-    }
-    #[cfg(unix)]
-    expected.extend(["symlink-read", "lexical-symlink-read"]);
-    assert_eq!(
-        outcomes.len(),
-        if cfg!(target_os = "linux") { 28 } else { 25 }
-    );
-    let failures: Vec<_> = expected
-        .iter()
-        .filter(|name| outcomes[**name] != "denied")
-        .map(|name| format!("{name}={}", outcomes[*name]))
-        .collect();
-    assert_eq!(outcomes["allowed-hardlink"], "created:readable");
-    assert_eq!(outcomes["allowed-combined-rw-open"], "opened:readable");
-    assert_eq!(outcomes["allowed-create-read-open"], "opened:readable");
-    #[cfg(windows)]
-    {
-        assert_eq!(outcomes["ordinary-map-rw"], "read_write");
-        assert_eq!(outcomes["ordinary-map-copy"], "read_write");
-        assert_eq!(outcomes["allowed-delete-on-close"], "opened:deleted");
-        assert_eq!(outcomes["allowed-supersede"], "opened:replaced");
-        eprintln!("FILE_ALIAS_MAPPING_VERIFIED backend={backend} readonly-deny=rw+copy write-deny=rw ordinary=rw+copy");
-    }
-    assert_eq!(outcomes["allowed-rename"], "created:readable");
-    #[cfg(target_os = "linux")]
-    assert_eq!(outcomes["allowed-linkat"], "created:readable");
-    eprintln!("FILE_ALIAS_OUTCOMES backend={backend} {outcomes:?}");
-    if failures.is_empty() {
+        let mut expected = vec![
+            "direct-read",
+            "copy",
+            "rename",
+            "hardlink",
+            "write-only-direct-write",
+            "write-only-hardlink",
+            "write-only-rename",
+            "combined-rw-open",
+            "create-read-open",
+        ];
         #[cfg(windows)]
-        for name in ["delete-close.data", "supersede.data"] {
-            assert_eq!(
-                fs::read(fixture.root.join(name)).unwrap(),
-                DUMMY,
-                "protected implicit delete changed dummy file"
+        expected.extend([
+            "create-rw-read-deny",
+            "map-rw-read-deny",
+            "map-copy-read-deny",
+            "map-rw-write-deny",
+            "delete-on-close",
+            "supersede",
+        ]);
+        assert_eq!(outcomes["write-only-direct-read"], "readable");
+        #[cfg(target_os = "linux")]
+        {
+            expected.extend([
+                "exact-directory-alias-hardlink",
+                "exact-directory-alias-rename",
+                "rename-exchange",
+                "rename-exchange-source-create",
+                "linkat-dirfd",
+                "linkat-follow",
+                "directory-symlink-read",
+                "directory-symlink-hardlink",
+                "inherited-proc-fd-read",
+            ]);
+            if empty_supported {
+                expected.push("linkat-empty");
+            } else {
+                assert_eq!(
+                    outcomes["linkat-empty"],
+                    "unsupported-by-unmanaged-preflight"
+                );
+            }
+            assert!(
+                matches!(
+                    outcomes["linkat-nofollow"].as_str(),
+                    "denied" | "created:denied"
+                ),
+                "nofollow hard-linked symlink exposed content: {}",
+                outcomes["linkat-nofollow"]
             );
         }
-        for name in ["write-link.data", "write-rename.data"] {
-            assert_eq!(
-                fs::read(fixture.root.join(name)).unwrap(),
-                DUMMY,
-                "write-only protected content changed through an alias"
-            );
+        #[cfg(unix)]
+        expected.extend(["symlink-read", "lexical-symlink-read"]);
+        assert_eq!(
+            outcomes.len(),
+            if cfg!(target_os = "linux") { 50 } else { 25 }
+        );
+        let full_failures: Vec<_> = expected
+            .iter()
+            .filter(|name| outcomes[**name] != "denied")
+            .map(|name| format!("{name}={}", outcomes[*name]))
+            .collect();
+        assert_eq!(outcomes["allowed-hardlink"], "created:readable");
+        assert_eq!(outcomes["allowed-combined-rw-open"], "opened:readable");
+        assert_eq!(outcomes["allowed-create-read-open"], "opened:readable");
+        #[cfg(windows)]
+        {
+            assert_eq!(outcomes["ordinary-map-rw"], "read_write");
+            assert_eq!(outcomes["ordinary-map-copy"], "read_write");
+            assert_eq!(outcomes["allowed-delete-on-close"], "opened:deleted");
+            assert_eq!(outcomes["allowed-supersede"], "opened:replaced");
+            eprintln!("FILE_ALIAS_MAPPING_VERIFIED backend={backend} readonly-deny=rw+copy write-deny=rw ordinary=rw+copy");
+        }
+        assert_eq!(outcomes["allowed-rename"], "created:readable");
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(outcomes["allowed-linkat"], "created:readable");
+            assert_eq!(outcomes["allowed-rename-exchange"], "created:readable");
+        }
+        failures.extend(full_failures);
+        eprintln!("FILE_ALIAS_OUTCOMES backend={backend} {outcomes:?}");
+        if failures.is_empty() {
+            #[cfg(windows)]
+            for name in ["delete-close.data", "supersede.data"] {
+                assert_eq!(
+                    fs::read(fixture.root.join(name)).unwrap(),
+                    DUMMY,
+                    "protected implicit delete changed dummy file"
+                );
+            }
+            for name in ["write-link.data", "write-rename.data"] {
+                assert_eq!(
+                    fs::read(fixture.root.join(name)).unwrap(),
+                    DUMMY,
+                    "write-only protected content changed through an alias"
+                );
+            }
         }
     }
     writeln!(input, "quit").unwrap();
@@ -599,18 +676,27 @@ fn scenario(backend: &str) {
         "protected namespace/content alias bypasses: {}",
         failures.join(", ")
     );
-    eprintln!("FILE_ALIAS_VERIFIED backend={backend} managed-mutations=denied content-symlink=denied ordinary-hardlinks=allowed");
+    if phase == "full" {
+        eprintln!("FILE_ALIAS_VERIFIED backend={backend} managed-mutations=denied content-symlink=denied ordinary-hardlinks=allowed");
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires packaged CLI; registered in the Linux backend Suite"]
 fn ptrace_denied_content_cannot_mint_or_follow_managed_aliases() {
-    scenario("ptrace");
+    scenario("ptrace", "full");
+    scenario("ptrace", "allow");
+    scenario("ptrace", "disabled");
 }
 
 #[test]
 #[ignore = "requires packaged embedded CLI; registered in platform Suites"]
 fn gum_denied_content_cannot_mint_or_follow_managed_aliases() {
-    scenario("gum");
+    scenario("gum", "full");
+    #[cfg(target_os = "linux")]
+    {
+        scenario("gum", "allow");
+        scenario("gum", "disabled");
+    }
 }

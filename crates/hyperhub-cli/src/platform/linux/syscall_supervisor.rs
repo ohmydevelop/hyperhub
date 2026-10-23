@@ -62,6 +62,8 @@ struct FileIntent {
     targets: Vec<String>,
     operations: Vec<(FileSandboxOperation, &'static str)>,
     resolve_content: bool,
+    // Parse failures do not discard authorization of other known endpoints.
+    errors: Vec<String>,
     // Additional per-path checks avoid applying source permissions to the destination.
     additional: Vec<(String, FileSandboxOperation, &'static str)>,
 }
@@ -1545,8 +1547,8 @@ impl Supervisor {
             )));
         }
         if number == syscall::LINK && syscall::LINK >= 0 {
-            let old = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
-            let new = read_path(tid, libc::AT_FDCWD, registers.argument(1) as usize)?;
+            let old = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize);
+            let new = read_path(tid, libc::AT_FDCWD, registers.argument(1) as usize);
             return Ok(Some(with_namespace_aliases(
                 file_link_intent(old, new, false),
                 read_namespace_path(tid, libc::AT_FDCWD, registers.argument(0) as usize),
@@ -1555,25 +1557,33 @@ impl Supervisor {
         }
         if number == syscall::LINKAT {
             let oldfd = registers.argument(0) as i32;
-            let raw = read_c_string(tid, registers.argument(1) as usize, 4096)?;
+            let raw = read_c_string(tid, registers.argument(1) as usize, 4096);
             let flags = registers.argument(4) as i32;
-            let old = if raw.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
-                fd_path(tid, oldfd).ok_or_else(|| format!("cannot resolve hardlink fd {oldfd}"))?
-            } else {
-                resolve_path(tid, oldfd, &raw)?
-            };
+            let old = raw.as_ref().map_err(Clone::clone).and_then(|raw| {
+                if raw.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
+                    fd_path(tid, oldfd).ok_or_else(|| format!("cannot resolve hardlink fd {oldfd}"))
+                } else {
+                    resolve_path(tid, oldfd, raw)
+                }
+            });
             let new = read_path(
                 tid,
                 registers.argument(2) as i32,
                 registers.argument(3) as usize,
-            )?;
+            );
             let mut intent = file_link_intent(
                 old,
                 new,
-                !raw.is_empty() && flags & libc::AT_SYMLINK_FOLLOW != 0,
+                raw.as_ref().is_ok_and(|raw| !raw.is_empty())
+                    && flags & libc::AT_SYMLINK_FOLLOW != 0,
             );
-            if flags & libc::AT_SYMLINK_FOLLOW != 0 && !raw.is_empty() {
-                if let Some(resolved) = resolve_content_path(tid, oldfd, &raw) {
+            if flags & libc::AT_SYMLINK_FOLLOW != 0 {
+                if let Some(resolved) = raw
+                    .as_ref()
+                    .ok()
+                    .filter(|raw| !raw.is_empty())
+                    .and_then(|raw| resolve_content_path(tid, oldfd, raw))
+                {
                     if !intent.targets.contains(&resolved) {
                         intent.targets.push(resolved);
                     }
@@ -1581,7 +1591,7 @@ impl Supervisor {
             }
             return Ok(Some(with_namespace_aliases(
                 intent,
-                if raw.is_empty() {
+                if raw.as_ref().is_ok_and(|raw| raw.is_empty()) {
                     None
                 } else {
                     read_namespace_path(tid, oldfd, registers.argument(1) as usize)
@@ -1594,8 +1604,8 @@ impl Supervisor {
             )));
         }
         if number == syscall::RENAME && syscall::RENAME >= 0 {
-            let old = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
-            let new = read_path(tid, libc::AT_FDCWD, registers.argument(1) as usize)?;
+            let old = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize);
+            let new = read_path(tid, libc::AT_FDCWD, registers.argument(1) as usize);
             return Ok(Some(with_namespace_aliases(
                 file_rename_intent(old, new, false),
                 read_namespace_path(tid, libc::AT_FDCWD, registers.argument(0) as usize),
@@ -1607,12 +1617,12 @@ impl Supervisor {
                 tid,
                 registers.argument(0) as i32,
                 registers.argument(1) as usize,
-            )?;
+            );
             let new = read_path(
                 tid,
                 registers.argument(2) as i32,
                 registers.argument(3) as usize,
-            )?;
+            );
             return Ok(Some(with_namespace_aliases(
                 file_rename_intent(
                     old,
@@ -1662,6 +1672,7 @@ impl Supervisor {
                         operations,
                         additional: Vec::new(),
                         resolve_content: true,
+                        errors: Vec::new(),
                     }));
                 }
             }
@@ -1898,6 +1909,11 @@ impl Supervisor {
                 if denied {
                     return Ok(self.enforce);
                 }
+            }
+        }
+        for error in &intent.errors {
+            if self.file_error_denied(tid, error) {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -2631,42 +2647,67 @@ fn file_intent(
         operations: vec![(operation, operation_name)],
         additional: Vec::new(),
         resolve_content: true,
+        errors: Vec::new(),
     }
 }
 
-fn file_rename_intent(source: String, destination: String, exchange: bool) -> FileIntent {
+fn namespace_intent(
+    source: Result<String, String>,
+    destination: Result<String, String>,
+    operations: Vec<(FileSandboxOperation, &'static str)>,
+    destination_operations: Vec<(FileSandboxOperation, &'static str)>,
+    resolve_content: bool,
+) -> FileIntent {
     let mut intent = FileIntent {
-        targets: vec![source],
-        operations: vec![
-            (FileSandboxOperation::Read, "rename_source"),
-            (FileSandboxOperation::Write, "rename_source"),
-            (FileSandboxOperation::Rename, "rename_source"),
-        ],
-        additional: vec![
-            (
-                destination.clone(),
-                FileSandboxOperation::Create,
-                "rename_destination",
-            ),
-            (
-                destination.clone(),
-                FileSandboxOperation::Rename,
-                "rename_destination",
-            ),
-        ],
-        resolve_content: false,
+        targets: Vec::new(),
+        operations,
+        additional: Vec::new(),
+        resolve_content,
+        errors: Vec::new(),
     };
-    if exchange {
-        intent.additional.push((
-            destination.clone(),
-            FileSandboxOperation::Read,
-            "exchange_source",
-        ));
-        intent
-            .additional
-            .push((destination, FileSandboxOperation::Write, "exchange_source"));
+    match source {
+        Ok(path) => intent.targets.push(path),
+        Err(error) => intent.errors.push(error),
+    }
+    match destination {
+        Ok(path) => intent.additional.extend(
+            destination_operations
+                .into_iter()
+                .map(|(op, name)| (path.clone(), op, name)),
+        ),
+        Err(error) => intent.errors.push(error),
     }
     intent
+}
+
+fn file_rename_intent(
+    source: Result<String, String>,
+    destination: Result<String, String>,
+    exchange: bool,
+) -> FileIntent {
+    let mut operations = vec![
+        (FileSandboxOperation::Read, "rename_source"),
+        (FileSandboxOperation::Write, "rename_source"),
+        (FileSandboxOperation::Rename, "rename_source"),
+    ];
+    let mut destination_operations = vec![
+        (FileSandboxOperation::Create, "rename_destination"),
+        (FileSandboxOperation::Rename, "rename_destination"),
+    ];
+    if exchange {
+        operations.push((FileSandboxOperation::Create, "exchange_destination"));
+        destination_operations.extend([
+            (FileSandboxOperation::Read, "exchange_source"),
+            (FileSandboxOperation::Write, "exchange_source"),
+        ]);
+    }
+    namespace_intent(
+        source,
+        destination,
+        operations,
+        destination_operations,
+        false,
+    )
 }
 
 fn with_namespace_aliases(
@@ -2703,21 +2744,22 @@ fn read_namespace_path(tid: libc::pid_t, dirfd: i32, address: usize) -> Option<S
     )
 }
 
-fn file_link_intent(source: String, destination: String, resolve_content: bool) -> FileIntent {
-    FileIntent {
-        targets: vec![source],
-        operations: vec![
+fn file_link_intent(
+    source: Result<String, String>,
+    destination: Result<String, String>,
+    resolve_content: bool,
+) -> FileIntent {
+    namespace_intent(
+        source,
+        destination,
+        vec![
             (FileSandboxOperation::Read, "link_source"),
             (FileSandboxOperation::Write, "link_source"),
             (FileSandboxOperation::Rename, "link_source"),
         ],
-        additional: vec![(
-            destination,
-            FileSandboxOperation::Create,
-            "link_destination",
-        )],
+        vec![(FileSandboxOperation::Create, "link_destination")],
         resolve_content,
-    }
+    )
 }
 
 fn file_open_intent_with_resolved(
@@ -2779,6 +2821,7 @@ fn file_open_intent(target: String, flags: i32) -> FileIntent {
         operations,
         additional: Vec::new(),
         resolve_content: true,
+        errors: Vec::new(),
     }
 }
 
@@ -3442,7 +3485,7 @@ mod tests {
 
     #[test]
     fn hardlink_permissions_bind_source_and_destination_separately() {
-        let intent = file_link_intent("/private".into(), "/alias".into(), false);
+        let intent = file_link_intent(Ok("/private".into()), Ok("/alias".into()), false);
         assert_eq!(intent.targets, vec!["/private"]);
         assert_eq!(
             intent.operations,
@@ -3461,21 +3504,70 @@ mod tests {
             )]
         );
         assert!(!intent.resolve_content);
-        assert!(file_link_intent("/source".into(), "/alias".into(), true).resolve_content);
+        assert!(file_link_intent(Ok("/source".into()), Ok("/alias".into()), true).resolve_content);
     }
 
     #[test]
     fn exchange_checks_destination_as_a_content_source() {
-        let exchange = file_rename_intent("/ordinary".into(), "/protected".into(), true);
+        let exchange = file_rename_intent(Ok("/ordinary".into()), Ok("/protected".into()), true);
         assert!(exchange
             .additional
             .iter()
             .any(|(path, op, _)| path == "/protected" && *op == FileSandboxOperation::Read));
-        let normal = file_rename_intent("/ordinary".into(), "/destination".into(), false);
+        let normal = file_rename_intent(Ok("/ordinary".into()), Ok("/destination".into()), false);
         assert!(!normal
             .additional
             .iter()
             .any(|(_, op, _)| *op == FileSandboxOperation::Read));
+        assert!(exchange
+            .operations
+            .iter()
+            .any(|(op, _)| *op == FileSandboxOperation::Create));
+        assert!(!normal
+            .operations
+            .iter()
+            .any(|(op, _)| *op == FileSandboxOperation::Create));
+    }
+
+    #[test]
+    fn namespace_parse_failure_retains_other_endpoint_authorization() {
+        for rename in [false, true] {
+            let make = |source, destination| {
+                if rename {
+                    file_rename_intent(source, destination, false)
+                } else {
+                    file_link_intent(source, destination, false)
+                }
+            };
+            let source = make(
+                Ok("/protected-source".into()),
+                Err("destination parse".into()),
+            );
+            assert_eq!(source.targets, ["/protected-source"]);
+            assert!(source
+                .operations
+                .iter()
+                .any(|(op, _)| *op == FileSandboxOperation::Read));
+            assert!(source.additional.is_empty());
+            assert_eq!(source.errors, ["destination parse"]);
+
+            let destination = make(
+                Err("source parse".into()),
+                Ok("/protected-destination".into()),
+            );
+            assert!(destination.targets.is_empty());
+            assert!(destination
+                .additional
+                .iter()
+                .any(|(path, op, _)| path == "/protected-destination"
+                    && *op == FileSandboxOperation::Create));
+            assert_eq!(destination.errors, ["source parse"]);
+
+            let unknown = make(Err("source parse".into()), Err("destination parse".into()));
+            assert!(unknown.targets.is_empty());
+            assert!(unknown.additional.is_empty());
+            assert_eq!(unknown.errors, ["source parse", "destination parse"]);
+        }
     }
 
     #[test]

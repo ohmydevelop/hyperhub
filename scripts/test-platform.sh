@@ -12,6 +12,10 @@ cargo test --workspace --all-targets --locked
 cargo test -p hyperhub-agent-core --features gum-agent --locked
 for tuple in "x86_64:x86_64-unknown-linux-gnu" "aarch64:aarch64-unknown-linux-gnu"; do
   arch=${tuple%%:*}; target=${tuple#*:}
+  fixture_check_dir="${CARGO_TARGET_DIR:-$root/target}/platform-fixtures/$target"
+  mkdir -p "$fixture_check_dir"
+  rustc --edition 2021 --target "$target" --emit metadata \
+    -o "$fixture_check_dir/file_alias_target.rmeta" tests/fixtures/file_alias_target.rs
   mapfile -t devkits < <(env -u HYPERHUB_FRIDA_GUM_ROOT -u HYPERHUB_FRIDA_CORE_ROOT "$root/scripts/frida-devkit.sh" "$arch")
   export HYPERHUB_FRIDA_GUM_ROOT=${devkits[0]}
   export HYPERHUB_FRIDA_CORE_ROOT=${devkits[1]}
