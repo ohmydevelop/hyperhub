@@ -31,19 +31,63 @@ stop_instance() {
   HOME="$agent_home" HYPERHUB_HOME="$instance" \
     "$hyperhub" stop >/dev/null 2>&1 || true
 }
+stage=setup
+failure_diagnostics() {
+  python3 - "$temporary" "$stage" "$1" <<'PY_MULTI_HOME_DIAGNOSTICS'
+import json
+import os
+import pathlib
+import stat
+import sys
+root = pathlib.Path(sys.argv[1])
+print(f"MULTI_HOME_FAILURE stage={sys.argv[2]} exit={sys.argv[3]}", file=sys.stderr)
+paths = ["instance-a/serve.log", "instance-b/serve.log"]
+paths += [name + ".out" for name in ("start-a", "start-b", "restart-a", "migrate-b", "rewrap-b", "repair-a")]
+paths += ["status-a.json", "status-b.json"]
+for name in paths:
+    path = root / name
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as file:
+            metadata = os.fstat(file.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            file.seek(max(0, metadata.st_size - 16384))
+            data = file.read(16384)
+        if name.endswith(".json"):
+            value = json.loads(data)
+            text = json.dumps({key: value[key] for key in ("state", "pid", "control_endpoint", "hyperhub_home", "socks_address") if key in value}, ensure_ascii=False)
+        else:
+            text = "\n".join(data.decode("utf-8", errors="replace").splitlines()[-32:])
+        print(f"MULTI_HOME_LOG {name}: {text}", file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+PY_MULTI_HOME_DIAGNOSTICS
+}
 cleanup() {
+  local exit_code=$1
+  trap - EXIT INT TERM
+  if ((exit_code != 0)); then
+    failure_diagnostics "$exit_code" || true
+  fi
   stop_instance "$home_a"
   stop_instance "$home_b"
   chmod -R u+w "$temporary" 2>/dev/null || true
   rm -rf "$temporary"
+  exit "$exit_code"
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
+stage=start-a
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
   "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/start-a.out"
+stage=start-b
 HOME="$agent_home" HYPERHUB_HOME="$home_b" \
   "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/start-b.out"
 
+stage=status
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
   "$hyperhub" status --json > "$temporary/status-a.json"
 HOME="$agent_home" HYPERHUB_HOME="$home_b" \
@@ -77,11 +121,13 @@ PY
 [[ -f $home_a/runtime/config-key.bin && -f $home_b/runtime/config-key.bin ]]
 
 HOME="$agent_home" HYPERHUB_HOME="$home_a" "$hyperhub" stop >/dev/null
+stage=restart-a
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
   "$hyperhub" start > "$temporary/restart-a.out"
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
   "$hyperhub" validate >/dev/null
 
+stage=runtime-auth
 # Run authenticates with this instance's API key without an explicit argument.
 test_target=$(command -v true)
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
@@ -97,6 +143,7 @@ for option in --password-file --api-key-file; do
   grep -qF 'loaded automatically' "$temporary/removed-option.out"
 done
 
+stage=missing-key
 # Missing keys must fail without recreating credentials or granting a session.
 mv "$home_a/runtime/api-key" "$temporary/saved-api-key"
 if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
@@ -110,10 +157,12 @@ mv "$temporary/saved-api-key" "$home_a/runtime/api-key"
 
 HOME="$agent_home" HYPERHUB_HOME="$home_b" "$hyperhub" stop >/dev/null
 rm "$home_b/runtime/config-key.bin"
+stage=migrate-b
 HOME="$agent_home" HYPERHUB_HOME="$home_b" \
   "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/migrate-b.out"
 [[ -f $home_b/runtime/config-key.bin ]]
 
+stage=wrong-admin
 # A wrong administrator password must not replace a valid runtime envelope.
 wrong_password_file="$temporary/wrong-password"
 printf '%s\n' 'incorrect-test-password' > "$wrong_password_file"
@@ -127,6 +176,7 @@ fi
 cmp "$home_a/runtime/config-key.bin" "$temporary/key-before-wrong-password.bin"
 HOME="$agent_home" HYPERHUB_HOME="$home_a" "$hyperhub" validate >/dev/null
 
+stage=wrong-api-key
 # Use a valid but unrelated API key to distinguish authentication from stale generation.
 python3 - "$temporary/wrong-api-key" <<'PY'
 import base64
@@ -151,10 +201,12 @@ fi
 grep -qF 'rejected session registration' "$temporary/wrong-run-key.out"
 cp "$temporary/saved-api-key" "$home_a/runtime/api-key"
 
+stage=stale-generation
 # Build a stale-generation envelope encrypted by the same API key, without
 # corrupting either encrypted file. Start must reject it before spawning Serve.
 stop_instance "$home_b"
 cp "$home_a/runtime/api-key" "$home_b/runtime/api-key"
+stage=rewrap-b
 HOME="$agent_home" HYPERHUB_HOME="$home_b" \
   "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/rewrap-b.out"
 stop_instance "$home_a"
@@ -168,6 +220,7 @@ if HOME="$agent_home" HYPERHUB_HOME="$home_a" \
 fi
 grep -qF 'out of date' "$temporary/stale-key.out"
 [[ $(wc -c < "$home_a/serve.log") -eq $log_bytes ]]
+stage=repair-a
 HOME="$agent_home" HYPERHUB_HOME="$home_a" \
   "$hyperhub" start --admin-password-file "$admin_password_file" > "$temporary/repair-a.out"
 cmp "$home_a/config.bin" "$temporary/config-before-repair.bin"

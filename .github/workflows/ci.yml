@@ -62,8 +62,8 @@ jobs:
       - name: Test isolated HyperHub homes
         if: runner.os == 'Linux'
         run: |
-          cargo build -p hyperhub --locked
-          ./scripts/test-cli-multi-home.sh ./target/debug/hyperhub
+          cargo build --release -p hyperhub --locked
+          ./scripts/test-cli-multi-home.sh ./target/release/hyperhub
 
       - name: Test Linux Gum Agent
         if: runner.os == 'Linux'
