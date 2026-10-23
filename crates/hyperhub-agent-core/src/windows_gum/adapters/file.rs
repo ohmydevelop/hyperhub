@@ -296,6 +296,51 @@ unsafe fn object_path(o: *const ObjectAttributes) -> Option<String> {
     }
     Some(path)
 }
+unsafe fn open_file_target(o: *const ObjectAttributes) -> FileIoTarget {
+    let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+    // Anonymous pipes reopen the server endpoint with an empty name relative
+    // to its real pipe handle. A root handle alone never authorizes a named
+    // (in particular absolute) path, and unresolved disk roots stay in policy.
+    if let Some(attributes) = o.as_ref() {
+        if attributes.length as usize >= std::mem::size_of::<ObjectAttributes>()
+            && !attributes.root_directory.is_null()
+            && attributes
+                .object_name
+                .as_ref()
+                .is_some_and(|name| name.length == 0)
+        {
+            SetLastError(0);
+            if GetFileType(attributes.root_directory) == FILE_TYPE_PIPE {
+                return FileIoTarget::Kernel;
+            }
+        }
+    }
+    FileIoTarget::Policy(object_path(o))
+}
+unsafe fn open_file(
+    out: *mut HANDLE,
+    access: u32,
+    attributes: *const ObjectAttributes,
+    options: u32,
+    original: impl FnOnce() -> i32,
+) -> i32 {
+    let (result, path) = match open_file_target(attributes) {
+        FileIoTarget::Kernel => (original(), None),
+        FileIoTarget::Policy(path) => (
+            dispatch_operations(
+                &operations_for_access(access, None, options),
+                path.clone(),
+                0,
+                original,
+            ),
+            path,
+        ),
+    };
+    if nt_succeeded(result) && !out.is_null() && !(*out).is_null() {
+        remember_path(*out, path);
+    }
+    result
+}
 fn normalize(s: &str) -> String {
     s.trim_start_matches(r"\??\")
         .trim_start_matches(r"\\?\")
@@ -469,14 +514,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_open_file(
     let Some(f) = original!(ORIGINAL_NT_OPEN_FILE, NtOpenFileFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    let p = object_path(o);
-    let r = dispatch_operations(&operations_for_access(a, None, opts), p.clone(), 0, || {
-        f(out, a, o, ios, share, opts)
-    });
-    if nt_succeeded(r) && !out.is_null() && !(*out).is_null() {
-        remember_path(*out, p);
-    }
-    r
+    open_file(out, a, o, opts, || f(out, a, o, ios, share, opts))
 }
 macro_rules! io_hook {
     ($name:ident,$slot:ident,$op:expr) => {
@@ -653,6 +691,256 @@ mod tests {
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, FILE_TYPE_DISK};
     use windows_sys::Win32::System::Pipes::CreatePipe;
+
+    fn attributes(root: HANDLE, name: &UnicodeString) -> ObjectAttributes {
+        ObjectAttributes {
+            length: std::mem::size_of::<ObjectAttributes>() as u32,
+            root_directory: root,
+            object_name: name,
+            attributes: 0x40,
+            security_descriptor: null(),
+            security_qos: null(),
+        }
+    }
+
+    #[test]
+    fn actual_unnamed_pipe_open_preserves_native_result_and_error_state() {
+        unsafe {
+            let open: NtOpenFileFn = std::mem::transmute(
+                crate::windows_gum::gum::find_export("ntdll.dll", "NtOpenFile").unwrap(),
+            );
+            type CreatePipeFn = unsafe extern "system" fn(
+                *mut HANDLE,
+                u32,
+                *const ObjectAttributes,
+                *mut c_void,
+                u32,
+                u32,
+                u32,
+                u32,
+                u32,
+                u32,
+                u32,
+                u32,
+                u32,
+                *const i64,
+            ) -> i32;
+            let create: CreatePipeFn = std::mem::transmute(
+                crate::windows_gum::gum::find_export("ntdll.dll", "NtCreateNamedPipeFile").unwrap(),
+            );
+            let pipe_path: Vec<u16> = r"\??\PIPE\".encode_utf16().collect();
+            let name = UnicodeString {
+                length: (pipe_path.len() * 2) as u16,
+                maximum_length: (pipe_path.len() * 2) as u16,
+                buffer: pipe_path.as_ptr(),
+            };
+            let mut ios = [0usize; 2];
+            let mut root = null_mut();
+            assert_eq!(
+                open(
+                    &mut root,
+                    0x8010_0000,
+                    &attributes(null_mut(), &name),
+                    ios.as_mut_ptr().cast(),
+                    3,
+                    0x20
+                ),
+                0
+            );
+            let root = OwnedHandle::from_raw_handle(root);
+            let empty = UnicodeString {
+                length: 0,
+                maximum_length: 0,
+                buffer: null(),
+            };
+            let mut server = null_mut();
+            let timeout = -500_000_i64;
+            assert_eq!(
+                create(
+                    &mut server,
+                    0x8010_0000,
+                    &attributes(root.as_raw_handle(), &empty),
+                    ios.as_mut_ptr().cast(),
+                    2,
+                    2,
+                    0x20,
+                    0,
+                    0,
+                    0,
+                    1,
+                    4096,
+                    4096,
+                    &timeout
+                ),
+                0
+            );
+            let server = OwnedHandle::from_raw_handle(server);
+            let object = attributes(server.as_raw_handle(), &empty);
+            WSASetLastError(12345);
+            assert_eq!(open_file_target(&object), FileIoTarget::Kernel);
+            assert_eq!(GetLastError(), 12345);
+            assert_eq!(WSAGetLastError(), 12345);
+            let mut client = null_mut();
+            let status = open_file(&mut client, 0x4010_0080, &object, 0x60, || {
+                assert_eq!(GetLastError(), 12345);
+                let status = open(
+                    &mut client,
+                    0x4010_0080,
+                    &object,
+                    ios.as_mut_ptr().cast(),
+                    0,
+                    0x60,
+                );
+                WSASetLastError(54321);
+                status
+            });
+            assert_eq!(status, 0, "real unnamed pipe endpoint open");
+            assert_eq!(GetLastError(), 54321);
+            assert_eq!(WSAGetLastError(), 54321);
+            let client = OwnedHandle::from_raw_handle(client);
+            let mut transferred = 0;
+            let byte = 73u8;
+            assert_ne!(
+                WriteFile(
+                    client.as_raw_handle(),
+                    &byte,
+                    1,
+                    &mut transferred,
+                    null_mut()
+                ),
+                0
+            );
+            assert_eq!(transferred, 1);
+            let mut actual = 0u8;
+            assert_ne!(
+                ReadFile(
+                    server.as_raw_handle(),
+                    &mut actual,
+                    1,
+                    &mut transferred,
+                    null_mut()
+                ),
+                0
+            );
+            assert_eq!(transferred, 1);
+            assert_eq!(actual, byte);
+            // Invalid directory/non-directory flags still reach the OS and
+            // keep its failing status, rather than fabricating policy success.
+            let mut invalid = null_mut();
+            let expected = open(
+                &mut invalid,
+                0x4010_0080,
+                &object,
+                ios.as_mut_ptr().cast(),
+                0,
+                0x41,
+            );
+            assert!(expected < 0);
+            WSASetLastError(12345);
+            let actual = open_file(&mut invalid, 0x4010_0080, &object, 0x41, || {
+                assert_eq!(GetLastError(), 12345);
+                let status = open(
+                    &mut invalid,
+                    0x4010_0080,
+                    &object,
+                    ios.as_mut_ptr().cast(),
+                    0,
+                    0x41,
+                );
+                WSASetLastError(54321);
+                status
+            });
+            assert_eq!(actual, expected);
+            assert_eq!(GetLastError(), 54321);
+            assert_eq!(WSAGetLastError(), 54321);
+            // The alternate valid representation of an empty string is also
+            // accepted; an actual path below must never use this classification.
+            let zero = 0u16;
+            let empty_buffer = UnicodeString {
+                length: 0,
+                maximum_length: 2,
+                buffer: &zero,
+            };
+            assert_eq!(
+                open_file_target(&attributes(server.as_raw_handle(), &empty_buffer)),
+                FileIoTarget::Kernel
+            );
+        }
+    }
+
+    #[test]
+    fn unnamed_open_requires_real_pipe_root_and_named_opens_remain_policy() {
+        let path = std::env::temp_dir().join(format!(
+            "hyperhub-open-domain-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        unsafe {
+            let mut read = null_mut();
+            let mut write = null_mut();
+            assert_ne!(CreatePipe(&mut read, &mut write, null(), 0), 0);
+            let read = OwnedHandle::from_raw_handle(read);
+            let _write = OwnedHandle::from_raw_handle(write);
+            let event = windows_sys::Win32::System::Threading::CreateEventW(null(), 0, 0, null());
+            assert!(!event.is_null());
+            let event = OwnedHandle::from_raw_handle(event);
+            let empty = UnicodeString {
+                length: 0,
+                maximum_length: 0,
+                buffer: null(),
+            };
+            for root in [
+                null_mut(),
+                INVALID_HANDLE_VALUE,
+                event.as_raw_handle(),
+                file.as_raw_handle(),
+            ] {
+                WSASetLastError(12345);
+                assert!(matches!(
+                    open_file_target(&attributes(root, &empty)),
+                    FileIoTarget::Policy(_)
+                ));
+                assert_eq!(GetLastError(), 12345);
+                assert_eq!(WSAGetLastError(), 12345);
+            }
+            for text in [r"\??\C:\unrelated-file", "relative-child"] {
+                let text: Vec<u16> = text.encode_utf16().collect();
+                let name = UnicodeString {
+                    length: (text.len() * 2) as u16,
+                    maximum_length: (text.len() * 2) as u16,
+                    buffer: text.as_ptr(),
+                };
+                WSASetLastError(12345);
+                assert!(matches!(
+                    open_file_target(&attributes(read.as_raw_handle(), &name)),
+                    FileIoTarget::Policy(_)
+                ));
+                assert_eq!(GetLastError(), 12345);
+                assert_eq!(WSAGetLastError(), 12345);
+            }
+            let mut malformed = attributes(read.as_raw_handle(), &empty);
+            malformed.length = 0;
+            assert!(matches!(
+                open_file_target(&malformed),
+                FileIoTarget::Policy(_)
+            ));
+            malformed = attributes(read.as_raw_handle(), &empty);
+            malformed.object_name = null();
+            assert!(matches!(
+                open_file_target(&malformed),
+                FileIoTarget::Policy(_)
+            ));
+            remember_path(file.as_raw_handle(), None);
+        }
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn actual_pipe_io_bypasses_disk_policy_and_preserves_error_state() {
