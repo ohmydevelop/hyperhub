@@ -2,7 +2,11 @@ use crate::windows_gum::gum::{original, HookGuard, INSIDE_HOOK};
 use crate::windows_gum::runtime::{runtime, FileOperation, FileOperationContext};
 use crate::windows_gum::shared::*;
 use std::collections::HashMap;
-use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_INVALID_HANDLE};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFileType, GetFinalPathNameByHandleW, FILE_TYPE_CHAR, FILE_TYPE_PIPE, FILE_TYPE_UNKNOWN,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetProcessId};
 const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
 fn nt_succeeded(status: i32) -> bool {
     status >= 0
@@ -104,6 +108,166 @@ fn handles() -> &'static Mutex<HashMap<usize, String>> {
     static H: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
     H.get_or_init(|| Mutex::new(HashMap::new()))
 }
+// Replace previous path metadata even when the new object has no file path.
+// This prevents a reused section/file handle from retaining an older label.
+fn remember_path(handle: HANDLE, path: Option<String>) {
+    let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+    if let Ok(mut map) = handles().lock() {
+        map.remove(&(handle as usize));
+        if let Some(path) = path {
+            map.insert(handle as usize, path);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FileIoTarget {
+    Kernel,
+    Policy(Option<String>),
+}
+fn classify_file_io(kind: u32, error: u32, path: impl FnOnce() -> Option<String>) -> FileIoTarget {
+    match kind {
+        FILE_TYPE_PIPE | FILE_TYPE_CHAR => FileIoTarget::Kernel,
+        FILE_TYPE_UNKNOWN if error == ERROR_INVALID_HANDLE => FileIoTarget::Kernel,
+        _ => FileIoTarget::Policy(path()),
+    }
+}
+unsafe fn file_io_target(handle: HANDLE) -> FileIoTarget {
+    // Drop before the original API call. Its own error/result must survive.
+    let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+    SetLastError(0);
+    let kind = GetFileType(handle);
+    let error = GetLastError();
+    classify_file_io(kind, error, || handle_path(handle))
+}
+unsafe fn dispatch_file_io(
+    op: FileOperation,
+    handle: HANDLE,
+    original: impl FnOnce() -> i32,
+) -> i32 {
+    if INSIDE_HOOK.with(Cell::get) {
+        return original();
+    }
+    match file_io_target(handle) {
+        FileIoTarget::Kernel => original(),
+        FileIoTarget::Policy(path) => dispatch(op, path, handle as usize, original),
+    }
+}
+#[repr(C)]
+#[derive(Default)]
+struct SectionBasicInformation {
+    base_address: *mut c_void,
+    allocation_attributes: u32,
+    maximum_size: i64,
+}
+type NtQuerySectionFn =
+    unsafe extern "system" fn(HANDLE, u32, *mut c_void, usize, *mut usize) -> i32;
+
+// NtQuerySection's authoritative allocation attributes distinguish pagefile
+// memory from data/image files. No numeric handle is cached as exempt.
+// https://learn.microsoft.com/windows/win32/devnotes/ntquerysection
+unsafe fn anonymous_section(section: HANDLE) -> bool {
+    let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+    static QUERY: OnceLock<Option<NtQuerySectionFn>> = OnceLock::new();
+    let Some(query) = *QUERY.get_or_init(|| {
+        crate::windows_gum::gum::find_export("ntdll.dll", "NtQuerySection")
+            .map(|pointer| std::mem::transmute::<*mut c_void, NtQuerySectionFn>(pointer))
+    }) else {
+        return false;
+    };
+    let mut info = SectionBasicInformation::default();
+    let mut returned = 0;
+    let size = std::mem::size_of::<SectionBasicInformation>();
+    let status = query(
+        section,
+        0,
+        (&mut info as *mut SectionBasicInformation).cast(),
+        size,
+        &mut returned,
+    );
+    query_proves_anonymous(status, returned, &info)
+}
+fn query_proves_anonymous(status: i32, returned: usize, info: &SectionBasicInformation) -> bool {
+    status == 0
+        && returned == std::mem::size_of::<SectionBasicInformation>()
+        && info.maximum_size > 0
+        && info.allocation_attributes & (0x0080_0000 | 0x0100_0000) == 0
+}
+unsafe fn create_section(
+    out: *mut HANDLE,
+    file: HANDLE,
+    op: FileOperation,
+    original: impl FnOnce() -> i32,
+) -> i32 {
+    let path = {
+        let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+        if file.is_null() {
+            None
+        } else {
+            handle_path(file)
+        }
+    };
+    // A null backing file is explicitly pagefile-backed, so creating it is a
+    // memory operation. Map authorization is re-proven by OS query each time.
+    let result = if file.is_null() {
+        original()
+    } else {
+        dispatch(op, path.clone(), file as usize, original)
+    };
+    if nt_succeeded(result) && !out.is_null() && !(*out).is_null() {
+        remember_path(*out, path);
+    }
+    result
+}
+unsafe fn section_target(section: HANDLE) -> FileIoTarget {
+    let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+    if anonymous_section(section) {
+        FileIoTarget::Kernel
+    } else {
+        FileIoTarget::Policy(handle_path(section))
+    }
+}
+unsafe fn map_section(section: HANDLE, op: FileOperation, original: impl FnOnce() -> i32) -> i32 {
+    if INSIDE_HOOK.with(Cell::get) {
+        return original();
+    }
+    match section_target(section) {
+        FileIoTarget::Kernel => original(),
+        FileIoTarget::Policy(path) => dispatch(op, path, section as usize, original),
+    }
+}
+unsafe fn duplicate_object(
+    sp: HANDLE,
+    sh: HANDLE,
+    tp: HANDLE,
+    out: *mut HANDLE,
+    options: u32,
+    original: impl FnOnce() -> i32,
+) -> i32 {
+    let (source_local, target_local, path) = {
+        let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
+        let current = GetCurrentProcessId();
+        let source_local = GetProcessId(sp) == current;
+        let target_local = GetProcessId(tp) == current;
+        let path = if source_local { handle_path(sh) } else { None };
+        (source_local, target_local, path)
+    };
+    let result = original();
+    if source_local && options & 1 != 0 {
+        remember_path(sh, None);
+    }
+    if nt_succeeded(result) && target_local && !out.is_null() && !(*out).is_null() {
+        remember_path(*out, path);
+    }
+    result
+}
+fn close_object(handle: HANDLE, status: i32) -> i32 {
+    if nt_succeeded(status) {
+        remember_path(handle, None);
+    }
+    status
+}
+
 unsafe fn object_path(o: *const ObjectAttributes) -> Option<String> {
     let o = o.as_ref()?;
     let n = o.object_name.as_ref()?;
@@ -262,13 +426,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_file(
     let r = dispatch_operations(&operations_for_access(a, disp), p.clone(), 0, || {
         f(out, a, o, ios, size, attrs, share, disp, opts, ea, ealen)
     });
-    if r >= 0 && !out.is_null() && !(*out).is_null() {
-        if let Some(p) = p {
-            handles()
-                .lock()
-                .ok()
-                .map(|mut m| m.insert(*out as usize, p));
-        }
+    if nt_succeeded(r) && !out.is_null() && !(*out).is_null() {
+        remember_path(*out, p);
     }
     r
 }
@@ -288,13 +447,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_open_file(
     let r = dispatch_operations(&operations_for_access(a, 0), p.clone(), 0, || {
         f(out, a, o, ios, share, opts)
     });
-    if r >= 0 && !out.is_null() && !(*out).is_null() {
-        if let Some(p) = p {
-            handles()
-                .lock()
-                .ok()
-                .map(|mut m| m.insert(*out as usize, p));
-        }
+    if nt_succeeded(r) && !out.is_null() && !(*out).is_null() {
+        remember_path(*out, p);
     }
     r
 }
@@ -314,9 +468,7 @@ macro_rules! io_hook {
             let Some(f) = original!($slot, NtIoFn) else {
                 return STATUS_ACCESS_DENIED;
             };
-            dispatch($op, handle_path(h), h as usize, || {
-                f(h, e, apc, ctx, ios, b, l, off, key)
-            })
+            dispatch_file_io($op, h, || f(h, e, apc, ctx, ios, b, l, off, key))
         }
     };
 }
@@ -422,19 +574,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_section(
         } else {
             FileOperation::Read
         };
-    let p = handle_path(file);
-    let r = dispatch(op, p.clone(), file as usize, || {
-        f(out, a, o, size, protect, attrs, file)
-    });
-    if r >= 0 && !out.is_null() {
-        if let Some(p) = p {
-            handles()
-                .lock()
-                .ok()
-                .map(|mut m| m.insert(*out as usize, p));
-        }
-    }
-    r
+    create_section(out, file, op, || f(out, a, o, size, protect, attrs, file))
 }
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_map_view_of_section(
     sec: HANDLE,
@@ -458,7 +598,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_map_view_of_section
         } else {
             FileOperation::Read
         };
-    dispatch(op, handle_path(sec), sec as usize, || {
+    map_section(sec, op, || {
         f(
             sec, proc, base, zero, commit, off, size, inherit, alloc, protect,
         )
@@ -476,31 +616,388 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_duplicate_object(
     let Some(f) = original!(ORIGINAL_NT_DUPLICATE_OBJECT, NtDuplicateObjectFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    let r = f(sp, sh, tp, out, a, attrs, opts);
-    if r >= 0 && !out.is_null() {
-        if let Some(p) = handle_path(sh) {
-            handles()
-                .lock()
-                .ok()
-                .map(|mut m| m.insert(*out as usize, p));
-        }
-    }
-    r
+    duplicate_object(sp, sh, tp, out, opts, || f(sp, sh, tp, out, a, attrs, opts))
 }
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_close(h: HANDLE) -> i32 {
     let Some(f) = original!(ORIGINAL_NT_CLOSE, NtCloseFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    let r = f(h);
-    if nt_succeeded(r) {
-        handles().lock().ok().map(|mut m| m.remove(&(h as usize)));
-    }
-    r
+    close_object(h, f(h))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, FILE_TYPE_DISK};
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+
+    #[test]
+    fn actual_pipe_io_bypasses_disk_policy_and_preserves_error_state() {
+        unsafe {
+            let mut read = null_mut();
+            let mut write = null_mut();
+            assert_ne!(CreatePipe(&mut read, &mut write, null(), 0), 0);
+            let read = OwnedHandle::from_raw_handle(read);
+            let write = OwnedHandle::from_raw_handle(write);
+            for handle in [read.as_raw_handle(), write.as_raw_handle()] {
+                WSASetLastError(12345);
+                assert_eq!(file_io_target(handle), FileIoTarget::Kernel);
+                assert_eq!(GetLastError(), 12345);
+                assert_eq!(WSAGetLastError(), 12345);
+            }
+            let bytes = b"private-pipe";
+            let mut transferred = 0;
+            assert_ne!(
+                dispatch_file_io(FileOperation::Write, write.as_raw_handle(), || WriteFile(
+                    write.as_raw_handle(),
+                    bytes.as_ptr(),
+                    bytes.len() as u32,
+                    &mut transferred,
+                    null_mut()
+                )),
+                0
+            );
+            assert_eq!(transferred as usize, bytes.len());
+            let mut received = [0; 12];
+            assert_ne!(
+                dispatch_file_io(FileOperation::Read, read.as_raw_handle(), || ReadFile(
+                    read.as_raw_handle(),
+                    received.as_mut_ptr(),
+                    received.len() as u32,
+                    &mut transferred,
+                    null_mut()
+                )),
+                0
+            );
+            assert_eq!(transferred as usize, bytes.len());
+            assert_eq!(&received, bytes);
+        }
+    }
+
+    #[test]
+    fn actual_character_device_io_bypasses_disk_policy() {
+        unsafe {
+            use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+            let name: Vec<u16> = "NUL".encode_utf16().chain(Some(0)).collect();
+            let handle = CreateFileW(
+                name.as_ptr(),
+                0xC000_0000,
+                3,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            let handle = OwnedHandle::from_raw_handle(handle);
+            assert_eq!(file_io_target(handle.as_raw_handle()), FileIoTarget::Kernel);
+        }
+    }
+
+    #[test]
+    fn actual_disk_io_stays_in_file_policy_domain() {
+        let path = std::env::temp_dir().join(format!(
+            "hyperhub-io-domain-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        unsafe {
+            SetLastError(12345);
+            assert!(matches!(
+                file_io_target(file.as_raw_handle()),
+                FileIoTarget::Policy(Some(_))
+            ));
+            assert_eq!(GetLastError(), 12345);
+        }
+        remember_path(file.as_raw_handle(), None);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unresolved_disk_and_unknown_handles_stay_in_file_policy_domain() {
+        assert_eq!(
+            classify_file_io(FILE_TYPE_DISK, ERROR_ACCESS_DENIED, || None),
+            FileIoTarget::Policy(None)
+        );
+        assert_eq!(
+            classify_file_io(FILE_TYPE_UNKNOWN, ERROR_ACCESS_DENIED, || None),
+            FileIoTarget::Policy(None)
+        );
+        assert_eq!(
+            classify_file_io(0x8000, ERROR_INVALID_HANDLE, || None),
+            FileIoTarget::Policy(None)
+        );
+    }
+
+    #[test]
+    fn invalid_handle_io_keeps_original_ntstatus_and_original_error_state() {
+        unsafe {
+            let write: NtIoFn = std::mem::transmute(
+                crate::windows_gum::gum::find_export("ntdll.dll", "NtWriteFile").unwrap(),
+            );
+            let mut ios = [0usize; 2];
+            let mut byte = 0u8;
+            let mut native = || {
+                write(
+                    null_mut(),
+                    null_mut(),
+                    null(),
+                    null(),
+                    ios.as_mut_ptr().cast(),
+                    (&mut byte as *mut u8).cast(),
+                    1,
+                    null(),
+                    null(),
+                )
+            };
+            let expected = native();
+            assert!(expected < 0);
+            SetLastError(12345);
+            assert_eq!(file_io_target(null_mut()), FileIoTarget::Kernel);
+            assert_eq!(GetLastError(), 12345);
+            assert_eq!(file_io_target(INVALID_HANDLE_VALUE), FileIoTarget::Kernel);
+            let actual = dispatch_file_io(FileOperation::Write, null_mut(), || {
+                SetLastError(54321);
+                write(
+                    null_mut(),
+                    null_mut(),
+                    null(),
+                    null(),
+                    ios.as_mut_ptr().cast(),
+                    (&mut byte as *mut u8).cast(),
+                    1,
+                    null(),
+                    null(),
+                )
+            });
+            assert_eq!(actual, expected);
+            assert_eq!(GetLastError(), 54321);
+        }
+    }
+
+    struct NativeSection(OwnedHandle);
+    impl Drop for NativeSection {
+        fn drop(&mut self) {
+            remember_path(self.0.as_raw_handle(), None);
+        }
+    }
+    impl NativeSection {
+        fn handle(&self) -> HANDLE {
+            self.0.as_raw_handle()
+        }
+    }
+    unsafe fn native_section(file: HANDLE) -> NativeSection {
+        let create: NtCreateSectionFn = std::mem::transmute(
+            crate::windows_gum::gum::find_export("ntdll.dll", "NtCreateSection").unwrap(),
+        );
+        let mut section = null_mut();
+        let size = 4096_i64;
+        assert_eq!(
+            create_section(&mut section, file, FileOperation::Write, || create(
+                &mut section,
+                0x000F_001F,
+                null(),
+                &size,
+                4,
+                0x0800_0000,
+                file
+            )),
+            0
+        );
+        assert!(!section.is_null());
+        NativeSection(OwnedHandle::from_raw_handle(section))
+    }
+
+    #[test]
+    fn actual_anonymous_section_maps_without_a_disk_path_or_cached_exemption() {
+        unsafe {
+            use windows_sys::Win32::Foundation::DuplicateHandle;
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            let section = native_section(null_mut());
+            SetLastError(12345);
+            assert!(anonymous_section(section.handle()));
+            assert_eq!(GetLastError(), 12345);
+            assert_eq!(section_target(section.handle()), FileIoTarget::Kernel);
+            assert!(!handles()
+                .lock()
+                .unwrap()
+                .contains_key(&(section.handle() as usize)));
+            let map: NtMapViewFn = std::mem::transmute(
+                crate::windows_gum::gum::find_export("ntdll.dll", "NtMapViewOfSection").unwrap(),
+            );
+            let unmap: unsafe extern "system" fn(HANDLE, *mut c_void) -> i32 = std::mem::transmute(
+                crate::windows_gum::gum::find_export("ntdll.dll", "NtUnmapViewOfSection").unwrap(),
+            );
+            let mut base = null_mut();
+            let mut size = 4096_usize;
+            assert_eq!(
+                map_section(section.handle(), FileOperation::Write, || {
+                    SetLastError(54321);
+                    map(
+                        section.handle(),
+                        GetCurrentProcess(),
+                        &mut base,
+                        0,
+                        0,
+                        null(),
+                        &mut size,
+                        2,
+                        0,
+                        4,
+                    )
+                }),
+                0
+            );
+            assert_eq!(GetLastError(), 54321);
+            assert!(!base.is_null());
+            base.cast::<u32>().write_volatile(0x1234_5678);
+            assert_eq!(base.cast::<u32>().read_volatile(), 0x1234_5678);
+            assert_eq!(unmap(GetCurrentProcess(), base), 0);
+            let mut duplicate = null_mut();
+            assert_ne!(
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    section.handle(),
+                    GetCurrentProcess(),
+                    &mut duplicate,
+                    0,
+                    0,
+                    2
+                ),
+                0
+            );
+            let duplicate = NativeSection(OwnedHandle::from_raw_handle(duplicate));
+            assert!(anonymous_section(duplicate.handle()));
+            assert!(!handles()
+                .lock()
+                .unwrap()
+                .contains_key(&(duplicate.handle() as usize)));
+        }
+    }
+
+    #[test]
+    fn actual_disk_section_retains_backing_path_and_deny_policy() {
+        let path = std::env::temp_dir().join(format!(
+            "hyperhub-section-domain-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(4096).unwrap();
+        unsafe {
+            let section = native_section(file.as_raw_handle());
+            assert!(!anonymous_section(section.handle()));
+            let FileIoTarget::Policy(Some(backing)) = section_target(section.handle()) else {
+                panic!("disk section lost its backing path");
+            };
+            let snapshot = crate::compile_file_snapshot(crate::FileSandboxSnapshot {
+                default_action: crate::SandboxAction::Pass,
+                error_action: crate::SandboxAction::Deny,
+                rules: vec![crate::FileSandboxSnapshotRule {
+                    id: "deny-disk-map".into(),
+                    action: crate::SandboxAction::Deny,
+                    patterns: vec![format!("^{}$", regex::escape(&backing))],
+                    operations: vec![
+                        crate::FileSandboxOperation::Read,
+                        crate::FileSandboxOperation::Write,
+                    ],
+                    protection: None,
+                }],
+            })
+            .unwrap();
+            assert_eq!(
+                crate::file_sandbox_decision(
+                    &snapshot,
+                    &backing,
+                    crate::FileSandboxOperation::Write
+                )
+                .0,
+                crate::SandboxAction::Deny
+            );
+            assert_eq!(
+                crate::file_sandbox_decision(
+                    &snapshot,
+                    &backing,
+                    crate::FileSandboxOperation::Read
+                )
+                .0,
+                crate::SandboxAction::Deny
+            );
+        }
+        remember_path(file.as_raw_handle(), None);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn query_limited_or_invalid_sections_never_gain_anonymous_authorization() {
+        unsafe {
+            use windows_sys::Win32::Foundation::DuplicateHandle;
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            let section = native_section(null_mut());
+            let mut limited = null_mut();
+            assert_ne!(
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    section.handle(),
+                    GetCurrentProcess(),
+                    &mut limited,
+                    4,
+                    0,
+                    0
+                ),
+                0
+            );
+            let limited = NativeSection(OwnedHandle::from_raw_handle(limited));
+            assert!(!anonymous_section(limited.handle()));
+            assert_eq!(section_target(limited.handle()), FileIoTarget::Policy(None));
+            assert!(!anonymous_section(null_mut()));
+            assert_eq!(section_target(null_mut()), FileIoTarget::Policy(None));
+        }
+    }
+
+    #[test]
+    fn incomplete_or_failed_section_queries_do_not_authorize_memory_maps() {
+        let mut info = SectionBasicInformation {
+            maximum_size: 4096,
+            ..Default::default()
+        };
+        let size = std::mem::size_of::<SectionBasicInformation>();
+        assert_eq!(size, 24);
+        assert_eq!(
+            std::mem::offset_of!(SectionBasicInformation, allocation_attributes),
+            8
+        );
+        assert_eq!(
+            std::mem::offset_of!(SectionBasicInformation, maximum_size),
+            16
+        );
+        assert!(query_proves_anonymous(0, size, &info));
+        assert!(!query_proves_anonymous(1, size, &info));
+        assert!(!query_proves_anonymous(STATUS_ACCESS_DENIED, size, &info));
+        assert!(!query_proves_anonymous(0, size - 1, &info));
+        for attributes in [0x0080_0000, 0x0100_0000, 0x0180_0000] {
+            info.allocation_attributes = attributes;
+            assert!(!query_proves_anonymous(0, size, &info));
+        }
+        info.allocation_attributes = 0;
+        info.maximum_size = 0;
+        assert!(!query_proves_anonymous(0, size, &info));
+    }
 
     #[test]
     fn open_if_with_read_access_is_classified_as_read() {

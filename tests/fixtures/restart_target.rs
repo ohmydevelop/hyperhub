@@ -7,6 +7,64 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+fn anonymous_memory_probe() {
+    use std::ffi::c_void;
+    type Handle = *mut c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileMappingW(
+            file: Handle,
+            attributes: *const c_void,
+            protection: u32,
+            high: u32,
+            low: u32,
+            name: *const u16,
+        ) -> Handle;
+        fn MapViewOfFile(
+            mapping: Handle,
+            access: u32,
+            high: u32,
+            low: u32,
+            bytes: usize,
+        ) -> *mut c_void;
+        fn UnmapViewOfFile(base: *const c_void) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+    unsafe {
+        let mapping = CreateFileMappingW(
+            -1_isize as Handle,
+            std::ptr::null(),
+            4,
+            0,
+            4096,
+            std::ptr::null(),
+        );
+        assert!(
+            !mapping.is_null(),
+            "pagefile mapping: {}",
+            io::Error::last_os_error()
+        );
+        let base = MapViewOfFile(mapping, 6, 0, 0, 4096);
+        if base.is_null() {
+            let error = io::Error::last_os_error();
+            CloseHandle(mapping);
+            panic!("pagefile map view: {error}");
+        }
+        base.cast::<u64>().write_volatile(0x1234_5678_9ABC_DEF0);
+        let readback = base.cast::<u64>().read_volatile();
+        let unmapped = UnmapViewOfFile(base);
+        let closed = CloseHandle(mapping);
+        assert_eq!(readback, 0x1234_5678_9ABC_DEF0);
+        assert_ne!(unmapped, 0, "unmap pagefile view");
+        assert_ne!(closed, 0, "close pagefile mapping");
+    }
+    eprintln!(
+        "RESTART_MEMORY_DOMAIN_OK {} pagefile=read_write",
+        std::process::id()
+    );
+}
+
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
     let mode = args[1].to_str().unwrap();
@@ -36,6 +94,8 @@ fn main() {
             .exec();
         panic!("root exec failed: {error}");
     }
+    #[cfg(windows)]
+    anonymous_memory_probe();
     println!("READY {}", std::process::id());
     io::stdout().flush().unwrap();
     let mut stream: Option<TcpStream> = None;

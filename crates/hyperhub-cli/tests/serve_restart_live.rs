@@ -591,6 +591,18 @@ fn scenario(mode: &str, backend: Option<&str>) {
     });
     let ready = receive(&receiver, "ready");
     let pid: u32 = ready.strip_prefix("READY ").unwrap().parse().unwrap();
+    #[cfg(windows)]
+    {
+        let marker = format!("RESTART_MEMORY_DOMAIN_OK {pid} pagefile=read_write");
+        let stderr = fs::read_to_string(fixture.root.join("target.stderr")).unwrap();
+        assert!(
+            stderr.lines().any(|line| line == marker),
+            "missing memory-domain marker for actual executor {pid}: {stderr}"
+        );
+        eprintln!(
+            "RESTART_MEMORY_DOMAIN_OBSERVED pid={pid} anonymous=read_write file_error_action=deny"
+        );
+    }
     fixture.target = Some(private_process::PrivateProcess::capture(pid, &target).unwrap());
     probe(&mut input, &receiver, pid, "allow");
     let mut initial = fixture.status();
