@@ -1,3 +1,19 @@
+## README 更新与 v0.2.15 发布（2026-10-24）
+
+状态：README 已完成并通过 diff、命令与本地链接检查；准备单独提交。随后进行 0.2.15 版本对齐、最终 CI 与正式发布。
+
+范围：按用户要求让 README 聚焦当前开发期产品的安装、使用、配置审批和能力边界；移除历史版本迁移、维护窗口及内部升级事务细节。发布 v0.2.15，不改动运行时功能或真实用户配置。
+
+步骤：
+1. 更新 README，核对命令和文档链接；单独提交文档并立即推送。
+2. 将 workspace、锁文件内五个本地包及发布工作流默认版本统一为 0.2.15；验证版本一致性与格式，提交并立即推送。
+3. 等待最终提交的 Linux、Windows、Linux targets CI 全部通过，再创建并推送新标签；跟踪正式发布流程完成。
+4. 验证正式 Release、六个附件摘要、归档中的 README 与版本、Linux CLI 的 help/skill/bundle；写入发布说明并完成交付。
+
+约束：保留用户未跟踪的 Pasted image.png；不修改真实凭证、不升级本机安装、不重启真实托管程序。此轮只改 README 和版本元数据；运行回归由最终提交的完整 CI 执行。
+
+---
+
 ## Active security addition: file aliases (2026-10-23)
 
 COMPLETE — v0.2.14 PUBLISHED AND POST-DOWNLOAD VERIFIED: annotatedtag0dcbb6df04e15021b602a991928a491a9df8677c; finalCI39940717518 3/3SUCCESS; formalrelease39943002624 4/4SUCCESS. Real6assets downloaded/GitHub officialdigests/manifests/tag/source314/latest/installerbytes independentPASS. PublicLinuxCLI3904a6c22ddf3797fc29f885f1a7ef51d733dfc030a2297e9e1748fd76cfb071 actualhelp/export/SkillfullbytesPASS, runtime23/10 actualouter0, publicSecret75 actualouter0, realisolatedinstaller actualouter0 (realGitHubURL+DoHprocessonly), originalbinary/DNSunchanged/nohshrun. All5outer0 recordedrelease-014-postdownload-outer-exits.json. IndependentpostdownloadPASS report release-014-independent-postdownload-final-r1.json SHAc903e1f4d013ba772eac4b21665c568eea06815a4d9b4b3d99be609c6a5266b9: all23exactnames/boundaries/50+6phase/cache/TCPidentity,6drivers8rlibs unchanged,source314match; 53PIDsabsent/0zombie/0live. 75/installeragainverified. CuratedChineseReleaseNotespublishedandreadback/6assetsunchanged/latesttrue inrelease-014-notes-update-verified.json. SourceR13 vscompiledR11 only3testinfra; actualfinalCIcompilesall.Sourceunchanged/NoCargo. Rootnowfinaldocs-onlycommit/immediatepush/checkCI(skipCI intentionaldocs only), thenupdate_goalcomplete. All user tasks incllatestSecretSkill/CLI fixed; no realcredentials/Serve/userprocess modifications. NativeBasechangesrequireonecontrolledtargetrelaunch; path-onlyunknownalias/IPCscopegap remainsdocumented; ARMhardwareHook+Macnotverified. PreserveuserPNG.
