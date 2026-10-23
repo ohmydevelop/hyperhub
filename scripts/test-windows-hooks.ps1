@@ -13,6 +13,7 @@ $previousWorkerFixture = $env:HH_FORWARD_WORKER_FIXTURE
 $previousReleaseCli = $env:HYPERHUB_TEST_RELEASE_HYPERHUB
 $previousReleaseDiagnostics = $env:HYPERHUB_TEST_RELEASE_DIAGNOSTICS
 $previousRestartCli = $env:HYPERHUB_TEST_RESTART_HYPERHUB
+$previousAliasCli = $env:HYPERHUB_TEST_ALIAS_HYPERHUB
 try {
   if (-not $env:HYPERHUB_FRIDA_GUM_ROOT) {
     $env:HYPERHUB_FRIDA_GUM_ROOT = Join-Path $root '.deps/frida-gum/17.17.0/windows-x64'
@@ -36,6 +37,9 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Windows Serve restart lost an executor or its protection.' }
   cargo test --locked -p hyperhub --test executor_scope_live -- --ignored --nocapture
   if ($LASTEXITCODE -ne 0) { throw 'Windows external IPC executor scope regression failed.' }
+  $env:HYPERHUB_TEST_ALIAS_HYPERHUB = $HyperHub
+  cargo test --locked -p hyperhub --test file_alias_live -- --ignored --nocapture --test-threads=1
+  if ($LASTEXITCODE -ne 0) { throw 'Windows file namespace alias regression failed.' }
   $env:HH_FORWARD_WORKER_FIXTURE = $HyperHub
   cargo test --locked -p hyperhub-core --test forward_workers -- --ignored --nocapture
   if ($LASTEXITCODE -ne 0) { throw 'Windows forwarding worker upgrade failed.' }
@@ -58,5 +62,6 @@ finally {
   $env:HYPERHUB_TEST_RELEASE_HYPERHUB = $previousReleaseCli
   $env:HYPERHUB_TEST_RELEASE_DIAGNOSTICS = $previousReleaseDiagnostics
   $env:HYPERHUB_TEST_RESTART_HYPERHUB = $previousRestartCli
+  $env:HYPERHUB_TEST_ALIAS_HYPERHUB = $previousAliasCli
   Pop-Location
 }

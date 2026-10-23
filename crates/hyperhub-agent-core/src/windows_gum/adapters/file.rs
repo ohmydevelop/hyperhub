@@ -330,6 +330,9 @@ io_hook!(
     ORIGINAL_NT_WRITE_FILE,
     FileOperation::Write
 );
+fn is_link_information(class: u32) -> bool {
+    matches!(class, 11 | 57 | 72 | 73)
+}
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_file(
     h: HANDLE,
     ios: *mut c_void,
@@ -340,13 +343,45 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
     let Some(f) = original!(ORIGINAL_NT_SET_INFORMATION_FILE, NtSetInformationFileFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    let op = if matches!(class, 10 | 65) {
-        let source = dispatch(FileOperation::Rename, handle_path(h), h as usize, || 0);
+    if is_link_information(class) {
+        let source = dispatch_operations(
+            &[
+                FileOperation::Read,
+                FileOperation::Write,
+                FileOperation::Rename,
+            ],
+            handle_path(h),
+            h as usize,
+            || 0,
+        );
         if source == STATUS_ACCESS_DENIED {
             return source;
         }
+        // FileLinkInformation and FileLinkInformationEx use the same root/name
+        // layout as their rename counterparts on the supported 64-bit targets.
         return dispatch(
-            FileOperation::Rename,
+            FileOperation::Create,
+            rename_target_path(info, len),
+            0,
+            || f(h, ios, info, len, class),
+        );
+    }
+    let op = if matches!(class, 10 | 56 | 65 | 66) {
+        let source = dispatch_operations(
+            &[
+                FileOperation::Read,
+                FileOperation::Write,
+                FileOperation::Rename,
+            ],
+            handle_path(h),
+            h as usize,
+            || 0,
+        );
+        if source == STATUS_ACCESS_DENIED {
+            return source;
+        }
+        return dispatch_operations(
+            &[FileOperation::Create, FileOperation::Rename],
             rename_target_path(info, len),
             0,
             || f(h, ios, info, len, class),
@@ -504,6 +539,17 @@ mod tests {
                 rename_target_path(bytes.as_ptr().cast(), bytes.len() as u32).as_deref(),
                 Some("C:/tmp/target.txt")
             );
+        }
+    }
+
+    #[test]
+    fn both_hardlink_information_classes_are_namespace_operations() {
+        assert!(is_link_information(11));
+        assert!(is_link_information(72));
+        assert!(is_link_information(57));
+        assert!(is_link_information(73));
+        for class in [10, 13, 56, 64, 65, 66, 71] {
+            assert!(!is_link_information(class));
         }
     }
 

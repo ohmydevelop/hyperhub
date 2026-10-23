@@ -61,6 +61,9 @@ struct TargetAddress {
 struct FileIntent {
     targets: Vec<String>,
     operations: Vec<(FileSandboxOperation, &'static str)>,
+    resolve_content: bool,
+    // Additional per-path checks avoid applying source permissions to the destination.
+    additional: Vec<(String, FileSandboxOperation, &'static str)>,
 }
 
 struct ProcessIntent {
@@ -1451,11 +1454,23 @@ impl Supervisor {
         if number == syscall::OPEN && syscall::OPEN >= 0 {
             let path = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
             let flags = registers.argument(1) as i32;
-            return Ok(Some(file_open_intent(path, flags)));
+            return Ok(Some(file_open_intent_with_resolved(
+                tid,
+                libc::AT_FDCWD,
+                registers.argument(0) as usize,
+                path,
+                flags,
+            )));
         }
         if number == syscall::CREAT && syscall::CREAT >= 0 {
             let path = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
-            return Ok(Some(file_open_intent(path, libc::O_CREAT | libc::O_WRONLY)));
+            return Ok(Some(file_open_intent_with_resolved(
+                tid,
+                libc::AT_FDCWD,
+                registers.argument(0) as usize,
+                path,
+                libc::O_CREAT | libc::O_WRONLY,
+            )));
         }
         if number == syscall::OPENAT || number == syscall::OPENAT2 {
             let dirfd = registers.argument(0) as i32;
@@ -1467,7 +1482,13 @@ impl Supervisor {
                 let bytes = read_memory(tid, address, 8)?;
                 u64::from_ne_bytes(bytes.try_into().unwrap()) as i32
             };
-            return Ok(Some(file_open_intent(path, flags)));
+            return Ok(Some(file_open_intent_with_resolved(
+                tid,
+                dirfd,
+                registers.argument(1) as usize,
+                path,
+                flags,
+            )));
         }
         if is_one_of(
             number,
@@ -1523,13 +1544,63 @@ impl Supervisor {
                 "delete",
             )));
         }
+        if number == syscall::LINK && syscall::LINK >= 0 {
+            let old = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
+            let new = read_path(tid, libc::AT_FDCWD, registers.argument(1) as usize)?;
+            return Ok(Some(with_namespace_aliases(
+                file_link_intent(old, new, false),
+                read_namespace_path(tid, libc::AT_FDCWD, registers.argument(0) as usize),
+                read_namespace_path(tid, libc::AT_FDCWD, registers.argument(1) as usize),
+            )));
+        }
+        if number == syscall::LINKAT {
+            let oldfd = registers.argument(0) as i32;
+            let raw = read_c_string(tid, registers.argument(1) as usize, 4096)?;
+            let flags = registers.argument(4) as i32;
+            let old = if raw.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
+                fd_path(tid, oldfd).ok_or_else(|| format!("cannot resolve hardlink fd {oldfd}"))?
+            } else {
+                resolve_path(tid, oldfd, &raw)?
+            };
+            let new = read_path(
+                tid,
+                registers.argument(2) as i32,
+                registers.argument(3) as usize,
+            )?;
+            let mut intent = file_link_intent(
+                old,
+                new,
+                !raw.is_empty() && flags & libc::AT_SYMLINK_FOLLOW != 0,
+            );
+            if flags & libc::AT_SYMLINK_FOLLOW != 0 && !raw.is_empty() {
+                if let Some(resolved) = resolve_content_path(tid, oldfd, &raw) {
+                    if !intent.targets.contains(&resolved) {
+                        intent.targets.push(resolved);
+                    }
+                }
+            }
+            return Ok(Some(with_namespace_aliases(
+                intent,
+                if raw.is_empty() {
+                    None
+                } else {
+                    read_namespace_path(tid, oldfd, registers.argument(1) as usize)
+                },
+                read_namespace_path(
+                    tid,
+                    registers.argument(2) as i32,
+                    registers.argument(3) as usize,
+                ),
+            )));
+        }
         if number == syscall::RENAME && syscall::RENAME >= 0 {
             let old = read_path(tid, libc::AT_FDCWD, registers.argument(0) as usize)?;
             let new = read_path(tid, libc::AT_FDCWD, registers.argument(1) as usize)?;
-            return Ok(Some(FileIntent {
-                targets: vec![old, new],
-                operations: vec![(FileSandboxOperation::Rename, "rename")],
-            }));
+            return Ok(Some(with_namespace_aliases(
+                file_rename_intent(old, new, false),
+                read_namespace_path(tid, libc::AT_FDCWD, registers.argument(0) as usize),
+                read_namespace_path(tid, libc::AT_FDCWD, registers.argument(1) as usize),
+            )));
         }
         if number == syscall::RENAMEAT || number == syscall::RENAMEAT2 {
             let old = read_path(
@@ -1542,10 +1613,24 @@ impl Supervisor {
                 registers.argument(2) as i32,
                 registers.argument(3) as usize,
             )?;
-            return Ok(Some(FileIntent {
-                targets: vec![old, new],
-                operations: vec![(FileSandboxOperation::Rename, "rename")],
-            }));
+            return Ok(Some(with_namespace_aliases(
+                file_rename_intent(
+                    old,
+                    new,
+                    number == syscall::RENAMEAT2
+                        && registers.argument(4) & libc::RENAME_EXCHANGE as u64 != 0,
+                ),
+                read_namespace_path(
+                    tid,
+                    registers.argument(0) as i32,
+                    registers.argument(1) as usize,
+                ),
+                read_namespace_path(
+                    tid,
+                    registers.argument(2) as i32,
+                    registers.argument(3) as usize,
+                ),
+            )));
         }
         if number == syscall::MMAP || number == syscall::MPROTECT {
             let protection = registers.argument(2) as i32;
@@ -1575,6 +1660,8 @@ impl Supervisor {
                     return Ok(Some(FileIntent {
                         targets,
                         operations,
+                        additional: Vec::new(),
+                        resolve_content: true,
                     }));
                 }
             }
@@ -1651,8 +1738,40 @@ impl Supervisor {
         intent: &FileIntent,
         engine: &hyperhub_runtime::Lease,
     ) -> Result<bool, String> {
-        for target in &intent.targets {
-            for (operation, operation_name) in &intent.operations {
+        let checks = intent
+            .targets
+            .iter()
+            .flat_map(|target| {
+                intent
+                    .operations
+                    .iter()
+                    .map(move |(operation, name)| (target, operation, name))
+            })
+            .chain(
+                intent
+                    .additional
+                    .iter()
+                    .map(|(target, operation, name)| (target, operation, name)),
+            );
+        for (target, operation, operation_name) in checks {
+            // Preserve the requested-path decision, then check the resolved content target.
+            // This closes symlink aliases; it does not bind the later syscall against a
+            // concurrent namespace replacement by another process.
+            let mut targets = vec![target.clone()];
+            if intent.resolve_content
+                && matches!(
+                    operation,
+                    FileSandboxOperation::Read | FileSandboxOperation::Write
+                )
+            {
+                if let Ok(resolved) = std::fs::canonicalize(format!("/proc/{tid}/root{target}")) {
+                    let resolved = normalize_path(&resolved);
+                    if resolved != *target {
+                        targets.push(resolved);
+                    }
+                }
+            }
+            for target in &targets {
                 let context = ProtectionContext::default();
                 let sanitized = engine_sanitize(engine, target, &[target.clone()], &context);
                 let (decision, binding) = {
@@ -2510,7 +2629,135 @@ fn file_intent(
     FileIntent {
         targets: vec![target],
         operations: vec![(operation, operation_name)],
+        additional: Vec::new(),
+        resolve_content: true,
     }
+}
+
+fn file_rename_intent(source: String, destination: String, exchange: bool) -> FileIntent {
+    let mut intent = FileIntent {
+        targets: vec![source],
+        operations: vec![
+            (FileSandboxOperation::Read, "rename_source"),
+            (FileSandboxOperation::Write, "rename_source"),
+            (FileSandboxOperation::Rename, "rename_source"),
+        ],
+        additional: vec![
+            (
+                destination.clone(),
+                FileSandboxOperation::Create,
+                "rename_destination",
+            ),
+            (
+                destination.clone(),
+                FileSandboxOperation::Rename,
+                "rename_destination",
+            ),
+        ],
+        resolve_content: false,
+    };
+    if exchange {
+        intent.additional.push((
+            destination.clone(),
+            FileSandboxOperation::Read,
+            "exchange_source",
+        ));
+        intent
+            .additional
+            .push((destination, FileSandboxOperation::Write, "exchange_source"));
+    }
+    intent
+}
+
+fn with_namespace_aliases(
+    mut intent: FileIntent,
+    source: Option<String>,
+    destination: Option<String>,
+) -> FileIntent {
+    if let Some(source) = source {
+        if !intent.targets.contains(&source) {
+            intent.targets.push(source);
+        }
+    }
+    if let Some(destination) = destination {
+        let checks = intent.additional.clone();
+        for (_, operation, name) in checks {
+            intent
+                .additional
+                .push((destination.clone(), operation, name));
+        }
+    }
+    intent
+}
+
+fn read_namespace_path(tid: libc::pid_t, dirfd: i32, address: usize) -> Option<String> {
+    let raw = read_c_string(tid, address, 4096).ok()?;
+    let path = std::path::Path::new(&raw);
+    let parent = path.parent()?.to_string_lossy();
+    let resolved = resolve_content_path(tid, dirfd, &parent)?;
+    Some(
+        std::path::Path::new(&resolved)
+            .join(path.file_name()?)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn file_link_intent(source: String, destination: String, resolve_content: bool) -> FileIntent {
+    FileIntent {
+        targets: vec![source],
+        operations: vec![
+            (FileSandboxOperation::Read, "link_source"),
+            (FileSandboxOperation::Write, "link_source"),
+            (FileSandboxOperation::Rename, "link_source"),
+        ],
+        additional: vec![(
+            destination,
+            FileSandboxOperation::Create,
+            "link_destination",
+        )],
+        resolve_content,
+    }
+}
+
+fn file_open_intent_with_resolved(
+    tid: libc::pid_t,
+    dirfd: i32,
+    address: usize,
+    target: String,
+    flags: i32,
+) -> FileIntent {
+    let mut intent = file_open_intent(target, flags);
+    if flags & libc::O_CREAT != 0 {
+        if let Some(namespace) = read_namespace_path(tid, dirfd, address) {
+            if !intent.targets.contains(&namespace) {
+                intent.targets.push(namespace);
+            }
+        }
+    }
+    if let Ok(raw) = read_c_string(tid, address, 4096) {
+        if let Some(resolved) = resolve_content_path(tid, dirfd, &raw) {
+            if !intent.targets.contains(&resolved) {
+                intent.targets.push(resolved);
+            }
+        }
+    }
+    intent
+}
+
+// Resolve through the kernel's directory descriptors before lexical `..`
+// normalization. Symlink-directory/../file need not mean cwd/file.
+fn resolve_content_path(tid: libc::pid_t, dirfd: i32, raw: &str) -> Option<String> {
+    let lookup = if raw.starts_with('/') {
+        std::path::PathBuf::from(format!("/proc/{tid}/root")).join(raw.trim_start_matches('/'))
+    } else if dirfd == libc::AT_FDCWD {
+        std::path::PathBuf::from(format!("/proc/{tid}/cwd")).join(raw)
+    } else {
+        std::path::PathBuf::from(format!("/proc/{tid}/fd/{dirfd}")).join(raw)
+    };
+    std::fs::canonicalize(lookup)
+        .ok()
+        .map(|p| normalize_path(&p))
 }
 
 fn file_open_intent(target: String, flags: i32) -> FileIntent {
@@ -2527,6 +2774,8 @@ fn file_open_intent(target: String, flags: i32) -> FileIntent {
     FileIntent {
         targets: vec![target],
         operations,
+        additional: Vec::new(),
+        resolve_content: true,
     }
 }
 
@@ -3162,6 +3411,73 @@ impl Registers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardlink_permissions_bind_source_and_destination_separately() {
+        let intent = file_link_intent("/private".into(), "/alias".into(), false);
+        assert_eq!(intent.targets, vec!["/private"]);
+        assert_eq!(
+            intent.operations,
+            vec![
+                (FileSandboxOperation::Read, "link_source"),
+                (FileSandboxOperation::Write, "link_source"),
+                (FileSandboxOperation::Rename, "link_source")
+            ]
+        );
+        assert_eq!(
+            intent.additional,
+            vec![(
+                "/alias".into(),
+                FileSandboxOperation::Create,
+                "link_destination"
+            )]
+        );
+        assert!(!intent.resolve_content);
+        assert!(file_link_intent("/source".into(), "/alias".into(), true).resolve_content);
+    }
+
+    #[test]
+    fn exchange_checks_destination_as_a_content_source() {
+        let exchange = file_rename_intent("/ordinary".into(), "/protected".into(), true);
+        assert!(exchange
+            .additional
+            .iter()
+            .any(|(path, op, _)| path == "/protected" && *op == FileSandboxOperation::Read));
+        let normal = file_rename_intent("/ordinary".into(), "/destination".into(), false);
+        assert!(!normal
+            .additional
+            .iter()
+            .any(|(_, op, _)| *op == FileSandboxOperation::Read));
+    }
+
+    #[test]
+    fn content_resolution_uses_dirfd_and_symlink_parent_before_lexical_normalization() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "hyperhub-content-path-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(root.join("real/child")).unwrap();
+        std::fs::create_dir(root.join("request")).unwrap();
+        std::fs::write(root.join("real/protected"), b"dummy").unwrap();
+        std::fs::write(root.join("request/protected"), b"ordinary").unwrap();
+        symlink(root.join("real/child"), root.join("request/link")).unwrap();
+        let dir = std::fs::File::open(root.join("request")).unwrap();
+        let resolved = resolve_content_path(
+            std::process::id() as i32,
+            dir.as_raw_fd(),
+            "link/../protected",
+        )
+        .unwrap();
+        assert_eq!(resolved, root.join("real/protected").to_string_lossy());
+        assert_ne!(resolved, root.join("request/protected").to_string_lossy());
+        assert!(
+            resolve_content_path(std::process::id() as i32, dir.as_raw_fd(), "missing").is_none()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_ipv4_sockaddr() {

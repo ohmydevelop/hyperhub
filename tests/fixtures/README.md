@@ -1,5 +1,7 @@
 # Linux 运行时夹具
 
+`file_alias_target.rs` 用 dummy 文件验证受管进程不能通过硬链接、重命名或符号链接读取受路径规则拒绝的内容，并保留普通文件硬链接和重命名的成功对照。仅拒绝写入的规则另有直接读成功、直接写拒绝、硬链接/重命名后写入不能成功及原内容保持的断言。Linux 路径还覆盖 `linkat` 目录 fd、跟随/不跟随末端符号链接、继承的 O_PATH fd、`AT_EMPTY_PATH`（先验证本机无保护时可用）、目录符号链接与 `..`、精确路径规则，以及 `RENAME_EXCHANGE` 的双向交换。`file_alias_live` 运行真实隔离 CLI/Serve，分别验证 ptrace 和 Gum，已注册到 Linux/Windows Suite；它不声称 Gum 能拦截绕过 libc 的任意内联系统调用。创建于托管树之外、在首次路径拒绝之前读取的已有硬链接被记录为文件名正则策略的独立诊断；可读时明确输出保护缺口，拒绝时输出受保护，测试不要求该漏洞一直存在。该诊断不声称提供 inode 级全系统保护。
+
 `restart_target.rs` 是跨平台常驻执行器，用本地 dummy 文件验证 Serve 重启后的文件拒绝、允许读取和 shell 子命令进度。`serve_restart_live` 驱动真实隔离 CLI，覆盖原根存活、根退出后子进程存活、Linux 根进程合法 exec、控制 socket 暂时不可用、两次重启及重启后的策略更新；同时检查会话身份、成员和 Engine Host 重新上线。Gum 负例保持私有 Serve 不可用至初始化超时，核对原 spawn 成功语义、被拒绝子进程的信号、marker 未写入及父执行器恢复；相同 shell 在断线前必须实际成功写入该 marker。
 
 `executor_scope_target.rs` 用本地 TCP IPC 模拟预先启动的外部执行器。`executor_scope_live` 验证托管客户端直接读取 dummy 文件被拒绝，但委托树外服务读取仍发生在外部进程中，并核对完整成员列表和实际 PID 创建身份。它记录保护边界，不把 HyperHub 声称为全系统防御。这两组源码回归已注册到 `scripts/benchmark-linux-backends.sh` 和 `scripts/test-windows-hooks.ps1`，不需要真实凭证或外部服务。

@@ -8,6 +8,7 @@ pub enum Intent {
     FileWrite,
     FileDelete,
     FileRename,
+    FileLink,
     FileMap,
     ProcessCreate,
     ProcessExec,
@@ -52,6 +53,8 @@ pub mod syscall {
     pub const WAIT4: i64 = 61;
     pub const FCNTL: i64 = 72;
     pub const RENAME: i64 = 82;
+    pub const LINK: i64 = 86;
+    pub const LINKAT: i64 = 265;
     pub const CREAT: i64 = 85;
     pub const UNLINK: i64 = 87;
     pub const OPENAT: i64 = 257;
@@ -81,6 +84,8 @@ pub mod syscall {
     pub const DUP3: i64 = 24;
     pub const FCNTL: i64 = 25;
     pub const UNLINKAT: i64 = 35;
+    pub const LINK: i64 = -1;
+    pub const LINKAT: i64 = 37;
     pub const RENAMEAT: i64 = 38;
     pub const OPENAT: i64 = 56;
     pub const CLOSE: i64 = 57;
@@ -199,6 +204,8 @@ pub static HOOK_POINTS: &[HookPoint] = &[
         cfg!(target_arch = "x86_64"),
     ),
     hook("file.unlinkat", Intent::FileDelete, UNLINKAT, true),
+    hook("file.link", Intent::FileLink, LINK, false),
+    hook("file.linkat", Intent::FileLink, LINKAT, false),
     hook(
         "file.rename",
         Intent::FileRename,
@@ -280,6 +287,7 @@ mod tests {
             Intent::FileWrite,
             Intent::FileDelete,
             Intent::FileRename,
+            Intent::FileLink,
             Intent::FileMap,
             Intent::ProcessCreate,
             Intent::ProcessExec,

@@ -349,9 +349,13 @@ record_check backend.release_upgrade "ptrace and Gum joint Engine and worker fin
   HYPERHUB_TEST_ENGINE_HYPERHUB="$standalone_hyperhub" \
     cargo test -p hyperhub --test executor_scope_live --locked -- --ignored --nocapture \
     >"$result_dir/executor-scope.log" 2>&1
+  HYPERHUB_TEST_ALIAS_HYPERHUB="$standalone_hyperhub" \
+    cargo test -p hyperhub --test file_alias_live --locked -- --ignored --nocapture --test-threads=1 \
+    >"$result_dir/file-alias.log" 2>&1
 )
 record_check backend.serve_restart "ptrace and Gum retain live executors through two restarts, root exit, exec and a temporary control outage; a permanently unenrolled Gum child never runs application code"
 record_check sandbox.executor_scope "managed direct reads are denied; delegation to a pre-existing external IPC executor is outside the registered tree"
+record_check sandbox.file_alias "managed protected-source hard links and content symlink aliases are denied; ordinary hard links remain usable; pre-existing external hard links are reported as a scope gap"
 (
   cd "$root"
   cargo run --release -p hyperhub-engine --example native_upgrade_bench --locked -- \
@@ -434,7 +438,7 @@ HYPERHUB_DYNAMIC_HOOK_REPORT=$dynamic_hook_report \
     --backend gum \
     -- "$dynamic_probe" 127.0.0.1 "$echo_port" \
     >/dev/null 2>"$temporary/dynamic-probe.stderr.log"
-if ! grep -Eq 'Linux hooks installed=3[89] optional_missing=[01] manifest=39' \
+if ! grep -Eq 'Linux hooks installed=(40 optional_missing=1|41 optional_missing=0) manifest=41' \
   "$temporary/dynamic-probe.stderr.log"; then
   cat "$temporary/dynamic-probe.stderr.log" >&2
   echo 'dynamic Linux Hook manifest was not fully installed' >&2

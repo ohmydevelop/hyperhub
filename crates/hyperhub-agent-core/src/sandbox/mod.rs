@@ -212,6 +212,103 @@ pub(crate) fn file_decision_with_protection(
     path: &str,
     operation: FileSandboxOperation,
 ) -> (SandboxAction, Option<String>, String) {
+    let requested = file_requested_decision(path, operation);
+    if requested.0 == SandboxAction::Deny {
+        return requested;
+    }
+    let resolved = if matches!(
+        operation,
+        FileSandboxOperation::Read | FileSandboxOperation::Write
+    ) {
+        resolved_content_path(path)
+    } else {
+        resolved_namespace_path(path)
+    };
+    if let Some(resolved) = resolved {
+        if resolved != path {
+            let decision = file_requested_decision(&resolved, operation);
+            if decision.0 == SandboxAction::Deny {
+                return decision;
+            }
+        }
+    }
+    requested
+}
+
+// This is a path check at the Hook boundary, not an atomic object capability:
+// an unmediated concurrent namespace change can still race the target syscall.
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+fn resolved_content_path(path: &str) -> Option<String> {
+    let resolved = std::fs::canonicalize(path)
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(windows)]
+    let resolved = if let Some(unc) = resolved.strip_prefix(r"\\?\UNC\") {
+        format!("//{unc}").replace('\\', "/")
+    } else {
+        resolved.trim_start_matches(r"\\?\").replace('\\', "/")
+    };
+    Some(resolved)
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+fn resolved_namespace_path(path: &str) -> Option<String> {
+    let path = std::path::Path::new(path);
+    let parent = resolved_content_path(&path.parent()?.to_string_lossy())?;
+    let resolved = std::path::Path::new(&parent)
+        .join(path.file_name()?)
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(windows)]
+    let resolved = resolved.replace('\\', "/");
+    Some(resolved)
+}
+
+#[cfg(all(target_os = "linux", feature = "gum-agent"))]
+pub(crate) fn file_link_source_allows(path: &str, follow: bool) -> bool {
+    let read = if follow {
+        file_decision_with_protection(path, FileSandboxOperation::Read)
+    } else {
+        file_requested_decision(path, FileSandboxOperation::Read)
+    };
+    if read.0 == SandboxAction::Deny {
+        return false;
+    }
+    if !follow {
+        if let Some(resolved) = resolved_namespace_path(path) {
+            if file_requested_decision(&resolved, FileSandboxOperation::Read).0
+                == SandboxAction::Deny
+            {
+                return false;
+            }
+        }
+    }
+    let write = if follow {
+        file_decision_with_protection(path, FileSandboxOperation::Write)
+    } else {
+        file_requested_decision(path, FileSandboxOperation::Write)
+    };
+    if write.0 == SandboxAction::Deny {
+        return false;
+    }
+    if !follow {
+        if let Some(resolved) = resolved_namespace_path(path) {
+            if file_requested_decision(&resolved, FileSandboxOperation::Write).0
+                == SandboxAction::Deny
+            {
+                return false;
+            }
+        }
+    }
+    file_decision_with_protection(path, FileSandboxOperation::Rename).0 != SandboxAction::Deny
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+fn file_requested_decision(
+    path: &str,
+    operation: FileSandboxOperation,
+) -> (SandboxAction, Option<String>, String) {
     let Some(snapshot) = file_sandbox_snapshot() else {
         return (SandboxAction::Pass, None, "disabled".into());
     };
@@ -383,6 +480,37 @@ pub(crate) fn query_protection_gateway(
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_content_path_follows_symlinks_but_does_not_guess_missing_targets() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "hyperhub-alias-unit-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("protected"), b"dummy").unwrap();
+        symlink(root.join("protected"), root.join("alias")).unwrap();
+        assert_eq!(
+            resolved_content_path(&root.join("alias").to_string_lossy()).unwrap(),
+            root.join("protected").to_string_lossy()
+        );
+        assert_eq!(
+            resolved_namespace_path(&root.join("alias").to_string_lossy()).unwrap(),
+            root.join("alias").to_string_lossy()
+        );
+        std::fs::create_dir(root.join("actual")).unwrap();
+        std::fs::write(root.join("actual/key"), b"dummy").unwrap();
+        symlink(root.join("actual"), root.join("directory-alias")).unwrap();
+        assert_eq!(
+            resolved_namespace_path(&root.join("directory-alias/key").to_string_lossy()).unwrap(),
+            root.join("actual/key").to_string_lossy()
+        );
+        assert!(resolved_content_path(&root.join("absent").to_string_lossy()).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn compiled_file_patterns_match_only_selected_operations() {

@@ -16,7 +16,7 @@ use std::sync::{Once, OnceLock};
 
 thread_local! { static INSIDE_HOOK: Cell<bool> = const { Cell::new(false) }; }
 
-static HOOK_HITS: [AtomicU64; 38] = [const { AtomicU64::new(0) }; 38];
+static HOOK_HITS: [AtomicU64; 42] = [const { AtomicU64::new(0) }; 42];
 static HOOK_REPORT_ENABLED: AtomicBool = AtomicBool::new(false);
 static INSTALL_HOOK_REPORT: Once = Once::new();
 
@@ -55,6 +55,8 @@ const HOOK_REPORT_NAMES: &[(usize, &str)] = &[
     (34, "file.writev"),
     (35, "file.pread"),
     (36, "file.pwrite"),
+    (40, "file.link"),
+    (41, "file.linkat"),
 ];
 
 fn hook_hit(id: usize) {
@@ -1214,6 +1216,96 @@ pub unsafe extern "C" fn unlink(path: *const libc::c_char) -> c_int {
     }
     original(path)
 }
+// A new hardlink grants another name for the same data. Authorize the source
+// as both content disclosure and namespace mutation, and the new name as create.
+fn hardlink_allowed(source: &str, destination: &str, follow: bool) -> bool {
+    crate::file_link_source_allows(source, follow)
+        && crate::file_allows(destination, crate::FileSandboxOperation::Create)
+}
+pub unsafe extern "C" fn link(old: *const libc::c_char, new: *const libc::c_char) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
+    hook_hit(40);
+    let original: unsafe extern "C" fn(*const libc::c_char, *const libc::c_char) -> c_int =
+        symbol(c"link");
+    let Some(_guard) = HookGuard::enter() else {
+        return original(old, new);
+    };
+    let saved_errno = *libc::__errno_location();
+    if let (Some(source), Some(destination)) = (cpath(old), cpath(new)) {
+        if !hardlink_allowed(&source, &destination, false) {
+            audit(crate::SandboxAuditKind::File, "link", &source);
+            *libc::__errno_location() = libc::EACCES;
+            return -1;
+        }
+    }
+    *libc::__errno_location() = saved_errno;
+    original(old, new)
+}
+pub unsafe extern "C" fn linkat(
+    od: c_int,
+    old: *const libc::c_char,
+    nd: c_int,
+    new: *const libc::c_char,
+    flags: c_int,
+) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
+    hook_hit(41);
+    let original: unsafe extern "C" fn(
+        c_int,
+        *const libc::c_char,
+        c_int,
+        *const libc::c_char,
+        c_int,
+    ) -> c_int = symbol(c"linkat");
+    let Some(_guard) = HookGuard::enter() else {
+        return original(od, old, nd, new, flags);
+    };
+    let saved_errno = *libc::__errno_location();
+    // Read raw names before resolving dirfds. cpath() would incorrectly turn a
+    // relative name into an absolute cwd path before applying its dirfd.
+    let old_raw = if old.is_null() {
+        None
+    } else {
+        CStr::from_ptr(old).to_str().ok()
+    };
+    let new_raw = if new.is_null() {
+        None
+    } else {
+        CStr::from_ptr(new).to_str().ok()
+    };
+    if let (Some(raw), Some(destination)) = (old_raw, new_raw) {
+        let source = if raw.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
+            std::fs::read_link(format!("/proc/self/fd/{od}"))
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        } else {
+            Some(relative_path(od, raw))
+        };
+        if let Some(source) = source {
+            let destination = relative_path(nd, destination);
+            if !hardlink_allowed(
+                &source,
+                &destination,
+                !raw.is_empty() && flags & libc::AT_SYMLINK_FOLLOW != 0,
+            ) {
+                audit(crate::SandboxAuditKind::File, "linkat", &source);
+                *libc::__errno_location() = libc::EACCES;
+                return -1;
+            }
+        }
+    }
+    *libc::__errno_location() = saved_errno;
+    original(od, old, nd, new, flags)
+}
+fn rename_allowed(source: &str, destination: &str) -> bool {
+    crate::file_link_source_allows(source, false)
+        && crate::file_allows(destination, crate::FileSandboxOperation::Create)
+        && crate::file_allows(destination, crate::FileSandboxOperation::Rename)
+}
 pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_char) -> c_int {
     if child_policy_denied() {
         return -1;
@@ -1223,13 +1315,15 @@ pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_ch
     let Some(_guard) = HookGuard::enter() else {
         return original(old, new);
     };
-    for p in [cpath(old), cpath(new)].into_iter().flatten() {
-        if !crate::file_allows(&p, crate::FileSandboxOperation::Rename) {
-            audit(crate::SandboxAuditKind::File, "rename", &p);
+    let saved_errno = *libc::__errno_location();
+    if let (Some(source), Some(destination)) = (cpath(old), cpath(new)) {
+        if !rename_allowed(&source, &destination) {
+            audit(crate::SandboxAuditKind::File, "rename", &source);
             *libc::__errno_location() = libc::EACCES;
             return -1;
         }
     }
+    *libc::__errno_location() = saved_errno;
     original(old, new)
 }
 pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const libc::c_char, flags: c_int) -> c_int {
@@ -1266,19 +1360,21 @@ pub unsafe extern "C" fn renameat(
     let Some(_guard) = HookGuard::enter() else {
         return f(od, old, nd, new);
     };
-    for p in [
-        cpath(old).map(|raw| relative_path(od, &raw)),
-        cpath(new).map(|raw| relative_path(nd, &raw)),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !crate::file_allows(&p, crate::FileSandboxOperation::Rename) {
-            audit(crate::SandboxAuditKind::File, "rename", &p);
-            *libc::__errno_location() = libc::EACCES;
-            return -1;
+    let saved_errno = *libc::__errno_location();
+    if !old.is_null() && !new.is_null() {
+        if let (Ok(source), Ok(destination)) =
+            (CStr::from_ptr(old).to_str(), CStr::from_ptr(new).to_str())
+        {
+            let source = relative_path(od, source);
+            let destination = relative_path(nd, destination);
+            if !rename_allowed(&source, &destination) {
+                audit(crate::SandboxAuditKind::File, "rename", &source);
+                *libc::__errno_location() = libc::EACCES;
+                return -1;
+            }
         }
     }
+    *libc::__errno_location() = saved_errno;
     f(od, old, nd, new)
 }
 
@@ -1297,19 +1393,24 @@ pub unsafe extern "C" fn renameat2(
     let Some(_guard) = HookGuard::enter() else {
         return original(od, old, nd, new, flags);
     };
-    for path in [
-        cpath(old).map(|raw| relative_path(od, &raw)),
-        cpath(new).map(|raw| relative_path(nd, &raw)),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !crate::file_allows(&path, crate::FileSandboxOperation::Rename) {
-            audit(crate::SandboxAuditKind::File, "rename", &path);
-            *libc::__errno_location() = libc::EACCES;
-            return -1;
+    let saved_errno = *libc::__errno_location();
+    if !old.is_null() && !new.is_null() {
+        if let (Ok(source), Ok(destination)) =
+            (CStr::from_ptr(old).to_str(), CStr::from_ptr(new).to_str())
+        {
+            let source = relative_path(od, source);
+            let destination = relative_path(nd, destination);
+            if !rename_allowed(&source, &destination)
+                || (flags & libc::RENAME_EXCHANGE != 0
+                    && !crate::file_link_source_allows(&destination, false))
+            {
+                audit(crate::SandboxAuditKind::File, "rename", &source);
+                *libc::__errno_location() = libc::EACCES;
+                return -1;
+            }
         }
     }
+    *libc::__errno_location() = saved_errno;
     original(od, old, nd, new, flags)
 }
 fn housekeeping_allowed() -> bool {

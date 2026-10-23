@@ -200,6 +200,14 @@ static DESCRIPTORS: &[Descriptor] = &[
         native::renameat2 as *mut c_void,
         false,
     ),
+    replace(40, "link", "file.link", native::link as *mut c_void, true),
+    replace(
+        41,
+        "linkat",
+        "file.link",
+        native::linkat as *mut c_void,
+        true,
+    ),
     listen(38, "_exit", "process.exit", native::LISTENER_EXIT, true),
     listen(39, "_Exit", "process.exit", native::LISTENER_EXIT, true),
 ];
@@ -399,7 +407,7 @@ mod tests {
                 descriptor.symbol
             );
         }
-        assert_eq!(DESCRIPTORS.len(), 39);
+        assert_eq!(DESCRIPTORS.len(), 41);
         assert!(
             !DESCRIPTORS
                 .iter()
