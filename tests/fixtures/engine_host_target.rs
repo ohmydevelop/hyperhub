@@ -2,6 +2,93 @@
 //! children that independently exercise the current processing generation.
 use std::io::{self, BufRead, Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
+
+#[cfg(target_os = "linux")]
+mod fork_callback {
+    use std::ffi::{c_char, c_int, CString};
+    use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU16, Ordering};
+
+    static PATH: AtomicPtr<c_char> = AtomicPtr::new(std::ptr::null_mut());
+    static RESULT: AtomicI32 = AtomicI32::new(i32::MIN);
+    static ERROR: AtomicI32 = AtomicI32::new(0);
+    static PORT: AtomicU16 = AtomicU16::new(0);
+    static CONNECT_RESULT: AtomicI32 = AtomicI32::new(i32::MIN);
+    static CONNECT_ERROR: AtomicI32 = AtomicI32::new(0);
+    #[repr(C)]
+    struct Address {
+        family: u16,
+        port: u16,
+        address: u32,
+        padding: [u8; 8],
+    }
+    unsafe extern "C" {
+        fn pthread_atfork(
+            prepare: Option<unsafe extern "C" fn()>,
+            parent: Option<unsafe extern "C" fn()>,
+            child: Option<unsafe extern "C" fn()>,
+        ) -> c_int;
+        fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        fn __errno_location() -> *mut c_int;
+        fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
+        fn connect(fd: c_int, address: *const Address, length: u32) -> c_int;
+    }
+
+    unsafe extern "C" fn child() {
+        let path = PATH.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if path.is_null() {
+            return;
+        }
+        // Only async-signal-safe libc IO and initialized atomics run here. The
+        // application assertion runs after fork returns, outside the callback.
+        let fd = open(path, 0);
+        let error = *__errno_location();
+        RESULT.store(fd, Ordering::Release);
+        ERROR.store(error, Ordering::Release);
+        if fd >= 0 {
+            close(fd);
+        }
+        let fd = socket(2, 1, 0);
+        if fd >= 0 {
+            let address = Address {
+                family: 2,
+                port: PORT.load(Ordering::Acquire).to_be(),
+                address: u32::from_ne_bytes([127, 0, 0, 1]),
+                padding: [0; 8],
+            };
+            let result = connect(fd, &address, std::mem::size_of::<Address>() as u32);
+            let error = *__errno_location();
+            CONNECT_RESULT.store(result, Ordering::Release);
+            CONNECT_ERROR.store(error, Ordering::Release);
+            close(fd);
+        }
+    }
+
+    pub fn install(path: &str) -> (CString, std::net::TcpListener) {
+        let path = CString::new(path).unwrap();
+        // The child inherits this listening socket, so the direct connection
+        // remains deterministic even when the parent exits immediately.
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        PORT.store(listener.local_addr().unwrap().port(), Ordering::Release);
+        PATH.store(path.as_ptr() as *mut c_char, Ordering::Release);
+        assert_eq!(unsafe { pthread_atfork(None, None, Some(child)) }, 0);
+        (path, listener)
+    }
+
+    pub fn check() {
+        let file = (
+            RESULT.load(Ordering::Acquire),
+            ERROR.load(Ordering::Acquire),
+        );
+        let socket = (
+            CONNECT_RESULT.load(Ordering::Acquire),
+            CONNECT_ERROR.load(Ordering::Acquire),
+        );
+        assert!(file == (-1, 13) && socket == (-1, 13),
+            "fork child callback must reject new policy requests with Linux EACCES before Host recovery: file={file:?}, socket={socket:?}");
+    }
+}
+
 #[cfg(unix)]
 struct ForkChild {
     pid: i32,
@@ -307,18 +394,26 @@ fn main() {
                     print!("{line}");
                 }
             }
-        } else if line == "orphan" {
+        } else if line == "orphan" || line.starts_with("orphan-callbacks ") {
             #[cfg(unix)]
             {
                 unsafe extern "C" {
                     fn fork() -> i32;
                 }
+                #[cfg(target_os = "linux")]
+                let callback = line
+                    .strip_prefix("orphan-callbacks ")
+                    .map(fork_callback::install);
                 let child = unsafe { fork() };
                 assert!(child >= 0);
                 if child > 0 {
                     println!("ORPHAN_PID {child}");
                     io::stdout().flush().unwrap();
                     std::process::exit(0);
+                }
+                #[cfg(target_os = "linux")]
+                if callback.is_some() {
+                    fork_callback::check();
                 }
             }
         } else if line == "fork-check" {

@@ -13,7 +13,12 @@ pub struct GumInvocationListener {
 }
 #[repr(C)]
 pub struct GumInvocationContext {
-    _private: [u8; 0],
+    // Public Frida 17.17.0 GumInvocationContext layout. The interceptor restores
+    // system_error after onLeave, so a denied listener must update this field.
+    function: *mut c_void,
+    cpu_context: *mut c_void,
+    system_error: libc::c_int,
+    backend: *mut c_void,
 }
 pub type GumInvocationCallback = unsafe extern "C" fn(*mut GumInvocationContext, *mut c_void);
 #[link(name = "frida-gum", kind = "static")]
@@ -194,6 +199,9 @@ pub unsafe fn argument(context: *mut GumInvocationContext, index: u32) -> *mut c
 }
 pub unsafe fn replace_argument(context: *mut GumInvocationContext, index: u32, value: *mut c_void) {
     gum_invocation_context_replace_nth_argument(context, index, value)
+}
+pub unsafe fn replace_system_error(context: *mut GumInvocationContext, error: libc::c_int) {
+    (*context).system_error = error;
 }
 pub unsafe fn return_value(context: *mut GumInvocationContext) -> *mut c_void {
     gum_invocation_context_get_return_value(context)

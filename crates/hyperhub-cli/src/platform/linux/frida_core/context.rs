@@ -8,6 +8,14 @@ use std::ptr::NonNull;
 pub struct Process(pub(super) i32);
 
 impl Process {
+    pub fn from_pid(pid: u32) -> Result<Self, String> {
+        let pid = i32::try_from(pid).map_err(|_| "process ID exceeds pid_t".to_string())?;
+        if pid == 0 {
+            return Err("process ID must be positive".into());
+        }
+        Ok(Self(pid))
+    }
+
     pub fn pid(self) -> i32 {
         self.0
     }

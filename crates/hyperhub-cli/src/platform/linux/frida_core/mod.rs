@@ -1,5 +1,6 @@
 mod child_gating;
 mod context;
+mod fork_listener;
 mod injector;
 
 pub(super) const FRIDA_CORE_VERSION: &str = "17.17.0";
@@ -7,7 +8,7 @@ pub(super) const FRIDA_CORE_VERSION: &str = "17.17.0";
 use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub use context::{Process, Stdio};
 
@@ -41,6 +42,12 @@ enum Command {
         process: Process,
         reply: Reply<()>,
     },
+    ForkListener {
+        process: Process,
+        runtime: PathBuf,
+        prepare: bool,
+        reply: Reply<()>,
+    },
     PendingChildren {
         reply: Reply<Vec<PendingChild>>,
     },
@@ -55,6 +62,22 @@ type Reply<T> = Sender<Result<T, String>>;
 
 impl FridaCore {
     pub fn new() -> Result<Self, String> {
+        // Core is a process-wide SDK. In 17.17, failed fork reservations can
+        // retain an unused injectee clone; closing its device manager then waits
+        // indefinitely even after every managed process has exited. Keep one
+        // owner until CLI process exit. Per-process sessions and target-tree
+        // completion are still retired explicitly by the child monitor.
+        static OWNER: OnceLock<Result<Arc<Inner>, String>> = OnceLock::new();
+        OWNER
+            .get_or_init(Self::start_owner)
+            .as_ref()
+            .map(|inner| Self {
+                inner: inner.clone(),
+            })
+            .map_err(Clone::clone)
+    }
+
+    fn start_owner() -> Result<Arc<Inner>, String> {
         let (sender, receiver) = mpsc::channel();
         let (init_sender, init_receiver) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
@@ -92,6 +115,15 @@ impl FridaCore {
                             Command::EnableChildGating { process, reply } => {
                                 let _ = reply.send(context.enable_child_gating(process));
                             }
+                            Command::ForkListener {
+                                process,
+                                runtime,
+                                prepare,
+                                reply,
+                            } => {
+                                let _ =
+                                    reply.send(context.fork_listener(process, &runtime, prepare));
+                            }
                             Command::PendingChildren { reply } => {
                                 let _ = reply.send(context.pending_children());
                             }
@@ -114,7 +146,7 @@ impl FridaCore {
         init_receiver
             .recv()
             .map_err(|_| "Frida Core owner thread exited during initialization".to_string())??;
-        Ok(Self { inner })
+        Ok(inner)
     }
 
     fn request<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
@@ -212,6 +244,17 @@ mod tests {
         assert_eq!(ChildOrigin::from_raw(1), ChildOrigin::Exec);
         assert_eq!(ChildOrigin::from_raw(2), ChildOrigin::Spawn);
         assert_eq!(ChildOrigin::from_raw(99), ChildOrigin::Unknown(99));
+    }
+
+    #[test]
+    fn core_handles_share_one_process_lifetime_owner() {
+        let first = FridaCore::new().unwrap();
+        let second = FridaCore::new().unwrap();
+        assert!(Arc::ptr_eq(&first.inner, &second.inner));
+        let owner = Arc::downgrade(&first.inner);
+        drop(first);
+        drop(second);
+        assert!(owner.upgrade().is_some());
     }
 
     #[test]

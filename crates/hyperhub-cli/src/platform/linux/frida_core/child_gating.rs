@@ -4,7 +4,19 @@ use std::ffi::CStr;
 use std::ptr::NonNull;
 
 impl Context {
+    fn retire_detached_sessions(&mut self) {
+        self.child_sessions.retain(|session| unsafe {
+            if frida_sys::frida_session_is_detached(session.as_ptr()) == 0 {
+                true
+            } else {
+                unref(session.as_ptr().cast());
+                false
+            }
+        });
+    }
+
     pub(super) fn enable_child_gating(&mut self, process: Process) -> Result<(), String> {
+        self.retire_detached_sessions();
         unsafe {
             let session = attach(self.device.as_ptr(), process)?;
             let mut error = std::ptr::null_mut();
@@ -24,6 +36,7 @@ impl Context {
     }
 
     pub(super) fn pending_children(&mut self) -> Result<Vec<PendingChild>, String> {
+        self.retire_detached_sessions();
         unsafe {
             let mut error = std::ptr::null_mut();
             let list = frida_sys::frida_device_enumerate_pending_children_sync(
@@ -83,7 +96,7 @@ fn is_skip_agent_entry(value: &CStr) -> bool {
     value.to_bytes() == b"HYPERHUB_SKIP_AGENT=1"
 }
 
-unsafe fn attach(
+pub(super) unsafe fn attach(
     device: *mut frida_sys::_FridaDevice,
     process: Process,
 ) -> Result<NonNull<frida_sys::_FridaSession>, String> {

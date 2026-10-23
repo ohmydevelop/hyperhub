@@ -56,6 +56,27 @@ impl Drop for Target {
 struct Root(PathBuf);
 impl Drop for Root {
     fn drop(&mut self) {
+        if let Some(destination) = std::env::var_os("HYPERHUB_TEST_ENGINE_DIAGNOSTICS") {
+            let destination = PathBuf::from(destination).join(self.0.file_name().unwrap());
+            if let Err(error) = fs::create_dir_all(&destination) {
+                eprintln!("cannot retain native fixture diagnostics: {error}");
+            } else {
+                for name in [
+                    "target.stdout",
+                    "target-stages.log",
+                    "target.log",
+                    "timeout-proc.json",
+                    "last-hosts.json",
+                ] {
+                    let source = self.0.join(name);
+                    if source.is_file() {
+                        if let Err(error) = fs::copy(source, destination.join(name)) {
+                            eprintln!("cannot retain native fixture {name}: {error}");
+                        }
+                    }
+                }
+            }
+        }
         if std::thread::panicking() {
             eprintln!(
                 "native Host fixture: {}\n{}",
@@ -115,7 +136,7 @@ fn compile(source: &Path, output: &Path, library: bool, version: &str) {
 }
 async fn policy_check(
     input: &mut std::process::ChildStdin,
-    output: &mut Arc<std::sync::Mutex<BufReader<std::process::ChildStdout>>>,
+    output: &mut TargetOutput,
     pid: u32,
     path: &Path,
     child: &Path,
@@ -146,7 +167,7 @@ async fn policy_check(
 #[cfg(target_os = "linux")]
 async fn fork_check(
     input: &mut std::process::ChildStdin,
-    output: &mut Arc<std::sync::Mutex<BufReader<std::process::ChildStdout>>>,
+    output: &mut TargetOutput,
     path: Option<&Path>,
     expected: &[u32],
     allow: bool,
@@ -295,32 +316,265 @@ async fn dispatch(endpoint: &str, host_id: &str, id: &str, command: Command) -> 
     .await
     .unwrap()
 }
-fn read_target_line(reader: &mut BufReader<std::process::ChildStdout>, prefix: &str) -> String {
+fn orphan_handshake_pid(
+    first: &str,
+    second: &str,
+    root_pid: u32,
+    inherited_streams: usize,
+) -> Result<u32, String> {
+    let (identity, acknowledgement) = match (
+        first.starts_with("ORPHAN_PID "),
+        second.starts_with("ORPHAN_PID "),
+    ) {
+        (true, false) => (first, second),
+        (false, true) => (second, first),
+        _ => {
+            return Err(format!(
+                "expected one orphan identity: {first:?}, {second:?}"
+            ))
+        }
+    };
+    let pid = identity
+        .strip_prefix("ORPHAN_PID ")
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid != 0 && *pid != root_pid)
+        .ok_or_else(|| format!("invalid orphan identity: {identity:?}"))?;
+    let expected = format!("TARGET_OK {pid} {inherited_streams}");
+    if acknowledgement != expected {
+        return Err(format!(
+            "expected {expected:?}, received {acknowledgement:?}"
+        ));
+    }
+    Ok(pid)
+}
+#[test]
+fn orphan_handshake_accepts_parent_first_and_checks_child_identity() {
+    assert_eq!(
+        orphan_handshake_pid("ORPHAN_PID 23", "TARGET_OK 23 2", 17, 2),
+        Ok(23)
+    );
+    assert!(orphan_handshake_pid("ORPHAN_PID 23", "TARGET_OK 24 2", 17, 2).is_err());
+    assert!(orphan_handshake_pid("ORPHAN_PID 17", "TARGET_OK 17 2", 17, 2).is_err());
+}
+#[test]
+fn orphan_handshake_accepts_child_first_and_checks_stream_count() {
+    assert_eq!(
+        orphan_handshake_pid("TARGET_OK 23 2", "ORPHAN_PID 23", 17, 2),
+        Ok(23)
+    );
+    assert!(orphan_handshake_pid("TARGET_OK 23 1", "ORPHAN_PID 23", 17, 2).is_err());
+    assert!(orphan_handshake_pid("ORPHAN_PID 23", "ORPHAN_PID 23", 17, 2).is_err());
+}
+
+#[cfg(target_os = "linux")]
+fn orphan_monitor_barrier(root: &Path, launcher: u32, target: u32) {
+    let Some(endpoint) = std::env::var_os("HYPERHUB_TEST_ENGINE_ORPHAN_BARRIER") else {
+        return;
+    };
+    let mut channel = std::os::unix::net::UnixStream::connect(endpoint).unwrap();
+    channel
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    channel
+        .set_write_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    serde_json::to_writer(
+        &mut channel,
+        &serde_json::json!({
+            "fixture_root": root,
+            "launcher_pid": launcher,
+            "target_pid": target,
+        }),
+    )
+    .unwrap();
+    channel.write_all(b"\n").unwrap();
+    channel.flush().unwrap();
+    let mut go = [0];
+    channel.read_exact(&mut go).unwrap();
+    assert_eq!(go, *b"G", "orphan monitor barrier rejected the driver");
+}
+
+#[derive(Clone)]
+struct TargetOutput {
+    reader: Arc<std::sync::Mutex<BufReader<std::process::ChildStdout>>>,
+    diagnostics: Arc<std::sync::Mutex<TargetDiagnostics>>,
+}
+struct TargetDiagnostics {
+    #[cfg(target_os = "linux")]
+    root: PathBuf,
+    #[cfg(target_os = "linux")]
+    launcher_pid: u32,
+    stdout: fs::File,
+    stages: fs::File,
+    recent: std::collections::VecDeque<String>,
+}
+#[cfg(target_os = "linux")]
+fn capture_timeout_processes(root: &Path, launcher: u32, prefix: &str, caller: &str) {
+    let read = |path: &Path| match fs::read_to_string(path) {
+        Ok(contents) => serde_json::json!({"contents": contents}),
+        Err(error) => serde_json::json!({"error": error.to_string()}),
+    };
+    let mut processes = std::collections::BTreeMap::new();
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(status) = fs::read_to_string(entry.path().join("status")) else {
+                continue;
+            };
+            let parent = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .unwrap_or_default();
+            let executable = fs::read_link(entry.path().join("exe")).ok();
+            let private = pid == launcher
+                || executable
+                    .as_ref()
+                    .is_some_and(|path| path.starts_with(root));
+            processes.insert(pid, (parent, private));
+        }
+    }
+    loop {
+        let added: Vec<_> = processes
+            .iter()
+            .filter_map(|(pid, (parent, selected))| {
+                (!selected && processes.get(parent).is_some_and(|(_, selected)| *selected))
+                    .then_some(*pid)
+            })
+            .collect();
+        if added.is_empty() {
+            break;
+        }
+        for pid in added {
+            processes.get_mut(&pid).unwrap().1 = true;
+        }
+    }
+    let mut selected = Vec::new();
+    for (pid, (_, private)) in processes {
+        if !private {
+            continue;
+        }
+        let process = PathBuf::from(format!("/proc/{pid}"));
+        let mut tasks = Vec::new();
+        if let Ok(entries) = fs::read_dir(process.join("task")) {
+            for task in entries.flatten() {
+                tasks.push(serde_json::json!({
+                    "tid": task.file_name().to_string_lossy(),
+                    "status": read(&task.path().join("status")),
+                    "wchan": read(&task.path().join("wchan")),
+                    "syscall": read(&task.path().join("syscall")),
+                    "stack": read(&task.path().join("stack")),
+                }));
+            }
+        }
+        let mut descriptors = Vec::new();
+        if let Ok(entries) = fs::read_dir(process.join("fd")) {
+            for fd in entries.flatten().take(256) {
+                descriptors.push(serde_json::json!({
+                    "fd": fd.file_name().to_string_lossy(),
+                    "target": fs::read_link(fd.path()).map(|path| path.to_string_lossy().into_owned()).map_err(|error| error.to_string()),
+                }));
+            }
+        }
+        selected.push(serde_json::json!({
+            "pid": pid, "status": read(&process.join("status")),
+            "stat": read(&process.join("stat")), "wchan": read(&process.join("wchan")),
+            "syscall": read(&process.join("syscall")), "stack": read(&process.join("stack")),
+            "tasks": tasks, "descriptors": descriptors,
+        }));
+    }
+    let snapshot = serde_json::json!({
+        "private_fixture": root, "launcher_pid": launcher, "waiting_prefix": prefix,
+        "caller": caller, "captured_before_fixture_cleanup": true, "processes": selected,
+    });
+    if let Err(error) = fs::write(
+        root.join("timeout-proc.json"),
+        serde_json::to_vec_pretty(&snapshot).unwrap(),
+    ) {
+        eprintln!("cannot retain timeout process snapshot: {error}");
+    }
+}
+fn read_target_line(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    diagnostics: &std::sync::Mutex<TargetDiagnostics>,
+    prefix: &str,
+    caller: &str,
+) -> String {
     loop {
         let mut line = String::new();
+        let read = reader.read_line(&mut line).unwrap();
+        let mut diagnostics = diagnostics.lock().unwrap();
         assert_ne!(
-            reader.read_line(&mut line).unwrap(),
-            0,
-            "target exited before {prefix}"
+            read, 0,
+            "target exited before {prefix:?} at {caller}; recent stdout: {:?}",
+            diagnostics.recent
         );
+        diagnostics.stdout.write_all(line.as_bytes()).unwrap();
+        diagnostics.stdout.flush().unwrap();
+        if diagnostics.recent.len() == 16 {
+            diagnostics.recent.pop_front();
+        }
+        diagnostics.recent.push_back(line.trim().into());
         if line.starts_with(prefix) {
+            writeln!(diagnostics.stages, "MATCH {prefix:?} at {caller}").unwrap();
+            diagnostics.stages.flush().unwrap();
             return line.trim().into();
         }
     }
 }
-async fn target_line(
-    reader: &mut Arc<std::sync::Mutex<BufReader<std::process::ChildStdout>>>,
+#[track_caller]
+fn target_line(
+    output: &mut TargetOutput,
     prefix: &'static str,
-) -> String {
-    let reader = reader.clone();
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        tokio::task::spawn_blocking(move || read_target_line(&mut reader.lock().unwrap(), prefix)),
-    )
-    .await
-    .expect("target output timed out")
-    .unwrap()
+) -> impl std::future::Future<Output = String> {
+    let caller = std::panic::Location::caller();
+    let caller = format!("{}:{}", caller.file(), caller.line());
+    let output = output.clone();
+    async move {
+        {
+            let mut diagnostics = output.diagnostics.lock().unwrap();
+            writeln!(diagnostics.stages, "WAIT {prefix:?} at {caller}").unwrap();
+            diagnostics.stages.flush().unwrap();
+        }
+        let diagnostics = output.diagnostics.clone();
+        let read_caller = caller.clone();
+        match tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio::task::spawn_blocking(move || {
+                read_target_line(
+                    &mut output.reader.lock().unwrap(),
+                    &diagnostics,
+                    prefix,
+                    &read_caller,
+                )
+            }),
+        )
+        .await
+        {
+            Ok(result) => result.unwrap(),
+            Err(error) => {
+                let mut diagnostics = output.diagnostics.lock().unwrap();
+                writeln!(diagnostics.stages, "TIMEOUT {prefix:?} at {caller}").unwrap();
+                diagnostics.stages.flush().unwrap();
+                #[cfg(target_os = "linux")]
+                capture_timeout_processes(
+                    &diagnostics.root,
+                    diagnostics.launcher_pid,
+                    prefix,
+                    &caller,
+                );
+                let recent = diagnostics.recent.clone();
+                drop(diagnostics);
+                panic!(
+                    "target output timed out waiting for {prefix:?} at {caller}: {error}; recent stdout: {recent:?}"
+                );
+            }
+        }
+    }
 }
+
 fn mock_connection(
     mut stream: TcpStream,
     sessions: SessionRegistry,
@@ -379,12 +633,12 @@ fn mock_connection(
     ignore = "native Gum fixture runs in test-windows-hooks.ps1 after building the Agent"
 )]
 async fn native_host_switch_keeps_target_pid_and_old_tcp_stream() {
-    native_host_scenario(false, false).await;
+    native_host_scenario(false, false, false, false).await;
 }
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ptrace_host_switch_survives_root_exit_with_live_descendants() {
-    native_host_scenario(true, true).await;
+    native_host_scenario(true, true, false, false).await;
 }
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -395,9 +649,36 @@ async fn gum_host_switch_survives_root_exit_with_live_descendants() {
         eprintln!("Gum orphan fixture requires an explicit or embedded Agent");
         return;
     }
-    native_host_scenario(true, false).await;
+    native_host_scenario(true, false, false, false).await;
 }
-async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gum_fork_recovery_signal_does_not_bypass_policy() {
+    if std::env::var_os("HYPERHUB_TEST_ENGINE_GUM_AGENT").is_none()
+        && std::env::var_os("HYPERHUB_TEST_ENGINE_EMBEDDED_AGENT").is_none()
+    {
+        eprintln!("signal recovery regression requires an explicit or embedded Gum Agent");
+        return;
+    }
+    native_host_scenario(false, false, true, false).await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gum_failed_fork_cancels_handoff_without_losing_policy() {
+    if std::env::var_os("HYPERHUB_TEST_ENGINE_GUM_AGENT").is_none()
+        && std::env::var_os("HYPERHUB_TEST_ENGINE_EMBEDDED_AGENT").is_none()
+    {
+        eprintln!("failed-fork regression requires an explicit or embedded Gum Agent");
+        return;
+    }
+    native_host_scenario(false, false, false, true).await;
+}
+async fn native_host_scenario(
+    orphan: bool,
+    force_ptrace: bool,
+    signal_case: bool,
+    failed_fork_case: bool,
+) {
     let version = "channel-fixture";
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let root = Root(std::env::temp_dir().join(format!(
@@ -431,6 +712,19 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
         version,
     );
     #[cfg(target_os = "linux")]
+    let failed_fork_fixture = failed_fork_case.then(|| {
+        let executable = root.0.join("failed-fork-target");
+        compile(
+            &repo.join("tests/fixtures/failed_fork_target.rs"),
+            &executable,
+            false,
+            version,
+        );
+        let allowed_file = root.0.join("failed-fork-readable-file");
+        fs::write(&allowed_file, b"allowed fork regression").unwrap();
+        (executable, allowed_file)
+    });
+    #[cfg(target_os = "linux")]
     let loader = {
         let library = root.0.join("native-tls-loader.so");
         let output = std::process::Command::new("cc")
@@ -452,6 +746,27 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
     config.listener.socks_listen = socks.local_addr().unwrap().to_string();
     config.sandbox.file.enabled = true;
     config.sandbox.process.enabled = true;
+    #[cfg(target_os = "linux")]
+    let signal_fixture = signal_case.then(|| {
+        let executable = root.0.join("fork-signal-target");
+        compile(&repo.join("tests/fixtures/linux_fork_signal_target.rs"), &executable, false, version);
+        let denied_file = root.0.join("signal-denied-file");
+        fs::write(&denied_file, b"permanent signal policy").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        config.sandbox.file.rules.push(serde_json::from_value(serde_json::json!({
+            "uuid":"707d7285-66bf-4bd1-94ac-f7a4473197f9", "id":"signal-file-deny", "action":"deny",
+            "patterns":[{"pattern":format!("^{}$", regex::escape(denied_file.to_str().unwrap()))}], "operations":["read"]
+        })).unwrap());
+        config.firewall.enabled = true;
+        config.firewall.rules.push(serde_json::from_value(serde_json::json!({
+            "uuid":"fb626906-757f-485d-916a-c85d4cf01891", "id":"signal-connect-deny", "action":"deny",
+            "endpoints":[{"target":"127.0.0.1", "port":port}]
+        })).unwrap());
+        (executable, denied_file, listener)
+    });
+    #[cfg(windows)]
+    assert!(!signal_case && !failed_fork_case);
     #[cfg(target_os = "linux")]
     config.sandbox.file.rules.push(
         serde_json::from_value(serde_json::json!({
@@ -522,6 +837,17 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
     let binary = std::env::var_os("HYPERHUB_TEST_ENGINE_HYPERHUB")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_hyperhub").into());
     let mut command = std::process::Command::new(binary);
+    #[cfg(target_os = "linux")]
+    if let Some((_, path)) = &failed_fork_fixture {
+        command.env("HH_FAILED_FORK_FILE", path);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some((_, path, listener)) = &signal_fixture {
+        command.env("HH_SIGNAL_DENY_FILE", path).env(
+            "HH_SIGNAL_DENY_PORT",
+            listener.local_addr().unwrap().port().to_string(),
+        );
+    }
     command.arg("run");
     if force_ptrace {
         command.args(["--backend", "ptrace"]);
@@ -552,9 +878,20 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
         .unwrap();
     let mut target = Target(child, root.0.clone());
     let mut input = target.0.stdin.take().unwrap();
-    let mut output = Arc::new(std::sync::Mutex::new(BufReader::new(
-        target.0.stdout.take().unwrap(),
-    )));
+    let mut output = TargetOutput {
+        reader: Arc::new(std::sync::Mutex::new(BufReader::new(
+            target.0.stdout.take().unwrap(),
+        ))),
+        diagnostics: Arc::new(std::sync::Mutex::new(TargetDiagnostics {
+            #[cfg(target_os = "linux")]
+            root: root.0.clone(),
+            #[cfg(target_os = "linux")]
+            launcher_pid: target.0.id(),
+            stdout: fs::File::create(root.0.join("target.stdout")).unwrap(),
+            stages: fs::File::create(root.0.join("target-stages.log")).unwrap(),
+            recent: std::collections::VecDeque::with_capacity(16),
+        })),
+    };
     let pid_line = target_line(&mut output, "TARGET_PID ").await;
     let mut pid: u32 = pid_line.split_whitespace().nth(1).unwrap().parse().unwrap();
     #[cfg(target_os = "linux")]
@@ -570,6 +907,70 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
     let mut original = host(&endpoint).await;
     rollout::reject_configuration_key(&endpoint).await;
     assert_eq!(original.root_pid, pid);
+    #[cfg(target_os = "linux")]
+    if let Some((executable, path)) = &failed_fork_fixture {
+        writeln!(input, "process {}", executable.display()).unwrap();
+        input.flush().unwrap();
+        let first = target_line(&mut output, "").await;
+        let fields: Vec<_> = first.split_whitespace().collect();
+        assert_eq!(fields.len(), 3, "{first}");
+        assert_eq!(fields[0], "FILE_OK", "{first}");
+        let child: u32 = fields[1].parse().unwrap();
+        assert_ne!(child, pid);
+        assert_eq!(
+            fields[2].parse::<u64>().unwrap(),
+            fs::metadata(path).unwrap().len()
+        );
+        for expected in [
+            format!("FILTER_READY {child}"),
+            format!("THREAD_OK {child}"),
+            format!("FORK_EAGAIN {child} 11"),
+            format!("FORK_EAGAIN {child} 11"),
+            first,
+            "FAILED_FORK_CASE_PASS".into(),
+            format!("PROCESS_POLICY {pid} true"),
+            format!("TARGET_OK {pid} 0"),
+        ] {
+            assert_eq!(target_line(&mut output, "").await, expected);
+        }
+        let ControlResponse::EngineHosts { hosts, .. } = exchange(
+            &endpoint,
+            &ControlRequest::GetEngineHosts {
+                request_id: None,
+                host_id: None,
+            },
+        )
+        .await
+        else {
+            panic!("missing failed-fork helper Host inventory");
+        };
+        let helper = hosts
+            .iter()
+            .find(|host| host.root_pid == child && host.backend == original.backend)
+            .unwrap_or_else(|| {
+                panic!("failed-fork helper PID {child} was never registered as a managed Host")
+            });
+        // The short-lived target has already exited; its retained offline
+        // registration proves that its two libc fork failures exercised hooks.
+        eprintln!(
+            "FAILED_FORK_MANAGED_HOST pid={child} online={}",
+            helper.online
+        );
+    }
+    #[cfg(target_os = "linux")]
+    if let Some((executable, _, _)) = &signal_fixture {
+        writeln!(input, "process {}", executable.display()).unwrap();
+        input.flush().unwrap();
+        assert_eq!(target_line(&mut output, "").await, "SIGNAL_CASE_PASS");
+        assert_eq!(
+            target_line(&mut output, "PROCESS_POLICY ").await,
+            format!("PROCESS_POLICY {pid} true")
+        );
+        assert_eq!(
+            target_line(&mut output, "TARGET_OK ").await,
+            format!("TARGET_OK {pid} 0")
+        );
+    }
     policy_check(
         &mut input,
         &mut output,
@@ -616,15 +1017,37 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
     #[cfg(target_os = "linux")]
     if orphan {
         let root_pid = pid;
-        input.write_all(b"orphan\n").unwrap();
+        orphan_monitor_barrier(&root.0, target.0.id(), root_pid);
+        if force_ptrace {
+            input.write_all(b"orphan\n").unwrap();
+        } else {
+            writeln!(input, "orphan-callbacks {}", policy_path.display()).unwrap();
+        }
         input.flush().unwrap();
-        let line = target_line(&mut output, "ORPHAN_PID ").await;
-        pid = line.split_whitespace().nth(1).unwrap().parse().unwrap();
-        assert_ne!(pid, root_pid);
-        assert_eq!(
-            target_line(&mut output, "TARGET_OK ").await,
-            format!("TARGET_OK {pid} {inherited_streams}")
-        );
+        // Parent identity and child acknowledgement come from independent
+        // processes. Read this pair without discarding either possible order.
+        let pair = tokio::time::timeout(Duration::from_secs(15), async {
+            let first = target_line(&mut output, "").await;
+            let second = target_line(&mut output, "").await;
+            (first, second)
+        })
+        .await;
+        let (first, second) = match pair {
+            Ok(pair) => pair,
+            Err(error) => {
+                let diagnostics = output.diagnostics.lock().unwrap();
+                capture_timeout_processes(
+                    &diagnostics.root,
+                    diagnostics.launcher_pid,
+                    "orphan identity and acknowledgement pair",
+                    "orphan handshake",
+                );
+                drop(diagnostics);
+                panic!("orphan identity handshake timed out: {error}");
+            }
+        };
+        pid = orphan_handshake_pid(&first, &second, root_pid, inherited_streams)
+            .expect("invalid orphan identity handshake");
         tokio::time::timeout(Duration::from_secs(5), async {
             while std::path::Path::new(&format!("/proc/{root_pid}")).exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -648,17 +1071,32 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
                 "the resident tracer must remain registered after root exit"
             );
         } else {
-            original = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut host_history = Vec::new();
+            let enrolled = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
-                    if let ControlResponse::EngineHosts { hosts, .. } = exchange(
+                    let response = exchange(
                         &endpoint,
                         &ControlRequest::GetEngineHosts {
                             request_id: None,
                             host_id: None,
                         },
                     )
-                    .await
+                    .await;
+                    let value = serde_json::to_value(&response).unwrap();
+                    if host_history
+                        .last()
+                        .and_then(|entry: &serde_json::Value| entry.get("response"))
+                        != Some(&value)
                     {
+                        if host_history.len() == 32 {
+                            host_history.remove(0);
+                        }
+                        host_history.push(serde_json::json!({
+                            "at_ms": hyperhub_core::session::unix_timestamp_ms(),
+                            "response": value,
+                        }));
+                    }
+                    if let ControlResponse::EngineHosts { hosts, .. } = response {
                         if let Some(child) = hosts
                             .into_iter()
                             .find(|host| host.online && host.root_pid == pid)
@@ -669,8 +1107,31 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
-            .await
-            .expect("surviving Gum child did not retain its enrolled Host");
+            .await;
+            original = match enrolled {
+                Ok(host) => host,
+                Err(error) => {
+                    let diagnostics = output.diagnostics.lock().unwrap();
+                    capture_timeout_processes(
+                        &diagnostics.root,
+                        diagnostics.launcher_pid,
+                        "online surviving Gum child Host",
+                        "Gum orphan enrollment",
+                    );
+                    fs::write(
+                        root.0.join("last-hosts.json"),
+                        serde_json::to_vec_pretty(&serde_json::json!({
+                            "expected_pid": pid, "history": host_history,
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    drop(diagnostics);
+                    panic!(
+                        "surviving Gum child {pid} did not retain its enrolled Host: {error}; host history: {host_history:?}"
+                    );
+                }
+            };
         }
     }
     #[cfg(target_os = "linux")]
@@ -927,7 +1388,16 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|error| {
+        #[cfg(target_os = "linux")]
+        capture_timeout_processes(
+            &root.0,
+            target.0.id(),
+            "launcher exit",
+            "native Host final quit",
+        );
+        panic!("native launcher did not exit after quit within 15 seconds: {error}");
+    });
     assert!(
         exit.success(),
         "{}",
@@ -942,7 +1412,7 @@ async fn native_host_scenario(orphan: bool, force_ptrace: bool) {
 #[cfg(target_os = "linux")]
 async fn fork_exec_check(
     input: &mut impl Write,
-    output: &mut Arc<std::sync::Mutex<BufReader<std::process::ChildStdout>>>,
+    output: &mut TargetOutput,
     pid: u32,
     path: &Path,
     allowed: bool,
@@ -961,12 +1431,7 @@ async fn fork_exec_check(
 }
 
 #[cfg(target_os = "linux")]
-async fn loader_check(
-    input: &mut impl Write,
-    output: &mut Arc<std::sync::Mutex<BufReader<std::process::ChildStdout>>>,
-    pid: u32,
-    library: &Path,
-) {
+async fn loader_check(input: &mut impl Write, output: &mut TargetOutput, pid: u32, library: &Path) {
     writeln!(input, "loader {}", library.display()).unwrap();
     input.flush().unwrap();
     assert_eq!(

@@ -203,6 +203,18 @@ extern "C" fn write_hook_report() {
         let _ = std::fs::write(path, bytes);
     }
 }
+// A libc child callback runs before Frida restores its copied runtime. New
+// policy decisions fail without entering copied locks; existing raw FD IO stays
+// available. The early native fork listener opens only Frida's recovery scope.
+unsafe fn child_policy_denied() -> bool {
+    if super::super::fork::new_policy_blocked() {
+        *libc::__errno_location() = libc::EACCES;
+        true
+    } else {
+        false
+    }
+}
+
 pub(in crate::unix_gum) struct HookGuard {
     _engine: Option<crate::engine_call::EngineCallGuard>,
 }
@@ -326,6 +338,9 @@ fn free_fn() -> FreeAddrInfoFn {
 }
 
 pub unsafe extern "C" fn connect(fd: c_int, address: *const sockaddr, length: socklen_t) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(3);
     let original = connect_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -621,6 +636,9 @@ pub unsafe extern "C" fn sendto(
     address: *const sockaddr,
     address_length: socklen_t,
 ) -> isize {
+    if !address.is_null() && child_policy_denied() {
+        return -1;
+    }
     if flags & libc::MSG_FASTOPEN != 0 {
         *libc::__errno_location() = libc::EOPNOTSUPP;
         return -1;
@@ -662,6 +680,9 @@ pub unsafe extern "C" fn recvfrom(
 }
 
 pub unsafe extern "C" fn sendmsg(fd: c_int, message: *const libc::msghdr, flags: c_int) -> isize {
+    if !message.is_null() && !(*message).msg_name.is_null() && child_policy_denied() {
+        return -1;
+    }
     if flags & libc::MSG_FASTOPEN != 0 {
         *libc::__errno_location() = libc::EOPNOTSUPP;
         return -1;
@@ -774,6 +795,12 @@ pub unsafe extern "C" fn getaddrinfo(
     hints: *const addrinfo,
     result: *mut *mut addrinfo,
 ) -> c_int {
+    if child_policy_denied() {
+        if !result.is_null() {
+            result.write(std::ptr::null_mut());
+        }
+        return libc::EAI_SYSTEM;
+    }
     hook_hit(1);
     let original = gai_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -976,6 +1003,17 @@ pub(crate) unsafe extern "C" fn variadic_on_enter(
         );
         return;
     }
+    let kind = data as usize;
+    if matches!(kind, LISTENER_OPEN | LISTENER_OPENAT) && child_policy_denied() {
+        (*state).active = 1;
+        (*state).denied = 1;
+        gum::replace_argument(
+            context,
+            u32::from(kind == LISTENER_OPENAT),
+            c"".as_ptr() as *mut c_void,
+        );
+        return;
+    }
     let Some(guard) = HookGuard::enter() else {
         return;
     };
@@ -1018,6 +1056,7 @@ pub(crate) unsafe extern "C" fn variadic_on_leave(
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if (*state).denied != 0 {
             *libc::__errno_location() = libc::EACCES;
+            gum::replace_system_error(context, libc::EACCES);
             gum::replace_return_value(context, usize::MAX as *mut c_void);
         } else if gum::return_value(context) as isize >= 0 && (*state).duplicate != 0 {
             let _ = crate::hh_agent_dup_socket(
@@ -1032,10 +1071,10 @@ pub(crate) unsafe extern "C" fn variadic_on_leave(
         }
     }));
     (*state).active = 0;
-    drop(Box::from_raw(std::mem::replace(
-        &mut (*state).guard,
-        std::ptr::null_mut(),
-    )));
+    let guard = std::mem::replace(&mut (*state).guard, std::ptr::null_mut());
+    if !guard.is_null() {
+        drop(Box::from_raw(guard));
+    }
 }
 
 unsafe fn inspect_open(
@@ -1097,6 +1136,9 @@ unsafe fn inspect_ioctl(context: *mut gum::GumInvocationContext, state: *mut Lis
 }
 
 pub unsafe extern "C" fn creat(path: *const libc::c_char, mode: libc::mode_t) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(13);
     let original: unsafe extern "C" fn(*const libc::c_char, libc::mode_t) -> c_int =
         symbol(c"creat");
@@ -1155,6 +1197,9 @@ pub unsafe extern "C" fn write(fd: c_int, b: *const c_void, n: usize) -> isize {
     original(fd, b, n)
 }
 pub unsafe extern "C" fn unlink(path: *const libc::c_char) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(16);
     let original = unlink_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -1170,6 +1215,9 @@ pub unsafe extern "C" fn unlink(path: *const libc::c_char) -> c_int {
     original(path)
 }
 pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_char) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(18);
     let original = rename_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -1185,6 +1233,9 @@ pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_ch
     original(old, new)
 }
 pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const libc::c_char, flags: c_int) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(17);
     let f: unsafe extern "C" fn(c_int, *const libc::c_char, c_int) -> c_int = symbol(c"unlinkat");
     let Some(_guard) = HookGuard::enter() else {
@@ -1206,6 +1257,9 @@ pub unsafe extern "C" fn renameat(
     nd: c_int,
     new: *const libc::c_char,
 ) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(19);
     let f: unsafe extern "C" fn(c_int, *const libc::c_char, c_int, *const libc::c_char) -> c_int =
         symbol(c"renameat");
@@ -1235,6 +1289,9 @@ pub unsafe extern "C" fn renameat2(
     new: *const libc::c_char,
     flags: libc::c_uint,
 ) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(37);
     let original = renameat2_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -1310,6 +1367,9 @@ fn mapping_operations(prot: c_int) -> Vec<crate::FileSandboxOperation> {
 }
 
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
+    if prot != libc::PROT_NONE && child_policy_denied() {
+        return -1;
+    }
     hook_hit(24);
     let f: unsafe extern "C" fn(*mut c_void, usize, c_int) -> c_int = symbol(c"mprotect");
     if prot & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) == 0 {
@@ -1455,6 +1515,9 @@ pub unsafe extern "C" fn execve(
     argv: *const *const libc::c_char,
     envp: *const *const libc::c_char,
 ) -> c_int {
+    if child_policy_denied() {
+        return -1;
+    }
     hook_hit(20);
     let original = execve_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -1497,6 +1560,9 @@ unsafe fn spawn_impl(
     argv: *const *mut libc::c_char,
     envp: *const *mut libc::c_char,
 ) -> c_int {
+    if child_policy_denied() {
+        return libc::EACCES;
+    }
     hook_hit(report_id);
     let original: SpawnFn = symbol(symbol_name);
     let Some(_guard) = HookGuard::enter() else {
@@ -1575,6 +1641,9 @@ pub unsafe extern "C" fn mmap(
     fd: c_int,
     off: libc::off_t,
 ) -> *mut c_void {
+    if fd >= 0 && flags & libc::MAP_ANONYMOUS == 0 && child_policy_denied() {
+        return libc::MAP_FAILED;
+    }
     hook_hit(23);
     let original = mmap_fn();
     // Anonymous allocator mappings carry no file-policy work. In particular,

@@ -1,3 +1,4 @@
+use super::fork_handoff::ForkHandoffBroker;
 use super::frida_core::{ChildOrigin, FridaCore, PendingChild, Process, Stdio};
 use super::pty::PtyClient;
 use std::collections::BTreeMap;
@@ -278,6 +279,14 @@ where
     // Linux's normal ptrace ancestor relationship without widening target access.
     let _subreaper = ChildSubreaper::new()?;
     let exit_directory = GumExitDirectory::new()?;
+    let handoff = Arc::new(
+        ForkHandoffBroker::new()
+            .map_err(|error| format!("cannot start fork handoff broker: {error}"))?,
+    );
+    for (name, value) in handoff.environment() {
+        environment.retain(|(existing, _)| existing != &name);
+        environment.push((name, value));
+    }
     environment.retain(|(name, _)| name != "HYPERHUB_GUM_EXIT_DIRECTORY");
     environment.push((
         "HYPERHUB_GUM_EXIT_DIRECTORY".into(),
@@ -308,6 +317,14 @@ where
         .map_err(|error| format!("Frida Core spawn failed: {error}"))?;
     let pid = process.pid() as u32;
     let process_start_time = process_start_time(pid);
+    let birth = process_start_time.ok_or_else(|| {
+        terminate_process(pid);
+        "cannot identify the Linux root process".to_owned()
+    })?;
+    handoff.allow_parent(pid, birth).map_err(|error| {
+        terminate_process(pid);
+        format!("cannot authorize root fork handoffs: {error}")
+    })?;
     if pty.is_some() && process_start_time.is_none() {
         terminate_process(pid);
         return Err("cannot identify the Linux PTY launcher process".into());
@@ -335,11 +352,24 @@ where
         terminate_process(pid);
         return Err(error);
     }
+    frida
+        .prepare_fork_listener(process, &runtime)
+        .map_err(|error| {
+            terminate_process(pid);
+            format!("cannot prepare root fork recovery scope: {error}")
+        })?;
     frida.enable_child_gating(process).map_err(|error| {
         terminate_process(pid);
         format!("Frida Core child gating failed: {error}")
     })?;
-    let credentials = SessionCredentials::from_environment(env)?;
+    frida
+        .arm_fork_listener(process, &runtime)
+        .map_err(|error| {
+            terminate_process(pid);
+            format!("cannot arm root fork return gate: {error}")
+        })?;
+    let credentials =
+        SessionCredentials::from_environment(env).inspect_err(|_| terminate_process(pid))?;
     super::engine_control::retain_tree(
         &credentials.endpoint,
         &credentials.session_id,
@@ -357,7 +387,9 @@ where
         pid,
         process_start_time,
         exit_directory.0.clone(),
-    )?;
+        handoff,
+    )
+    .inspect_err(|_| terminate_process(pid))?;
     frida.resume(process).map_err(|error| {
         terminate_process(pid);
         format!("Frida Core resume failed: {error}")
@@ -366,7 +398,7 @@ where
         Some(pty) => pty.relay(pid, process_start_time.unwrap()),
         None => wait_for_process(pid, process_start_time, &exit_directory.0),
     };
-    monitor.stop();
+    monitor.stop()?;
     result
 }
 
@@ -487,7 +519,7 @@ fn environment_value(env: &[(OsString, OsString)], key: &str) -> Option<String> 
 
 struct ChildMonitor {
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<std::thread::JoinHandle<Result<(), String>>>,
 }
 
 impl ChildMonitor {
@@ -500,6 +532,7 @@ impl ChildMonitor {
         root_pid: u32,
         root_start: Option<u64>,
         exit_directory: PathBuf,
+        handoff: Arc<ForkHandoffBroker>,
     ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -516,6 +549,7 @@ impl ChildMonitor {
                     root_pid,
                     root_start,
                     &exit_directory,
+                    &handoff,
                 )
             })
             .map_err(|error| format!("cannot start Frida child monitor: {error}"))?;
@@ -525,10 +559,13 @@ impl ChildMonitor {
         })
     }
 
-    fn stop(mut self) {
+    fn stop(mut self) -> Result<(), String> {
         self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        match self.thread.take() {
+            Some(thread) => thread
+                .join()
+                .map_err(|_| "Frida child monitor panicked".to_owned())?,
+            None => Ok(()),
         }
     }
 }
@@ -549,130 +586,201 @@ fn monitor_children(
     root_pid: u32,
     root_start: Option<u64>,
     exit_directory: &Path,
-) {
+    handoff: &ForkHandoffBroker,
+) -> Result<(), String> {
     let mut tracked = std::collections::HashMap::new();
     if let Some(start) = root_start {
         tracked.insert(root_pid, start);
     }
     let mut last_exit = None;
     let mut tree_failed = false;
-    // The launcher remains the observer while any gated descendant survives.
-    // Parent exit does not terminate child gating or the authenticated reporter.
-    while !stop.load(Ordering::Acquire) || !tracked.is_empty() {
-        match frida.pending_children() {
-            Ok(children) => {
-                for child in children {
-                    if child.skip_agent {
-                        let _ = frida.resume(child.process);
-                        continue;
+    let result = (|| -> Result<(), String> {
+        // The launcher remains the observer while any gated descendant survives.
+        // Parent exit does not terminate child gating or the authenticated reporter.
+        loop {
+            let snapshot = handoff
+                .snapshot()
+                .map_err(|error| format!("fork handoff failed: {error}"))?;
+            for candidate in &snapshot.candidates {
+                tracked.insert(candidate.child_pid, candidate.child_birth);
+            }
+            if stop.load(Ordering::Acquire) && tracked.is_empty() && snapshot.pending_count == 0 {
+                break;
+            }
+            match frida.pending_children() {
+                Ok(mut children) => {
+                    // Frida may automatically resume and remove a pending child
+                    // when its parent exits. The accepted child reservation remains
+                    // authoritative even when enumeration no longer contains it.
+                    for candidate in snapshot
+                        .candidates
+                        .iter()
+                        .filter(|candidate| candidate.ready)
+                    {
+                        if process_start_time(candidate.child_pid) != Some(candidate.child_birth) {
+                            return Err("fork candidate process identity changed".into());
+                        }
+                        if !children
+                            .iter()
+                            .any(|child| child.process.pid() as u32 == candidate.child_pid)
+                        {
+                            children.push(PendingChild {
+                                process: Process::from_pid(candidate.child_pid)?,
+                                parent_pid: candidate.parent_pid as i32,
+                                origin: ChildOrigin::Fork,
+                                skip_agent: false,
+                            });
+                        }
                     }
-                    if let Some(start) = process_start_time(child.process.pid() as u32) {
-                        tracked.insert(child.process.pid() as u32, start);
-                    }
-                    if child.origin == ChildOrigin::Fork {
-                        let result = register_fork_child(
-                            credentials,
-                            child.parent_pid as u32,
-                            child.process,
-                        )
-                        .and_then(|_| {
-                            inject_child_entrypoint(
-                                frida,
+                    for child in children {
+                        if child.skip_agent && child.origin != ChildOrigin::Fork {
+                            let _ = frida.resume(child.process);
+                            continue;
+                        }
+                        if let Some(start) = process_start_time(child.process.pid() as u32) {
+                            tracked.insert(child.process.pid() as u32, start);
+                        }
+                        if child.origin == ChildOrigin::Fork {
+                            // Candidate admission precedes Frida's pending-child
+                            // notification, but may follow this iteration's first
+                            // snapshot. Refresh instead of rejecting that ordering.
+                            let current = handoff.snapshot().map_err(|error| error.to_string())?;
+                            let Some(candidate) = current.candidates.iter().find(|candidate| {
+                                candidate.child_pid == child.process.pid() as u32
+                                    && candidate.parent_pid == child.parent_pid as u32
+                            }) else {
+                                terminate_process(child.process.pid() as u32);
+                                return Err("Frida fork child has no authenticated handoff".into());
+                            };
+                            let result = register_fork_child(
+                                credentials,
+                                child.parent_pid as u32,
                                 child.process,
-                                runtime,
-                                integrity,
-                                "frida_fork_agent_main",
                             )
-                        });
-                        if let Err(error) = result {
+                            .and_then(|_| {
+                                // Keep an actual Core child session before the
+                                // parent is allowed to return from fork/exit.
+                                // Otherwise Core auto-resume unloads a child
+                                // provider that has no attached sessions yet.
+                                frida.enable_child_gating(child.process)?;
+                                handoff.mark_attached(candidate.lease_id).map_err(|error| {
+                                    format!("cannot acknowledge attached fork child: {error}")
+                                })?;
+                                inject_child_entrypoint(
+                                    frida,
+                                    child.process,
+                                    runtime,
+                                    integrity,
+                                    "frida_fork_agent_main",
+                                    handoff,
+                                    Some(candidate.lease_id),
+                                )
+                            });
+                            if let Err(error) = result {
+                                terminate_process(child.process.pid() as u32);
+                                return Err(format!("fork child handoff failed: {error}"));
+                            } else {
+                                debug_child_success(child, "resumed");
+                            }
+                            continue;
+                        }
+                        if let Err(error) =
+                            inject_child(frida, child.process, runtime, integrity, handoff)
+                        {
                             handle_child_failure(frida, child, enforce, error);
                         } else {
-                            debug_child_success(child, "resumed");
+                            debug_child_success(child, "injected");
                         }
-                        continue;
-                    }
-                    if let Err(error) = inject_child(frida, child.process, runtime, integrity) {
-                        handle_child_failure(frida, child, enforce, error);
-                    } else {
-                        debug_child_success(child, "injected");
                     }
                 }
-            }
-            Err(error) => {
-                if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
-                    eprintln!("hyperhub: cannot enumerate Frida pending children: {error}");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-        tracked.retain(|&pid, &mut start| {
-            if process_exists(pid, Some(start)) {
-                return true;
-            }
-            // The exit file is accepted only for the exact captured OS birth.
-            // An absent or damaged file never converts a crash to success.
-            let evidence = read_exit_evidence(exit_directory, pid);
-            // With subreaping, adopted descendants have an actual wait status.
-            // Preserve signal failures even if an earlier exit callback wrote 0.
-            let mut wait_status = 0;
-            let observed = if unsafe { libc::waitpid(pid as i32, &mut wait_status, libc::WNOHANG) }
-                == pid as i32
-            {
-                if libc::WIFEXITED(wait_status) {
-                    Some((Some(libc::WEXITSTATUS(wait_status)), None))
-                } else if libc::WIFSIGNALED(wait_status) {
-                    Some((None, Some(libc::WTERMSIG(wait_status))))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let result = observed.or_else(|| {
-                evidence
-                    .filter(|(_, recorded)| *recorded == start)
-                    .map(|(code, _)| (Some(code), None))
-            });
-            last_exit = Some((pid, start));
-            if !result.is_some_and(|(code, signal)| {
-                super::engine_control::completed_normally(code, signal)
-            }) {
-                tree_failed = true;
-            }
-            if let Some((code, signal)) = result {
-                if let Err(error) = super::engine_control::report_exit(
-                    &credentials.endpoint,
-                    &credentials.session_id,
-                    pid,
-                    start,
-                    code,
-                    signal,
-                    "gum_launcher",
-                ) {
+                Err(error) => {
                     if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
-                        eprintln!("hyperhub: {error}");
+                        eprintln!("hyperhub: cannot enumerate Frida pending children: {error}");
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
-            false
-        });
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    if let Some((pid, start)) = last_exit {
-        if let Err(error) = super::engine_control::report_exit(
-            &credentials.endpoint,
-            &credentials.session_id,
-            pid,
-            start,
-            if tree_failed { None } else { Some(0) },
-            None,
-            "gum_tree",
-        ) {
-            if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
-                eprintln!("hyperhub: {error}");
+            tracked.retain(|&pid, &mut start| {
+                if process_exists(pid, Some(start)) {
+                    return true;
+                }
+                // The exit file is accepted only for the exact captured OS birth.
+                // An absent or damaged file never converts a crash to success.
+                let evidence = read_exit_evidence(exit_directory, pid);
+                // With subreaping, adopted descendants have an actual wait status.
+                // Preserve signal failures even if an earlier exit callback wrote 0.
+                let mut wait_status = 0;
+                let observed =
+                    if unsafe { libc::waitpid(pid as i32, &mut wait_status, libc::WNOHANG) }
+                        == pid as i32
+                    {
+                        if libc::WIFEXITED(wait_status) {
+                            Some((Some(libc::WEXITSTATUS(wait_status)), None))
+                        } else if libc::WIFSIGNALED(wait_status) {
+                            Some((None, Some(libc::WTERMSIG(wait_status))))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                let result = observed.or_else(|| {
+                    evidence
+                        .filter(|(_, recorded)| *recorded == start)
+                        .map(|(code, _)| (Some(code), None))
+                });
+                last_exit = Some((pid, start));
+                if !result.is_some_and(|(code, signal)| {
+                    super::engine_control::completed_normally(code, signal)
+                }) {
+                    tree_failed = true;
+                }
+                if let Some((code, signal)) = result {
+                    if let Err(error) = super::engine_control::report_exit(
+                        &credentials.endpoint,
+                        &credentials.session_id,
+                        pid,
+                        start,
+                        code,
+                        signal,
+                        "gum_launcher",
+                    ) {
+                        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                            eprintln!("hyperhub: {error}");
+                        }
+                    }
+                }
+                false
+            });
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if let Some((pid, start)) = last_exit {
+            if let Err(error) = super::engine_control::report_exit(
+                &credentials.endpoint,
+                &credentials.session_id,
+                pid,
+                start,
+                if tree_failed { None } else { Some(0) },
+                None,
+                "gum_tree",
+            ) {
+                if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                    eprintln!("hyperhub: {error}");
+                }
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        // Kill only the exact private process incarnations still owned by this
+        // manager. A failed handoff cannot leave an unobserved tree running.
+        for (&pid, &birth) in &tracked {
+            if process_start_time(pid) == Some(birth) {
+                terminate_process(pid);
             }
         }
     }
+    result
 }
 
 fn debug_child_success(child: PendingChild, action: &str) {
@@ -757,8 +865,17 @@ fn inject_child(
     process: Process,
     runtime: &Path,
     integrity: &RuntimeIntegrity,
+    handoff: &ForkHandoffBroker,
 ) -> Result<(), String> {
-    inject_child_entrypoint(frida, process, runtime, integrity, "frida_agent_main")
+    inject_child_entrypoint(
+        frida,
+        process,
+        runtime,
+        integrity,
+        "frida_agent_main",
+        handoff,
+        None,
+    )
 }
 
 fn inject_child_entrypoint(
@@ -767,6 +884,8 @@ fn inject_child_entrypoint(
     runtime: &Path,
     integrity: &RuntimeIntegrity,
     entrypoint: &str,
+    handoff: &ForkHandoffBroker,
+    fork_lease: Option<[u8; 32]>,
 ) -> Result<(), String> {
     integrity.verify(runtime)?;
     let pid = process.pid() as u32;
@@ -776,9 +895,34 @@ fn inject_child_entrypoint(
         .inject(process, runtime, entrypoint, &data)
         .map_err(|error| format!("Frida Core injection failed: {error}"))?;
     ready.wait()?;
-    frida
-        .enable_child_gating(process)
-        .map_err(|error| format!("Frida Core child gating failed: {error}"))?;
+    frida.prepare_fork_listener(process, runtime)?;
+    if fork_lease.is_none() {
+        frida
+            .enable_child_gating(process)
+            .map_err(|error| format!("Frida Core child gating failed: {error}"))?;
+    }
+    frida.arm_fork_listener(process, runtime)?;
+    match fork_lease {
+        Some(lease) => {
+            handoff
+                .complete(lease)
+                .map_err(|error| format!("cannot complete fork handoff: {error}"))?;
+            let published = AgentReady::new(pid)?;
+            frida.inject(
+                process,
+                runtime,
+                "frida_fork_publish_main",
+                &published.data()?,
+            )?;
+            published.wait()?;
+        }
+        None => {
+            let birth = process_start_time(pid).ok_or("cannot identify injected child process")?;
+            handoff
+                .allow_parent(pid, birth)
+                .map_err(|error| format!("cannot authorize child fork handoffs: {error}"))?;
+        }
+    }
     frida
         .resume(process)
         .map_err(|error| format!("Frida Core resume failed: {error}"))

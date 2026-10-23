@@ -1,5 +1,6 @@
 mod adapters;
 pub(crate) mod fork;
+mod fork_handoff;
 pub(crate) mod gum;
 mod manager;
 
@@ -38,6 +39,24 @@ pub unsafe extern "C" fn frida_fork_agent_main(data: *const libc::c_char, stay_r
             "ok".to_owned()
         }
         Err(e) => format!("error:{e}"),
+    };
+    signal_ready(data, &status);
+}
+
+/// The manager publishes a rebuilt child only after its next-fork gate is armed.
+#[no_mangle]
+pub unsafe extern "C" fn frida_fork_publish_main(
+    data: *const libc::c_char,
+    stay_resident: *mut u32,
+) {
+    let status = match fork::publish() {
+        Ok(()) => {
+            if !stay_resident.is_null() {
+                stay_resident.write(1);
+            }
+            "ok".to_owned()
+        }
+        Err(error) => format!("error:{error}"),
     };
     signal_ready(data, &status);
 }
