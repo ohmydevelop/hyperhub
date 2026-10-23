@@ -1,7 +1,7 @@
 //! File namespace mutations and content aliases. All inputs are disposable dummy files.
 use std::{
     fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -20,6 +20,342 @@ fn read_result(path: &Path) -> String {
         }
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => "denied".into(),
         Err(error) => panic!("unexpected read result for {}: {error}", path.display()),
+    }
+}
+
+fn opened_read_result(result: io::Result<fs::File>) -> String {
+    match result {
+        Ok(mut file) => {
+            let mut bytes = Vec::new();
+            match file.read_to_end(&mut bytes) {
+                Ok(_) => {
+                    assert_eq!(bytes, DUMMY);
+                    "opened:readable".into()
+                }
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    "opened:denied".into()
+                }
+                Err(error) => panic!("unexpected descriptor read: {error}"),
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => "denied".into(),
+        Err(error) => panic!("unexpected open: {error}"),
+    }
+}
+
+fn create_read_result(path: &Path) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        use std::{
+            ffi::CString,
+            os::{fd::FromRawFd, unix::ffi::OsStrExt},
+        };
+        unsafe extern "C" {
+            fn open(path: *const i8, flags: i32, ...) -> i32;
+        }
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let descriptor = unsafe { open(path.as_ptr(), 0x40, 0o600u32) };
+        return opened_read_result(if descriptor < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+        });
+    }
+    #[cfg(windows)]
+    {
+        windows_mapping::create_read_result(path)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        panic!("file-alias fixture requires Linux or Windows");
+    }
+}
+
+#[cfg(windows)]
+mod windows_mapping {
+    use super::*;
+    use std::{
+        ffi::c_void,
+        os::windows::{
+            ffi::OsStrExt,
+            io::{AsRawHandle, FromRawHandle},
+        },
+    };
+    type Handle = *mut c_void;
+    const DENIED: i32 = 0xC000_0022u32 as i32;
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: u32,
+        root: Handle,
+        name: *const UnicodeString,
+        attributes: u32,
+        security: *const c_void,
+        qos: *const c_void,
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtCreateFile(
+            out: *mut Handle,
+            access: u32,
+            object: *const ObjectAttributes,
+            ios: *mut c_void,
+            allocation: *const i64,
+            attributes: u32,
+            share: u32,
+            disposition: u32,
+            options: u32,
+            ea: *const c_void,
+            ea_length: u32,
+        ) -> i32;
+        fn NtCreateSection(
+            out: *mut Handle,
+            access: u32,
+            object: *const c_void,
+            size: *const i64,
+            protection: u32,
+            attributes: u32,
+            file: Handle,
+        ) -> i32;
+        fn NtMapViewOfSection(
+            section: Handle,
+            process: Handle,
+            base: *mut *mut c_void,
+            zero: usize,
+            commit: usize,
+            offset: *const i64,
+            size: *mut usize,
+            inherit: u32,
+            allocation: u32,
+            protection: u32,
+        ) -> i32;
+        fn NtUnmapViewOfSection(process: Handle, base: *mut c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *const c_void,
+            disposition: u32,
+            flags: u32,
+            template: Handle,
+        ) -> Handle;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+    pub(super) fn create_read_result(path: &Path) -> String {
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                0x8000_0000,
+                7,
+                std::ptr::null(),
+                4,
+                0x80,
+                std::ptr::null_mut(),
+            )
+        };
+        opened_read_result(if handle == -1isize as Handle {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { fs::File::from_raw_handle(handle) })
+        })
+    }
+    pub(super) fn delete_on_close(path: &Path) -> String {
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                0x0001_0080,
+                7,
+                std::ptr::null(),
+                3,
+                0x0400_0080,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == -1isize as Handle {
+            let error = io::Error::last_os_error();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            return "denied".into();
+        }
+        assert_ne!(unsafe { CloseHandle(handle) }, 0);
+        assert!(!path.exists(), "delete-on-close did not delete dummy file");
+        "opened:deleted".into()
+    }
+    pub(super) fn supersede(path: &Path) -> String {
+        let full = path.canonicalize().unwrap();
+        let wide: Vec<u16> = full.as_os_str().encode_wide().collect();
+        assert!(
+            wide.starts_with(&[92, 92, 63, 92]),
+            "expected canonical extended Windows path"
+        );
+        let name: Vec<u16> = [92, 63, 63, 92]
+            .into_iter()
+            .chain(wide[4..].iter().copied())
+            .collect();
+        let unicode = UnicodeString {
+            length: (name.len() * 2).try_into().unwrap(),
+            maximum_length: (name.len() * 2).try_into().unwrap(),
+            buffer: name.as_ptr(),
+        };
+        let object = ObjectAttributes {
+            length: std::mem::size_of::<ObjectAttributes>() as u32,
+            root: std::ptr::null_mut(),
+            name: &unicode,
+            attributes: 0x40,
+            security: std::ptr::null(),
+            qos: std::ptr::null(),
+        };
+        let mut output = std::ptr::null_mut();
+        let mut ios = [0usize; 2];
+        let status = unsafe {
+            NtCreateFile(
+                &mut output,
+                0x1000_0000,
+                &object,
+                ios.as_mut_ptr().cast(),
+                std::ptr::null(),
+                0x80,
+                7,
+                0,
+                0x60,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if status == DENIED {
+            return "denied".into();
+        }
+        assert_eq!(status, 0, "native supersede status");
+        assert_ne!(unsafe { CloseHandle(output) }, 0);
+        assert_eq!(fs::metadata(path).unwrap().len(), 0);
+        "opened:replaced".into()
+    }
+    struct Mapping {
+        file: fs::File,
+        section: Handle,
+    }
+    impl Drop for Mapping {
+        fn drop(&mut self) {
+            assert_ne!(unsafe { CloseHandle(self.section) }, 0);
+        }
+    }
+    fn section(file: &fs::File) -> Result<Handle, i32> {
+        let mut section = std::ptr::null_mut();
+        let status = unsafe {
+            NtCreateSection(
+                &mut section,
+                0xF001F,
+                std::ptr::null(),
+                std::ptr::null(),
+                4,
+                0x0800_0000,
+                file.as_raw_handle(),
+            )
+        };
+        if status == 0 {
+            assert!(!section.is_null());
+            Ok(section)
+        } else {
+            Err(status)
+        }
+    }
+    impl Mapping {
+        fn prepare(path: &Path) -> Self {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            let section = section(&file).expect("allowed mapping warmup");
+            Self { file, section }
+        }
+    }
+    fn view(section: Handle, protection: u32, write: bool) -> String {
+        let mut base = std::ptr::null_mut();
+        let mut size = 0;
+        let status = unsafe {
+            NtMapViewOfSection(
+                section,
+                -1isize as Handle,
+                &mut base,
+                0,
+                0,
+                std::ptr::null(),
+                &mut size,
+                2,
+                0,
+                protection,
+            )
+        };
+        if status == DENIED {
+            return "denied".into();
+        }
+        assert_eq!(status, 0, "native map status");
+        assert!(!base.is_null());
+        let valid = unsafe {
+            let bytes = base.cast::<u8>();
+            let matched = DUMMY
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| bytes.add(index).read_volatile() == *byte);
+            if write {
+                bytes.write_volatile(DUMMY[0] ^ 1);
+                assert_eq!(bytes.read_volatile(), DUMMY[0] ^ 1);
+                bytes.write_volatile(DUMMY[0]);
+            }
+            matched
+        };
+        assert_eq!(unsafe { NtUnmapViewOfSection(-1isize as Handle, base) }, 0);
+        assert!(valid, "mapped content differs from dummy bytes");
+        if write {
+            "read_write".into()
+        } else {
+            "readable".into()
+        }
+    }
+    pub(super) struct Mappings {
+        readable: Mapping,
+        writable: Mapping,
+        ordinary: Mapping,
+    }
+    impl Mappings {
+        pub(super) fn prepare(root: &Path) -> Self {
+            Self {
+                readable: Mapping::prepare(&root.join("mapping-read.data")),
+                writable: Mapping::prepare(&root.join("mapping-write.data")),
+                ordinary: Mapping::prepare(&root.join("ordinary.txt")),
+            }
+        }
+        pub(super) fn policy_ready(root: &Path) -> bool {
+            matches!(fs::read(root.join("mapping-read.data")), Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
+                && matches!(fs::OpenOptions::new().write(true).open(root.join("mapping-write.data")), Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
+        }
+        pub(super) fn run(&self) {
+            let created = match section(&self.readable.file) {
+                Err(DENIED) => "denied".into(),
+                Err(status) => panic!("unexpected protected section status {status:#x}"),
+                Ok(section) => {
+                    let result = format!("created:{}", view(section, 4, false));
+                    assert_ne!(unsafe { CloseHandle(section) }, 0);
+                    result
+                }
+            };
+            emit("create-rw-read-deny", &created);
+            emit("map-rw-read-deny", &view(self.readable.section, 4, false));
+            emit("map-copy-read-deny", &view(self.readable.section, 8, false));
+            emit("map-rw-write-deny", &view(self.writable.section, 4, false));
+            emit("ordinary-map-rw", &view(self.ordinary.section, 4, true));
+            emit("ordinary-map-copy", &view(self.ordinary.section, 8, true));
+        }
     }
 }
 
@@ -121,11 +457,31 @@ fn main() {
             .nth(1)
             .expect("expected private fixture root"),
     );
+    #[cfg(windows)]
+    let mappings = windows_mapping::Mappings::prepare(&root);
     println!("READY {}", std::process::id());
     io::stdout().flush().unwrap();
     let mut command = String::new();
-    io::stdin().lock().read_line(&mut command).unwrap();
-    assert_eq!(command.trim(), "go");
+    loop {
+        command.clear();
+        io::stdin().lock().read_line(&mut command).unwrap();
+        #[cfg(windows)]
+        if command.trim() == "policy-check" {
+            println!(
+                "POLICY_{} {}",
+                if windows_mapping::Mappings::policy_ready(&root) {
+                    "READY"
+                } else {
+                    "PENDING"
+                },
+                std::process::id()
+            );
+            io::stdout().flush().unwrap();
+            continue;
+        }
+        assert_eq!(command.trim(), "go");
+        break;
+    }
 
     // This observation deliberately comes first. A prior deny must not seed an
     // identity cache and make an existing alias appear more protected than it is.
@@ -134,6 +490,52 @@ fn main() {
         &read_result(&root.join("existing.alias")),
     );
     emit("direct-read", &read_result(&root.join("auth.key")));
+    emit(
+        "combined-rw-open",
+        &opened_read_result(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.join("auth.key")),
+        ),
+    );
+    emit(
+        "create-read-open",
+        &create_read_result(&root.join("auth.key")),
+    );
+    emit(
+        "allowed-combined-rw-open",
+        &opened_read_result(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.join("ordinary.txt")),
+        ),
+    );
+    emit(
+        "allowed-create-read-open",
+        &create_read_result(&root.join("ordinary.txt")),
+    );
+    #[cfg(windows)]
+    {
+        mappings.run();
+        emit(
+            "delete-on-close",
+            &windows_mapping::delete_on_close(&root.join("delete-close.data")),
+        );
+        emit(
+            "supersede",
+            &windows_mapping::supersede(&root.join("supersede.data")),
+        );
+        emit(
+            "allowed-delete-on-close",
+            &windows_mapping::delete_on_close(&root.join("delete-allowed.data")),
+        );
+        emit(
+            "allowed-supersede",
+            &windows_mapping::supersede(&root.join("supersede-allowed.data")),
+        );
+    }
     emit(
         "write-only-direct-read",
         &read_result(&root.join("write-link.data")),

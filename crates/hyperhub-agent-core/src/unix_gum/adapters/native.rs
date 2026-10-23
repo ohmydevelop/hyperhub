@@ -934,6 +934,9 @@ fn file_operations_for_flags(flags: c_int) -> Vec<crate::FileSandboxOperation> {
     if flags & libc::O_CREAT != 0 {
         operations.push(crate::FileSandboxOperation::Create);
     }
+    if matches!(flags & libc::O_ACCMODE, libc::O_RDONLY | libc::O_RDWR) {
+        operations.push(crate::FileSandboxOperation::Read);
+    }
     if flags & libc::O_ACCMODE != libc::O_RDONLY || flags & libc::O_TRUNC != 0 {
         operations.push(crate::FileSandboxOperation::Write);
     }
@@ -1832,4 +1835,33 @@ fn mapped_file_paths(address: usize, length: usize) -> Vec<String> {
         }
     }
     paths.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_access_modes_preserve_all_requested_content_permissions() {
+        use crate::FileSandboxOperation::{Create, Read, Write};
+        for (flags, expected) in [
+            (libc::O_RDONLY, vec![Read]),
+            (libc::O_WRONLY, vec![Write]),
+            (libc::O_RDWR, vec![Read, Write]),
+            (libc::O_CREAT | libc::O_RDONLY, vec![Create, Read]),
+            (libc::O_CREAT | libc::O_WRONLY, vec![Create, Write]),
+            (libc::O_CREAT | libc::O_RDWR, vec![Create, Read, Write]),
+            (libc::O_TRUNC | libc::O_RDONLY, vec![Read, Write]),
+            (
+                libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR,
+                vec![Create, Read, Write],
+            ),
+        ] {
+            assert_eq!(
+                file_operations_for_flags(flags),
+                expected,
+                "open flags {flags}"
+            );
+        }
+    }
 }

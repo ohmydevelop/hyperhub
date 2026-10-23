@@ -196,7 +196,7 @@ fn query_proves_anonymous(status: i32, returned: usize, info: &SectionBasicInfor
 unsafe fn create_section(
     out: *mut HANDLE,
     file: HANDLE,
-    op: FileOperation,
+    operations: &[FileOperation],
     original: impl FnOnce() -> i32,
 ) -> i32 {
     let path = {
@@ -212,7 +212,7 @@ unsafe fn create_section(
     let result = if file.is_null() {
         original()
     } else {
-        dispatch(op, path.clone(), file as usize, original)
+        dispatch_operations(operations, path.clone(), file as usize, original)
     };
     if nt_succeeded(result) && !out.is_null() && !(*out).is_null() {
         remember_path(*out, path);
@@ -227,13 +227,19 @@ unsafe fn section_target(section: HANDLE) -> FileIoTarget {
         FileIoTarget::Policy(handle_path(section))
     }
 }
-unsafe fn map_section(section: HANDLE, op: FileOperation, original: impl FnOnce() -> i32) -> i32 {
+unsafe fn map_section(
+    section: HANDLE,
+    operations: &[FileOperation],
+    original: impl FnOnce() -> i32,
+) -> i32 {
     if INSIDE_HOOK.with(Cell::get) {
         return original();
     }
     match section_target(section) {
         FileIoTarget::Kernel => original(),
-        FileIoTarget::Policy(path) => dispatch(op, path, section as usize, original),
+        FileIoTarget::Policy(path) => {
+            dispatch_operations(operations, path, section as usize, original)
+        }
     }
 }
 unsafe fn duplicate_object(
@@ -369,23 +375,40 @@ unsafe fn dispatch(
         |_, _, _| STATUS_ACCESS_DENIED,
     )
 }
+#[cfg(test)]
 const FILE_CREATE: u32 = 2;
+#[cfg(test)]
 const FILE_OPEN_IF: u32 = 3;
+#[cfg(test)]
 const FILE_OVERWRITE: u32 = 4;
+#[cfg(test)]
 const FILE_OVERWRITE_IF: u32 = 5;
 
-fn operations_for_access(a: u32, disp: u32) -> Vec<FileOperation> {
-    let mut operations = Vec::new();
-    if matches!(disp, FILE_CREATE | FILE_OPEN_IF) {
-        operations.push(FileOperation::Create);
-    }
-    if matches!(disp, FILE_OVERWRITE | FILE_OVERWRITE_IF) || a & 0x116 != 0 {
-        operations.push(FileOperation::Write);
-    }
-    if operations.is_empty() {
-        operations.push(FileOperation::Read);
-    }
+fn native_operations(operations: Vec<crate::FileSandboxOperation>) -> Vec<FileOperation> {
     operations
+        .into_iter()
+        .map(|operation| match operation {
+            crate::FileSandboxOperation::Read => FileOperation::Read,
+            crate::FileSandboxOperation::Write => FileOperation::Write,
+            crate::FileSandboxOperation::Create => FileOperation::Create,
+            crate::FileSandboxOperation::Delete => FileOperation::Delete,
+            crate::FileSandboxOperation::Rename => FileOperation::Rename,
+        })
+        .collect()
+}
+fn operations_for_access(
+    access: u32,
+    disposition: Option<u32>,
+    options: u32,
+) -> Vec<FileOperation> {
+    native_operations(crate::windows_gum::file_intents::open(
+        access,
+        disposition,
+        options,
+    ))
+}
+fn operations_for_protection(protection: u32) -> Vec<FileOperation> {
+    native_operations(crate::windows_gum::file_intents::mapping(protection))
 }
 
 unsafe fn dispatch_operations(
@@ -423,9 +446,12 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_file(
         return STATUS_ACCESS_DENIED;
     };
     let p = object_path(o);
-    let r = dispatch_operations(&operations_for_access(a, disp), p.clone(), 0, || {
-        f(out, a, o, ios, size, attrs, share, disp, opts, ea, ealen)
-    });
+    let r = dispatch_operations(
+        &operations_for_access(a, Some(disp), opts),
+        p.clone(),
+        0,
+        || f(out, a, o, ios, size, attrs, share, disp, opts, ea, ealen),
+    );
     if nt_succeeded(r) && !out.is_null() && !(*out).is_null() {
         remember_path(*out, p);
     }
@@ -444,7 +470,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_open_file(
         return STATUS_ACCESS_DENIED;
     };
     let p = object_path(o);
-    let r = dispatch_operations(&operations_for_access(a, 0), p.clone(), 0, || {
+    let r = dispatch_operations(&operations_for_access(a, None, opts), p.clone(), 0, || {
         f(out, a, o, ios, share, opts)
     });
     if nt_succeeded(r) && !out.is_null() && !(*out).is_null() {
@@ -495,6 +521,13 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
     let Some(f) = original!(ORIGINAL_NT_SET_INFORMATION_FILE, NtSetInformationFileFn) else {
         return STATUS_ACCESS_DENIED;
     };
+    if INSIDE_HOOK.with(Cell::get) {
+        return f(h, ios, info, len, class);
+    }
+    let path = match file_io_target(h) {
+        FileIoTarget::Kernel => return f(h, ios, info, len, class),
+        FileIoTarget::Policy(path) => path,
+    };
     if is_link_information(class) {
         let source = dispatch_operations(
             &[
@@ -502,7 +535,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
                 FileOperation::Write,
                 FileOperation::Rename,
             ],
-            handle_path(h),
+            path,
             h as usize,
             || 0,
         );
@@ -525,7 +558,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
                 FileOperation::Write,
                 FileOperation::Rename,
             ],
-            handle_path(h),
+            path,
             h as usize,
             || 0,
         );
@@ -543,9 +576,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
     } else {
         FileOperation::Write
     };
-    dispatch(op, handle_path(h), h as usize, || {
-        f(h, ios, info, len, class)
-    })
+    dispatch(op, path, h as usize, || f(h, ios, info, len, class))
 }
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_delete_file(
     o: *const ObjectAttributes,
@@ -567,14 +598,10 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_section(
     let Some(f) = original!(ORIGINAL_NT_CREATE_SECTION, NtCreateSectionFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    let op =
-        if protect & 0x04 != 0 || protect & 0x08 != 0 || protect & 0x40 != 0 || protect & 0x80 != 0
-        {
-            FileOperation::Write
-        } else {
-            FileOperation::Read
-        };
-    create_section(out, file, op, || f(out, a, o, size, protect, attrs, file))
+    let operations = operations_for_protection(protect);
+    create_section(out, file, &operations, || {
+        f(out, a, o, size, protect, attrs, file)
+    })
 }
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_map_view_of_section(
     sec: HANDLE,
@@ -591,14 +618,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_map_view_of_section
     let Some(f) = original!(ORIGINAL_NT_MAP_VIEW_OF_SECTION, NtMapViewFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    let op =
-        if protect & 0x04 != 0 || protect & 0x08 != 0 || protect & 0x40 != 0 || protect & 0x80 != 0
-        {
-            FileOperation::Write
-        } else {
-            FileOperation::Read
-        };
-    map_section(sec, op, || {
+    let operations = operations_for_protection(protect);
+    map_section(sec, &operations, || {
         f(
             sec, proc, base, zero, commit, off, size, inherit, alloc, protect,
         )
@@ -673,6 +694,45 @@ mod tests {
             );
             assert_eq!(transferred as usize, bytes.len());
             assert_eq!(&received, bytes);
+        }
+    }
+
+    #[test]
+    fn actual_pipe_information_preserves_native_status_and_error_state() {
+        unsafe {
+            let mut read = null_mut();
+            let mut write = null_mut();
+            assert_ne!(CreatePipe(&mut read, &mut write, null(), 0), 0);
+            let read = OwnedHandle::from_raw_handle(read);
+            let _write = OwnedHandle::from_raw_handle(write);
+            let set: NtSetInformationFileFn = std::mem::transmute(
+                crate::windows_gum::gum::find_export("ntdll.dll", "NtSetInformationFile").unwrap(),
+            );
+            let mut ios = [0usize; 2];
+            let information = [0u32; 2];
+            let expected = set(
+                read.as_raw_handle(),
+                ios.as_mut_ptr().cast(),
+                information.as_ptr().cast(),
+                8,
+                23,
+            );
+            assert_eq!(expected, 0, "byte-mode synchronous pipe information");
+            SetLastError(12345);
+            assert_eq!(file_io_target(read.as_raw_handle()), FileIoTarget::Kernel);
+            assert_eq!(GetLastError(), 12345);
+            let actual = dispatch_file_io(FileOperation::Write, read.as_raw_handle(), || {
+                SetLastError(54321);
+                set(
+                    read.as_raw_handle(),
+                    ios.as_mut_ptr().cast(),
+                    information.as_ptr().cast(),
+                    8,
+                    23,
+                )
+            });
+            assert_eq!(actual, expected);
+            assert_eq!(GetLastError(), 54321);
         }
     }
 
@@ -812,17 +872,22 @@ mod tests {
         let previous = INSIDE_HOOK.with(Cell::get);
         let result = {
             let _restore = RestoreHook(INSIDE_HOOK.with(|inside| inside.replace(true)));
-            create_section(&mut section, file, FileOperation::Write, || {
-                create(
-                    &mut section,
-                    0x000F_001F,
-                    null(),
-                    &size,
-                    4,
-                    0x0800_0000,
-                    file,
-                )
-            })
+            create_section(
+                &mut section,
+                file,
+                &[FileOperation::Read, FileOperation::Write],
+                || {
+                    create(
+                        &mut section,
+                        0x000F_001F,
+                        null(),
+                        &size,
+                        4,
+                        0x0800_0000,
+                        file,
+                    )
+                },
+            )
         };
         assert_eq!(INSIDE_HOOK.with(Cell::get), previous);
         assert_eq!(result, 0);
@@ -853,21 +918,25 @@ mod tests {
             let mut base = null_mut();
             let mut size = 4096_usize;
             assert_eq!(
-                map_section(section.handle(), FileOperation::Write, || {
-                    SetLastError(54321);
-                    map(
-                        section.handle(),
-                        GetCurrentProcess(),
-                        &mut base,
-                        0,
-                        0,
-                        null(),
-                        &mut size,
-                        2,
-                        0,
-                        4,
-                    )
-                }),
+                map_section(
+                    section.handle(),
+                    &[FileOperation::Read, FileOperation::Write],
+                    || {
+                        SetLastError(54321);
+                        map(
+                            section.handle(),
+                            GetCurrentProcess(),
+                            &mut base,
+                            0,
+                            0,
+                            null(),
+                            &mut size,
+                            2,
+                            0,
+                            4,
+                        )
+                    }
+                ),
                 0
             );
             assert_eq!(GetLastError(), 54321);
@@ -1015,7 +1084,7 @@ mod tests {
     #[test]
     fn open_if_with_read_access_is_classified_as_read() {
         assert_eq!(
-            operations_for_access(0x80, FILE_OPEN_IF),
+            operations_for_access(0x80, Some(FILE_OPEN_IF), 0),
             vec![FileOperation::Create]
         );
     }
@@ -1023,7 +1092,7 @@ mod tests {
     #[test]
     fn open_if_with_write_access_is_classified_as_write() {
         assert_eq!(
-            operations_for_access(0x120, FILE_OPEN_IF),
+            operations_for_access(0x102, Some(FILE_OPEN_IF), 0),
             vec![FileOperation::Create, FileOperation::Write]
         );
     }
@@ -1066,16 +1135,16 @@ mod tests {
     #[test]
     fn create_and_overwrite_dispositions_are_classified_correctly() {
         assert_eq!(
-            operations_for_access(0x80, FILE_CREATE),
+            operations_for_access(0x80, Some(FILE_CREATE), 0),
             vec![FileOperation::Create]
         );
         assert_eq!(
-            operations_for_access(0x80, FILE_OVERWRITE),
+            operations_for_access(0x80, Some(FILE_OVERWRITE), 0),
             vec![FileOperation::Write]
         );
         assert_eq!(
-            operations_for_access(0x80, FILE_OVERWRITE_IF),
-            vec![FileOperation::Write]
+            operations_for_access(0x80, Some(FILE_OVERWRITE_IF), 0),
+            vec![FileOperation::Create, FileOperation::Write]
         );
     }
 }

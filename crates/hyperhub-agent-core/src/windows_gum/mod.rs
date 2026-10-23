@@ -9,6 +9,7 @@ use windows_sys::Win32::System::Threading::{
 
 mod adapters;
 mod capabilities;
+pub(crate) mod file_intents;
 mod gum;
 mod manager;
 mod runtime;

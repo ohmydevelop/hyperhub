@@ -83,6 +83,46 @@ impl Fixture {
         command.args(args);
         self.output(command);
     }
+    #[cfg(windows)]
+    fn update(&self, config: &Config) {
+        let unlocked = config_store::load_encrypted(
+            &self.root.join("config.bin"),
+            b"private-file-alias-fixture",
+        )
+        .unwrap();
+        let config_json = serde_json::to_string(
+            &hyperhub_core::config_document::ConfigDocument::from_config(config),
+        )
+        .unwrap();
+        let proof =
+            hyperhub_core::session::config_update_proof(&unlocked.session_auth_key, &config_json)
+                .unwrap();
+        config_store::save_encrypted_with_descriptor(
+            &self.root.join("config.bin"),
+            config,
+            b"private-file-alias-fixture",
+            &unlocked.descriptor,
+        )
+        .unwrap();
+        let endpoint = hyperhub_core::control::instance_control_endpoint(&self.root);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                hyperhub_core::control::control_request(
+                    &endpoint,
+                    &hyperhub_core::session::ControlRequest::UpdateConfig { proof, config_json },
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        });
+        assert!(
+            matches!(response, hyperhub_core::session::ControlResponse::Ok),
+            "private map policy update failed: {response:?}"
+        );
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -221,6 +261,17 @@ fn scenario(backend: &str) {
     ] {
         fs::write(fixture.root.join(name), DUMMY).unwrap();
     }
+    #[cfg(windows)]
+    for name in [
+        "mapping-read.data",
+        "mapping-write.data",
+        "delete-close.data",
+        "delete-allowed.data",
+        "supersede.data",
+        "supersede-allowed.data",
+    ] {
+        fs::write(fixture.root.join(name), DUMMY).unwrap();
+    }
     fs::hard_link(
         fixture.root.join("auth.key"),
         fixture.root.join("existing.alias"),
@@ -268,6 +319,14 @@ fn scenario(backend: &str) {
     write_only.patterns[0].pattern = r"(?:^|[/\\])write-(?:link|rename)\.data$".into();
     write_only.operations = vec![FileSandboxOperation::Write];
     config.sandbox.file.rules.push(write_only);
+    #[cfg(windows)]
+    {
+        let mut deletion = config.sandbox.file.rules[0].clone();
+        deletion.id = "deny-implicit-file-deletion".into();
+        deletion.patterns[0].pattern = r"(?:^|[/\\])(?:delete-close|supersede)\.data$".into();
+        deletion.operations = vec![FileSandboxOperation::Delete];
+        config.sandbox.file.rules.push(deletion);
+    }
     #[cfg(target_os = "linux")]
     {
         let mut exact = config.sandbox.file.rules[0].clone();
@@ -353,6 +412,36 @@ fn scenario(backend: &str) {
         .parse()
         .unwrap();
     fixture.target = Some(private_process::PrivateProcess::capture(pid, &target).unwrap());
+    #[cfg(windows)]
+    {
+        let mut read = config.sandbox.file.rules[0].clone();
+        read.id = "deny-warmed-map-read".into();
+        read.patterns[0].pattern = r"(?:^|[/\\])mapping-read\.data$".into();
+        config.sandbox.file.rules.push(read);
+        let mut write = config.sandbox.file.rules[1].clone();
+        write.id = "deny-warmed-map-write".into();
+        write.patterns[0].pattern = r"(?:^|[/\\])mapping-write\.data$".into();
+        config.sandbox.file.rules.push(write);
+        fixture.update(&config);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            writeln!(input, "policy-check").unwrap();
+            input.flush().unwrap();
+            let response = line(&receive);
+            if response == format!("POLICY_READY {pid}") {
+                break;
+            }
+            assert_eq!(response, format!("POLICY_PENDING {pid}"));
+            assert!(
+                Instant::now() < deadline,
+                "map policy did not reach actual target {pid}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!(
+            "FILE_ALIAS_MAP_POLICY_READY pid={pid} read=deny write=deny warmed_sections=true"
+        );
+    }
     writeln!(input, "go").unwrap();
     input.flush().unwrap();
     let mut outcomes = BTreeMap::new();
@@ -383,7 +472,18 @@ fn scenario(backend: &str) {
         "write-only-direct-write",
         "write-only-hardlink",
         "write-only-rename",
+        "combined-rw-open",
+        "create-read-open",
     ];
+    #[cfg(windows)]
+    expected.extend([
+        "create-rw-read-deny",
+        "map-rw-read-deny",
+        "map-copy-read-deny",
+        "map-rw-write-deny",
+        "delete-on-close",
+        "supersede",
+    ]);
     assert_eq!(outcomes["write-only-direct-read"], "readable");
     #[cfg(target_os = "linux")]
     {
@@ -418,7 +518,7 @@ fn scenario(backend: &str) {
     expected.extend(["symlink-read", "lexical-symlink-read"]);
     assert_eq!(
         outcomes.len(),
-        if cfg!(target_os = "linux") { 24 } else { 11 }
+        if cfg!(target_os = "linux") { 28 } else { 25 }
     );
     let failures: Vec<_> = expected
         .iter()
@@ -426,11 +526,29 @@ fn scenario(backend: &str) {
         .map(|name| format!("{name}={}", outcomes[*name]))
         .collect();
     assert_eq!(outcomes["allowed-hardlink"], "created:readable");
+    assert_eq!(outcomes["allowed-combined-rw-open"], "opened:readable");
+    assert_eq!(outcomes["allowed-create-read-open"], "opened:readable");
+    #[cfg(windows)]
+    {
+        assert_eq!(outcomes["ordinary-map-rw"], "read_write");
+        assert_eq!(outcomes["ordinary-map-copy"], "read_write");
+        assert_eq!(outcomes["allowed-delete-on-close"], "opened:deleted");
+        assert_eq!(outcomes["allowed-supersede"], "opened:replaced");
+        eprintln!("FILE_ALIAS_MAPPING_VERIFIED backend={backend} readonly-deny=rw+copy write-deny=rw ordinary=rw+copy");
+    }
     assert_eq!(outcomes["allowed-rename"], "created:readable");
     #[cfg(target_os = "linux")]
     assert_eq!(outcomes["allowed-linkat"], "created:readable");
     eprintln!("FILE_ALIAS_OUTCOMES backend={backend} {outcomes:?}");
     if failures.is_empty() {
+        #[cfg(windows)]
+        for name in ["delete-close.data", "supersede.data"] {
+            assert_eq!(
+                fs::read(fixture.root.join(name)).unwrap(),
+                DUMMY,
+                "protected implicit delete changed dummy file"
+            );
+        }
         for name in ["write-link.data", "write-rename.data"] {
             assert_eq!(
                 fs::read(fixture.root.join(name)).unwrap(),

@@ -1,5 +1,9 @@
 mod network;
 mod sanitizer;
+#[cfg(test)]
+#[cfg(not(windows))]
+#[path = "../windows_gum/file_intents.rs"]
+mod windows_file_intents;
 
 use crate::snapshot::Snapshot;
 pub(crate) use network::*;

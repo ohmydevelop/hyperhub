@@ -2765,6 +2765,9 @@ fn file_open_intent(target: String, flags: i32) -> FileIntent {
     if flags & libc::O_CREAT != 0 {
         operations.push((FileSandboxOperation::Create, "create"));
     }
+    if matches!(flags & libc::O_ACCMODE, libc::O_RDONLY | libc::O_RDWR) {
+        operations.push((FileSandboxOperation::Read, "read"));
+    }
     if flags & libc::O_ACCMODE != libc::O_RDONLY || flags & libc::O_TRUNC != 0 {
         operations.push((FileSandboxOperation::Write, "write"));
     }
@@ -3411,6 +3414,31 @@ impl Registers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_access_modes_preserve_all_requested_content_permissions() {
+        use FileSandboxOperation::{Create, Read, Write};
+        for (flags, expected) in [
+            (libc::O_RDONLY, vec![Read]),
+            (libc::O_WRONLY, vec![Write]),
+            (libc::O_RDWR, vec![Read, Write]),
+            (libc::O_CREAT | libc::O_RDONLY, vec![Create, Read]),
+            (libc::O_CREAT | libc::O_WRONLY, vec![Create, Write]),
+            (libc::O_CREAT | libc::O_RDWR, vec![Create, Read, Write]),
+            (libc::O_TRUNC | libc::O_RDONLY, vec![Read, Write]),
+            (
+                libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR,
+                vec![Create, Read, Write],
+            ),
+        ] {
+            let actual: Vec<_> = file_open_intent("/dummy".into(), flags)
+                .operations
+                .into_iter()
+                .map(|(operation, _)| operation)
+                .collect();
+            assert_eq!(actual, expected, "open flags {flags}");
+        }
+    }
 
     #[test]
     fn hardlink_permissions_bind_source_and_destination_separately() {
