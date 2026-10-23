@@ -290,11 +290,34 @@ chmod 0755 "$standalone_hyperhub"
     -- /bin/true >/dev/null 2>"$temporary/dynamic-embedded-runtime.stderr.log"
   "$standalone_hyperhub" run -- "$thread_exit_probe" "$temporary/ptrace-thread-exit.txt" >/dev/null
   "$standalone_hyperhub" run --backend gum -- "$thread_exit_probe" "$temporary/gum-thread-exit.txt" >/dev/null
+  lifecycle_iterations="${HYPERHUB_THREAD_EXIT_ITERATIONS:-64}"
+  if [[ ! $lifecycle_iterations =~ ^[1-9][0-9]*$ || ${#lifecycle_iterations} -gt 4 ]] || ((lifecycle_iterations > 1000)); then
+    echo "HYPERHUB_THREAD_EXIT_ITERATIONS must be an integer from 1 to 1000" >&2
+    exit 1
+  fi
+  lifecycle_log="$result_dir/thread-exit-lifecycle.log"
+  : > "$lifecycle_log"
+  check_lifecycle_exit() {
+    local expected_status="$1" expected_output="$2" status=0 output
+    shift 2
+    output=$("$@") || status=$?
+    printf 'status=%s expected=%s output=%s\n' "$status" "$expected_status" "$output" >> "$lifecycle_log"
+    if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+      echo "thread lifecycle regression: expected exit $expected_status and '$expected_output', got exit $status and '$output'" >&2
+      return 1
+    fi
+  }
+  check_lifecycle_exit 7 "exit-group-race workers=16 status=7" "$thread_exit_probe" --exit-group-race 16 7
+  check_lifecycle_exit 9 "nonleader-exec identity-preserved" "$thread_exit_probe" --nonleader-exec
+  for ((lifecycle_index = 0; lifecycle_index < lifecycle_iterations; lifecycle_index++)); do
+    check_lifecycle_exit 7 "exit-group-race workers=16 status=7" "$standalone_hyperhub" run -- "$thread_exit_probe" --exit-group-race 16 7
+    check_lifecycle_exit 9 "nonleader-exec identity-preserved" "$standalone_hyperhub" run -- "$thread_exit_probe" --nonleader-exec
+  done
   "$standalone_hyperhub" run \
     -- "$fixture_dir/linux-static-c" --intent-read /etc/hosts >/dev/null
 )
 record_check backend.runtime_boundary "dynamic/static default ptrace; explicit Gum uses embedded Agent"
-record_check backend.thread_exit "late pthread destructor completes IO under ptrace and explicit Gum"
+record_check backend.thread_exit "late pthread teardown under ptrace/Gum; native/ptrace exit_group and nonleader exec preserve status and identity (iterations=${HYPERHUB_THREAD_EXIT_ITERATIONS:-64})"
 (
   cd "$root"
   cargo run -p hyperhub-runtime --example runtime_loader_probe --locked \

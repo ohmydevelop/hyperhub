@@ -37,10 +37,12 @@ const PTRACE_EVENT_FORK: u32 = 1;
 const PTRACE_EVENT_VFORK: u32 = 2;
 const PTRACE_EVENT_CLONE: u32 = 3;
 const PTRACE_EVENT_EXEC: u32 = 4;
+const PTRACE_EVENT_EXIT: u32 = 6;
 const NT_PRSTATUS: usize = 1;
 const SYSCALL_STOP: i32 = libc::SIGTRAP | 0x80;
 const SCRATCH_SIZE: usize = 4096;
 const SANDBOX_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const REGISTER_EXIT_WAIT_LIMIT: Duration = Duration::from_secs(1);
 const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
 const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
 
@@ -157,6 +159,7 @@ struct ThreadState {
     entering: bool,
     pending: Option<PendingSyscall>,
     engine: Option<hyperhub_runtime::Lease>,
+    register_wait: Option<RegisterExitWait>,
 }
 
 impl Default for ThreadState {
@@ -165,8 +168,61 @@ impl Default for ThreadState {
             entering: true,
             pending: None,
             engine: None,
+            register_wait: None,
         }
     }
+}
+
+#[derive(Debug)]
+struct RegisterExitWait {
+    error: std::io::Error,
+    started: Instant,
+}
+
+impl RegisterExitWait {
+    fn begin(tid: libc::pid_t, known_thread: bool, error: std::io::Error) -> std::io::Result<Self> {
+        if !known_thread || error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+        // A waitable child need not have reached its terminal notification yet.
+        // This probe does not consume any notification or infer death from errno.
+        let evidence = match terminal_evidence(tid) {
+            Ok(evidence) => evidence,
+            Err(_) => return Err(error),
+        };
+        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+            match evidence {
+                Some(evidence) => eprintln!(
+                    "hyperhub: awaiting register-stop terminal tid={tid} native_pid={} native_code={} native_status={}",
+                    evidence.pid, evidence.code, evidence.status
+                ),
+                None => eprintln!(
+                    "hyperhub: awaiting register-stop terminal tid={tid} native_terminal=not_ready"
+                ),
+            }
+        }
+        Ok(Self {
+            error,
+            started: Instant::now(),
+        })
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) >= REGISTER_EXIT_WAIT_LIMIT
+    }
+
+    fn original_error(&self, tid: libc::pid_t) -> String {
+        register_error(tid, &self.error)
+    }
+}
+
+enum SyscallStep {
+    Ready,
+    AwaitTerminal,
+}
+
+fn register_error(tid: libc::pid_t, error: &std::io::Error) -> String {
+    format!("ptrace request {PTRACE_GETREGSET:#x} for {tid} failed: {error}")
 }
 
 struct Supervisor {
@@ -572,14 +628,41 @@ impl Supervisor {
 
     fn event_loop(&mut self) -> Result<i32, String> {
         while !self.threads.is_empty() {
+            let mut awaiting_terminal = false;
+            let now = Instant::now();
+            for (&tid, state) in &self.threads {
+                if let Some(wait) = &state.register_wait {
+                    awaiting_terminal = true;
+                    if wait.expired(now) {
+                        return Err(wait.original_error(tid));
+                    }
+                }
+            }
             let mut status = 0;
-            let tid = unsafe { libc::waitpid(-1, &mut status, libc::__WALL) };
+            let options = libc::__WALL | if awaiting_terminal { libc::WNOHANG } else { 0 };
+            let tid = unsafe { libc::waitpid(-1, &mut status, options) };
+            if tid == 0 {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
             if tid < 0 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
                 if error.raw_os_error() == Some(libc::ECHILD) {
+                    if awaiting_terminal {
+                        return Err(self
+                            .threads
+                            .iter()
+                            .find_map(|(&tid, state)| {
+                                state
+                                    .register_wait
+                                    .as_ref()
+                                    .map(|wait| wait.original_error(tid))
+                            })
+                            .expect("pending register wait"));
+                    }
                     break;
                 }
                 return Err(format!("waitpid failed in static supervisor: {error}"));
@@ -609,8 +692,21 @@ impl Supervisor {
             let signal = libc::WSTOPSIG(status);
             let event = (status as u32) >> 16;
             if signal == SYSCALL_STOP {
-                self.handle_syscall(tid)?;
-                resume_syscall(tid, 0)?;
+                if matches!(self.handle_syscall(tid)?, SyscallStep::Ready) {
+                    resume_syscall(tid, 0)?;
+                }
+                continue;
+            }
+            if self
+                .threads
+                .get(&tid)
+                .is_some_and(|state| state.register_wait.is_some())
+                && !(signal == libc::SIGTRAP
+                    && matches!(event, PTRACE_EVENT_EXIT | PTRACE_EVENT_EXEC))
+            {
+                // Keep this thread stopped. Other wait events continue to run;
+                // exit continues the irreversible exit path. Exec must run the
+                // existing image registration before the new image can resume.
                 continue;
             }
             if signal == libc::SIGTRAP && event != 0 {
@@ -710,6 +806,7 @@ impl Supervisor {
                 self.detach_file_table(tid);
                 self.reconcile_descriptors(tid, self.descriptor_table(tid));
                 self.refresh_exec_member(process_pid)?;
+                self.threads.entry(tid).or_default().register_wait = None;
             }
             _ => {}
         }
@@ -780,13 +877,24 @@ impl Supervisor {
         self.last_sandbox_refresh_error = Some(error);
     }
 
-    fn handle_syscall(&mut self, tid: libc::pid_t) -> Result<(), String> {
+    fn handle_syscall(&mut self, tid: libc::pid_t) -> Result<SyscallStep, String> {
+        let known_thread = self.threads.contains_key(&tid) && self.file_tables.contains_key(&tid);
         let entering = self.threads.entry(tid).or_default().entering;
+        let mut registers = match Registers::get(tid) {
+            Ok(registers) => registers,
+            Err(error) => {
+                let wait = RegisterExitWait::begin(tid, known_thread, error)
+                    .map_err(|error| register_error(tid, &error))?;
+                self.threads
+                    .get_mut(&tid)
+                    .expect("known thread")
+                    .register_wait
+                    .get_or_insert(wait);
+                return Ok(SyscallStep::AwaitTerminal);
+            }
+        };
         if entering {
             self.refresh_sandbox_if_due();
-        }
-        let mut registers = Registers::get(tid)?;
-        if entering {
             let engine = self.engine.acquire();
             let pending = self.syscall_enter(tid, &mut registers, &engine)?;
             if pending.is_some() {
@@ -812,7 +920,11 @@ impl Supervisor {
             }
             self.threads.entry(tid).or_default().entering = true;
         }
-        Ok(())
+        self.threads
+            .get_mut(&tid)
+            .expect("syscall thread")
+            .register_wait = None;
+        Ok(SyscallStep::Ready)
     }
 
     fn syscall_enter(
@@ -3111,17 +3223,61 @@ fn ptrace(
     address: *mut c_void,
     data: *mut c_void,
 ) -> Result<libc::c_long, String> {
+    ptrace_raw(request, pid, address, data)
+        .map_err(|error| format!("ptrace request {request:#x} for {pid} failed: {error}"))
+}
+
+fn ptrace_raw(
+    request: libc::c_uint,
+    pid: libc::pid_t,
+    address: *mut c_void,
+    data: *mut c_void,
+) -> std::io::Result<libc::c_long> {
     unsafe {
         *libc::__errno_location() = 0;
         let result = libc::ptrace(request, pid, address, data);
         if result == -1 && *libc::__errno_location() != 0 {
-            Err(format!(
-                "ptrace request {request:#x} for {pid} failed: {}",
-                std::io::Error::last_os_error()
-            ))
+            Err(std::io::Error::last_os_error())
         } else {
             Ok(result)
         }
+    }
+}
+
+#[derive(Debug)]
+struct TerminalEvidence {
+    pid: libc::pid_t,
+    code: i32,
+    status: i32,
+}
+
+fn terminal_evidence(tid: libc::pid_t) -> std::io::Result<Option<TerminalEvidence>> {
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            tid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let pid = unsafe { info.si_pid() };
+    if pid == tid
+        && matches!(
+            info.si_code,
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+        )
+    {
+        Ok(Some(TerminalEvidence {
+            pid,
+            code: info.si_code,
+            status: unsafe { info.si_status() },
+        }))
+    } else {
+        Ok(None)
     }
 }
 
@@ -3264,7 +3420,9 @@ fn remote_syscall(
     expect_syscall_stop(tid, "entry")?;
     resume_syscall(tid, 0)?;
     expect_syscall_stop(tid, "exit")?;
-    let result = Registers::get(tid)?.result();
+    let result = Registers::get(tid)
+        .map_err(|error| format!("ptrace request {PTRACE_GETREGSET:#x} for {tid} failed: {error}"))?
+        .result();
     saved.set(tid)?;
     Ok(result)
 }
@@ -3324,13 +3482,13 @@ struct Registers {
 }
 
 impl Registers {
-    fn get(tid: libc::pid_t) -> Result<Self, String> {
+    fn get(tid: libc::pid_t) -> std::io::Result<Self> {
         let mut registers = Self::default();
         let mut io = libc::iovec {
             iov_base: (&mut registers as *mut Self).cast(),
             iov_len: std::mem::size_of::<Self>(),
         };
-        ptrace(
+        ptrace_raw(
             PTRACE_GETREGSET,
             tid,
             NT_PRSTATUS as *mut c_void,
@@ -3457,6 +3615,168 @@ impl Registers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LifecycleChild(libc::pid_t);
+
+    impl LifecycleChild {
+        fn stopped(traced: bool) -> Self {
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+            if pid == 0 {
+                unsafe {
+                    if traced && libc::ptrace(PTRACE_TRACEME, 0, 0usize, 0usize) == -1 {
+                        libc::_exit(99);
+                    }
+                    libc::kill(libc::getpid(), libc::SIGSTOP);
+                    libc::_exit(7);
+                }
+            }
+            let child = Self(pid);
+            let mut status = 0;
+            assert_eq!(
+                unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) },
+                pid
+            );
+            assert!(libc::WIFSTOPPED(status));
+            child
+        }
+
+        fn reap(mut self) -> i32 {
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(self.0, &mut status, 0) }, self.0);
+            self.0 = 0;
+            assert!(libc::WIFEXITED(status));
+            libc::WEXITSTATUS(status)
+        }
+    }
+
+    impl Drop for LifecycleChild {
+        fn drop(&mut self) {
+            if self.0 > 0 {
+                // Only an owned, unreaped child can reach this cleanup path.
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+                let mut status = 0;
+                while unsafe { libc::waitpid(self.0, &mut status, libc::__WALL) } < 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                {
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_terminal_evidence_does_not_consume_the_real_exit_status() {
+        let child = LifecycleChild::stopped(false);
+        assert!(terminal_evidence(child.0).unwrap().is_none());
+        assert_eq!(unsafe { libc::kill(child.0, libc::SIGCONT) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let evidence = loop {
+            if let Some(evidence) = terminal_evidence(child.0).unwrap() {
+                break evidence;
+            }
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::yield_now();
+        };
+        assert_eq!(
+            (evidence.pid, evidence.code, evidence.status),
+            (child.0, libc::CLD_EXITED, 7)
+        );
+        assert_eq!(
+            Registers::get(child.0).err().unwrap().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert!(RegisterExitWait::begin(
+            child.0,
+            true,
+            std::io::Error::from_raw_os_error(libc::ESRCH)
+        )
+        .is_ok());
+        assert_eq!(child.reap(), 7);
+    }
+
+    #[test]
+    fn lifecycle_live_tracee_registers_remain_available() {
+        let child = LifecycleChild::stopped(true);
+        assert!(terminal_evidence(child.0).unwrap().is_none());
+        assert!(Registers::get(child.0).is_ok());
+        ptrace(
+            libc::PTRACE_CONT,
+            child.0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+        .unwrap();
+        assert_eq!(child.reap(), 7);
+    }
+
+    #[test]
+    fn lifecycle_live_untraced_child_is_not_treated_as_exited() {
+        let child = LifecycleChild::stopped(false);
+        assert!(terminal_evidence(child.0).unwrap().is_none());
+        let error = Registers::get(child.0).err().unwrap();
+        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+        assert!(RegisterExitWait::begin(child.0, false, error).is_err());
+        let wait = RegisterExitWait::begin(
+            child.0,
+            true,
+            std::io::Error::from_raw_os_error(libc::ESRCH),
+        )
+        .unwrap();
+        assert!(!wait.expired(wait.started));
+        assert!(wait.expired(wait.started + REGISTER_EXIT_WAIT_LIMIT));
+        assert!(wait.original_error(child.0).contains("os error 3"));
+        assert!(terminal_evidence(child.0).unwrap().is_none());
+        assert_eq!(unsafe { libc::kill(child.0, libc::SIGCONT) }, 0);
+        assert_eq!(child.reap(), 7);
+    }
+
+    #[test]
+    fn lifecycle_register_wait_rejects_other_errors_and_nonchildren() {
+        let pid = unsafe { libc::getpid() };
+        for errno in [libc::EPERM, libc::EIO, libc::EINVAL] {
+            let error =
+                RegisterExitWait::begin(pid, true, std::io::Error::from_raw_os_error(errno))
+                    .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
+        let error =
+            RegisterExitWait::begin(pid, true, std::io::Error::from_raw_os_error(libc::ESRCH))
+                .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+        assert_eq!(
+            terminal_evidence(pid).unwrap_err().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn lifecycle_repeated_register_failure_preserves_the_first_deadline_and_state() {
+        let started = Instant::now() - REGISTER_EXIT_WAIT_LIMIT;
+        let mut state = ThreadState {
+            entering: false,
+            pending: Some(PendingSyscall::OverrideResult { result: -123 }),
+            register_wait: Some(RegisterExitWait {
+                error: std::io::Error::from_raw_os_error(libc::ESRCH),
+                started,
+            }),
+            ..ThreadState::default()
+        };
+        state.register_wait.get_or_insert(RegisterExitWait {
+            error: std::io::Error::from_raw_os_error(libc::ESRCH),
+            started: Instant::now(),
+        });
+        assert_eq!(state.register_wait.as_ref().unwrap().started, started);
+        assert!(state
+            .register_wait
+            .as_ref()
+            .unwrap()
+            .expired(Instant::now()));
+        assert!(!state.entering);
+        assert!(matches!(
+            state.pending,
+            Some(PendingSyscall::OverrideResult { result: -123 })
+        ));
+    }
 
     #[test]
     fn open_access_modes_preserve_all_requested_content_permissions() {
