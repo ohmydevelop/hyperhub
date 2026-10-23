@@ -65,6 +65,161 @@ fn anonymous_memory_probe() {
     );
 }
 
+#[cfg(windows)]
+mod spawn_diagnostics {
+    use super::*;
+    use std::{ffi::c_void, sync::mpsc, time::Instant};
+
+    type Handle = *mut c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreatePipe(
+            read: *mut Handle,
+            write: *mut Handle,
+            security: *const c_void,
+            size: u32,
+        ) -> i32;
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *const c_void,
+            disposition: u32,
+            flags: u32,
+            template: Handle,
+        ) -> Handle;
+        fn GetFileType(handle: Handle) -> u32;
+        fn GetLastError() -> u32;
+        fn SetLastError(error: u32);
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    unsafe fn handle_type(handle: Handle) -> String {
+        SetLastError(0);
+        let kind = GetFileType(handle);
+        let error = GetLastError();
+        format!("handle={handle:p} type={kind} type_error={error}")
+    }
+
+    fn raw_stdio() {
+        unsafe {
+            let mut read = std::ptr::null_mut();
+            let mut write = std::ptr::null_mut();
+            SetLastError(0);
+            let result = CreatePipe(&mut read, &mut write, std::ptr::null(), 0);
+            let error = GetLastError();
+            eprintln!(
+                "RESTART_SPAWN_DIAG stage=create_pipe result={result} error={error} read=[{}] write=[{}]",
+                handle_type(read),
+                handle_type(write)
+            );
+            if !read.is_null() && read != -1_isize as Handle {
+                CloseHandle(read);
+            }
+            if !write.is_null() && write != -1_isize as Handle && write != read {
+                CloseHandle(write);
+            }
+            let name: Vec<u16> = "NUL".encode_utf16().chain(Some(0)).collect();
+            for (label, access) in [("nul_read", 0x8000_0000), ("nul_write", 0x4000_0000)] {
+                SetLastError(0);
+                let handle = CreateFileW(
+                    name.as_ptr(),
+                    access,
+                    3,
+                    std::ptr::null(),
+                    3,
+                    0x80,
+                    std::ptr::null_mut(),
+                );
+                let error = GetLastError();
+                eprintln!(
+                    "RESTART_SPAWN_DIAG stage={label} opened={} error={error} {}",
+                    !handle.is_null() && handle != -1_isize as Handle,
+                    handle_type(handle)
+                );
+                if handle != -1_isize as Handle && !handle.is_null() {
+                    CloseHandle(handle);
+                }
+            }
+        }
+    }
+
+    fn child(profile: &'static str) {
+        let (send, receive) = mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name(format!("hh-restart-{profile}"))
+            .spawn(move || {
+                let mut command = Command::new("cmd.exe");
+                command.args(["/D", "/C", "exit 0"]);
+                if profile == "null" {
+                    command
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                } else {
+                    command
+                        .stdin(Stdio::inherit())
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit());
+                }
+                let result = match command.spawn() {
+                    Err(error) => format!(
+                        "spawn_error={:?} kind={:?}",
+                        error.raw_os_error(),
+                        error.kind()
+                    ),
+                    Ok(mut child) => {
+                        let pid = child.id();
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        loop {
+                            match child.try_wait() {
+                                Ok(Some(status)) => break format!("pid={pid} status={status}"),
+                                Err(error) => {
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    break format!(
+                                        "pid={pid} wait_error={:?}",
+                                        error.raw_os_error()
+                                    );
+                                }
+                                Ok(None) if Instant::now() >= deadline => {
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    break format!("pid={pid} wait_timeout=true");
+                                }
+                                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                            }
+                        }
+                    }
+                };
+                let _ = send.send(result);
+            });
+        let result = match thread {
+            Ok(_) => receive
+                .recv_timeout(Duration::from_secs(4))
+                .unwrap_or_else(|error| format!("diagnostic_timeout={error}")),
+            Err(error) => format!("diagnostic_thread_error={:?}", error.raw_os_error()),
+        };
+        eprintln!("RESTART_SPAWN_DIAG stage=cmd_{profile} {result}");
+    }
+
+    pub(super) fn failed_output(error: io::Error) -> ! {
+        eprintln!(
+            "RESTART_SPAWN_DIAG stage=required_output pid={} original_error={:?} kind={:?}",
+            std::process::id(),
+            error.raw_os_error(),
+            error.kind()
+        );
+        raw_stdio();
+        child("inherited");
+        child("null");
+        // Failure-only best-effort drain for the existing asynchronous audit.
+        // Keep the original probe deadline and original failure unchanged.
+        std::thread::sleep(Duration::from_millis(250));
+        panic!("required shell output failed: {error}");
+    }
+}
+
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
     let mode = args[1].to_str().unwrap();
@@ -193,7 +348,7 @@ fn main() {
                 let output = Command::new("cmd.exe")
                     .args(["/D", "/C", "echo shell-ok"])
                     .output()
-                    .unwrap();
+                    .unwrap_or_else(|error| spawn_diagnostics::failed_output(error));
                 assert!(
                     output.status.success(),
                     "child status {:?}: {}",

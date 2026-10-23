@@ -5,8 +5,9 @@ use hyperhub_core::{
     config_store::{self, ExportFormat},
 };
 use std::{
+    collections::VecDeque,
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -385,6 +386,136 @@ impl Fixture {
         }
     }
 }
+
+fn bounded_audit_summary(record: &serde_json::Value) -> Option<serde_json::Value> {
+    let attributes = record.get("attributes")?;
+    let event = record["event"].as_str()?;
+    let sandbox = event == "security_alert"
+        && matches!(attributes["kind"].as_str(), Some("file" | "process"));
+    if !sandbox && event != "child_injection_uncovered" {
+        return None;
+    }
+    let mut summary = serde_json::Map::new();
+    summary.insert("event".into(), event.into());
+    for key in ["timestamp_ms", "sequence", "process_pid"] {
+        if let Some(value) = record[key].as_u64() {
+            summary.insert(key.into(), value.into());
+        }
+    }
+    for key in ["parent_pid", "error_code"] {
+        if let Some(value) = attributes[key].as_u64() {
+            summary.insert(key.into(), value.into());
+        }
+    }
+    for key in [
+        "kind",
+        "operation",
+        "action",
+        "enforcement",
+        "decision_source",
+        "rule_id",
+        "target",
+        "reason",
+        "stage",
+    ] {
+        if let Some(value) = attributes[key].as_str() {
+            let limit = if matches!(key, "target" | "reason") {
+                256
+            } else {
+                96
+            };
+            summary.insert(
+                key.into(),
+                value.chars().take(limit).collect::<String>().into(),
+            );
+        }
+    }
+    Some(summary.into())
+}
+
+fn private_audit_tail(root: &Path) -> Vec<serde_json::Value> {
+    let directory = root.join("audit");
+    if !fs::symlink_metadata(&directory)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
+        return Vec::new();
+    }
+    let mut partitions: Vec<_> = fs::read_dir(&directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("date="))
+        })
+        .map(|entry| entry.path())
+        .collect();
+    partitions.sort();
+    let mut paths = vec![directory.join("security-alerts.jsonl")];
+    paths.extend(
+        partitions
+            .into_iter()
+            .rev()
+            .take(4)
+            .rev()
+            .map(|path| path.join("security-alerts.jsonl")),
+    );
+    let mut records = VecDeque::new();
+    for path in paths {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        let Ok(mut file) = options.open(&path) else {
+            continue;
+        };
+        let Ok(metadata) = file.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let bytes = metadata.len().min(128 * 1024);
+        if file.seek(SeekFrom::End(-(bytes as i64))).is_err() {
+            continue;
+        }
+        let mut tail = Vec::new();
+        if file.take(bytes).read_to_end(&mut tail).is_err() {
+            continue;
+        }
+        for line in tail
+            .split(|byte| *byte == b'\n')
+            .skip(usize::from(metadata.len() > bytes))
+        {
+            let Ok(record) = serde_json::from_slice(line) else {
+                continue;
+            };
+            if let Some(summary) = bounded_audit_summary(&record) {
+                if records.len() == 32 {
+                    records.pop_front();
+                }
+                records.push_back(summary);
+            }
+        }
+    }
+    records.into_iter().collect()
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -417,6 +548,14 @@ impl Drop for Fixture {
         }
         if std::thread::panicking() {
             eprintln!("restart fixture retained: {}", self.root.display());
+            let audit = private_audit_tail(&self.root);
+            eprintln!(
+                "RESTART_AUDIT_TAIL entries={} limit=32 tail_bytes_per_file=131072",
+                audit.len()
+            );
+            for record in audit {
+                eprintln!("RESTART_AUDIT {record}");
+            }
             for name in [
                 "serve.log",
                 "target-before-cleanup.stderr",
@@ -817,4 +956,52 @@ fn unavailable_control_socket_during_target_execution_recovers_without_panic() {
 #[ignore = "requires packaged CLI and native runtime; registered in platform Suites"]
 fn gum_unavailable_serve_never_resumes_an_unenrolled_child() {
     scenario("denied-outage", Some("gum"));
+}
+
+#[test]
+fn audit_failure_diagnostics_keep_only_bounded_metadata_from_private_audit_files() {
+    let root = std::env::temp_dir().join(format!(
+        "hh-audit-tail-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let partition = root.join("audit/date=2026-10-24");
+    fs::create_dir_all(&partition).unwrap();
+    fs::write(root.join("config.bin"), b"private-canary-never-print").unwrap();
+    let mut audit = fs::File::create(partition.join("security-alerts.jsonl")).unwrap();
+    for sequence in 0..48 {
+        writeln!(
+            audit,
+            "{}",
+            serde_json::json!({
+                "event":"security_alert", "sequence":sequence, "process_pid":42,
+                "password":"private-canary-never-print",
+                "attributes":{"kind":"file", "operation":"read", "target":"x".repeat(700),
+                    "reason":"handle-only", "process_argv_redacted":["private-canary-never-print"]}
+            })
+        )
+        .unwrap();
+    }
+    drop(audit);
+    let rows = private_audit_tail(&root);
+    assert_eq!(rows.len(), 32);
+    assert_eq!(rows[0]["sequence"], 16);
+    assert_eq!(rows[31]["sequence"], 47);
+    assert!(rows
+        .iter()
+        .all(|row| row["target"].as_str().unwrap().len() == 256));
+    assert!(!serde_json::to_string(&rows)
+        .unwrap()
+        .contains("private-canary-never-print"));
+    let child = bounded_audit_summary(&serde_json::json!({
+        "event":"child_injection_uncovered", "process_pid":43,
+        "attributes":{"parent_pid":42,"stage":"event_create","error_code":5,
+            "token":"private-canary-never-print"}
+    }))
+    .unwrap();
+    assert_eq!(child["stage"], "event_create");
+    assert_eq!(child["parent_pid"], 42);
+    assert_eq!(child["error_code"], 5);
+    assert!(!child.to_string().contains("private-canary-never-print"));
+    fs::remove_dir_all(root).unwrap();
 }

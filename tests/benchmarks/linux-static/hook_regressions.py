@@ -36,6 +36,8 @@ def run_suite(hyperhub, output):
         password.chmod(0o600)
         target = work / "mapped-file"
         target.write_bytes(b"local fixture" + bytes(4096))
+        mapping_control = work / "mapping-control"
+        mapping_control.write_bytes(target.read_bytes())
         port = free_port()
         config_path = work / "config.toml"
         pattern = json.dumps("^" + re.escape(str(target)) + "$")
@@ -104,16 +106,48 @@ patterns = [{{enabled = true, pattern = {pattern}}}]
                         raise AssertionError("isolated Serve did not start")
                     time.sleep(0.05)
 
-                def execute(name, arguments, expected=0, backend="ptrace", extra=None):
+                def execute(name, arguments, expected=0, backend="ptrace", extra=None, pass_fds=()):
                     env = dict(environment, **(extra or {}))
                     command = [str(hyperhub), "run", "--backend", backend, "--", str(binaries[name]), *arguments]
-                    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+                    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20,
+                                            pass_fds=pass_fds)
                     item = {"case": name + ":" + ":".join(arguments[::2]), "backend": backend,
-                            "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+                            "arguments": arguments, "expected_returncode": expected,
+                            "passed_fds": list(pass_fds), "returncode": result.returncode,
+                            "stdout": result.stdout, "stderr": result.stderr}
                     results.append(item)
                     if result.returncode != expected:
                         raise AssertionError(json.dumps(item))
                     return result
+
+                def mapping_case(mode, path, sharing, backend, denied):
+                    # Open outside the managed tree. The mapping probe must not
+                    # depend on an O_RDWR open that the Read policy now rejects.
+                    payload = path.read_bytes()
+                    descriptor = os.open(path, os.O_RDWR)
+                    try:
+                        metadata = os.fstat(descriptor)
+                        assert metadata.st_size == len(payload) and len(payload) >= 4096
+                        assert os.pread(descriptor, len(payload), 0) == payload
+                        assert os.stat(path).st_ino == metadata.st_ino
+                        env = {"HH_MAPPING_INHERITED_FD": str(descriptor),
+                               "HH_MAPPING_EXPECTED_BYTE": str(payload[0])}
+                        result = execute("mapping_read", [mode, str(path), sharing],
+                                         13 if denied else 0, backend, extra=env,
+                                         pass_fds=(descriptor,))
+                        marker = (f"mapping-fd=verified fd={descriptor} device={metadata.st_dev} "
+                                  f"inode={metadata.st_ino} size={metadata.st_size}")
+                        assert marker in result.stdout, result
+                        if mode == "write":
+                            assert "write-control=allowed" in result.stdout
+                            assert path.read_bytes() == b"x" + payload[1:]
+                        else:
+                            stage = "mprotect" if mode.startswith("upgrade") else "mmap"
+                            outcome = "denied" if denied else "allowed"
+                            assert f"read-map={outcome} stage={stage}" in result.stdout, result
+                            assert path.read_bytes() == payload
+                    finally:
+                        os.close(descriptor)
 
                 for backend in ("ptrace", "gum"):
                     execute("exit", ["loader"], 7, backend)
@@ -152,9 +186,9 @@ patterns = [{{enabled = true, pattern = {pattern}}}]
                 for backend in ("ptrace", "gum"):
                     for shared in ("private", "shared"):
                         for mode in ("read", "upgrade", "write-map", "upgrade-write"):
-                            denied = execute("mapping_read", [mode, str(target), shared], 13, backend)
-                            assert "read-map=denied" in denied.stdout
-                        execute("mapping_read", ["write", str(target), shared], 0, backend)
+                            mapping_case(mode, target, shared, backend, True)
+                            mapping_case(mode, mapping_control, shared, backend, False)
+                        mapping_case("write", target, shared, backend, False)
                 # Audit destinations, not just successful echo payloads or hook counts.
                 audit = []
                 for path in (work / "home/audit").rglob("security-alerts.jsonl"):
