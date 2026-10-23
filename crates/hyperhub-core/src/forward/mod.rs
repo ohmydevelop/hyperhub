@@ -8,4 +8,5 @@ pub(crate) mod protocol;
 mod rpc;
 pub(crate) mod worker;
 
+pub(crate) mod cleanup;
 mod deadline;

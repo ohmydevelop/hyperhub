@@ -19,6 +19,11 @@ impl WorkerManager {
                 .state
                 .lock()
                 .map_err(|_| io::Error::other("worker group state poisoned"))?;
+            if self.0.closing.load(Ordering::Acquire) {
+                return Err(io::Error::other(
+                    "forwarding worker manager is shutting down",
+                ));
+            }
             let worker = state
                 .workers
                 .get(&state.active)

@@ -28,6 +28,7 @@ mod clipboard;
 mod config_cli;
 mod config_semantics;
 mod config_tui;
+mod forward_cleanup;
 mod lifecycle;
 mod password;
 mod platform;
@@ -115,6 +116,7 @@ enum Command {
     Upgrade,
     UpgradeAction { action: String, id: Option<String> },
     ForwardWorker,
+    ForwardCacheCleanup,
     ExportUpgradeBundle(PathBuf),
     InstallUpgrade(PathBuf),
     Status { json: bool },
@@ -189,6 +191,12 @@ fn execute(command: Command) -> Result<i32, String> {
             .block_on(SocksService::run_forward_worker())
             .map(|()| 0)
             .map_err(|error| error.to_string()),
+        Command::ForwardCacheCleanup => {
+            let key = password::acquire_api_key()?;
+            SocksService::run_forward_cache_cleanup(key.as_bytes())
+                .map(|()| 0)
+                .map_err(|error| error.to_string())
+        }
         Command::ExportUpgradeBundle(directory) => upgrade::export_bundle(&directory),
         Command::InstallUpgrade(job) => upgrade::run_install_helper(&job),
         Command::Status { json } => lifecycle::status(json),
@@ -330,10 +338,18 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         socks.runtime(),
         socks.audit_writer(),
     ));
+    let worker_executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let socks = socks
         .with_trust_store(trust)
-        .with_forward_workers(std::env::current_exe().map_err(|error| error.to_string())?)
+        .with_authenticated_forward_workers(&worker_executable, api_key.as_bytes())
         .map_err(|error| format!("cannot prepare forwarding worker: {error}"))?;
+    let mut retirement = forward_cleanup::Retirement::new(
+        socks
+            .forward_workers()
+            .ok_or("forwarding worker manager is unavailable")?,
+        worker_executable,
+        api_key.as_bytes(),
+    );
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let socks_address = runtime
         .block_on(socks.prepare_listener())
@@ -394,7 +410,7 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
     if debug {
         output.line("HyperHub debug event stream enabled")?;
     }
-    runtime
+    let result = runtime
         .block_on(async {
             tokio::select! {
                 result = async {
@@ -407,7 +423,12 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
                 _ = shutdown_signal.changed() => Ok(()),
             }
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
+    // main exits the process explicitly. Transfer cache retirement before the
+    // runtime and its worker-reader threads disappear; do not await old flows.
+    let cleanup = retirement.finish();
+    result?;
+    cleanup?;
     Ok(0)
 }
 
@@ -812,6 +833,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
             _ => Err("usage: hyperhub upgrade [status [id] | recover <id> | abort <id>]".into()),
         },
         "forward-worker" => require_no_args("forward-worker", &args[1..]).map(|_| Command::ForwardWorker),
+        "forward-cache-cleanup" => require_no_args("forward-cache-cleanup", &args[1..]).map(|_| Command::ForwardCacheCleanup),
         "export-upgrade-bundle" => match &args[1..] {
             [directory] => Ok(Command::ExportUpgradeBundle(directory.into())),
             _ => Err("export-upgrade-bundle is an internal command".into()),

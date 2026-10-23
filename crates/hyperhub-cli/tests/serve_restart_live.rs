@@ -6,15 +6,207 @@ use hyperhub_core::{
 };
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    net::{Ipv4Addr, TcpListener},
+    io::{BufRead, BufReader, Read, Write},
+    net::{Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     time::{Duration, Instant},
 };
+#[path = "support/literal_path_pattern.rs"]
+mod literal_path_pattern;
 #[path = "support/private_process.rs"]
 mod private_process;
+
+struct EchoServer {
+    address: SocketAddr,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl EchoServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut connection = loop {
+                if stopping.load(Ordering::Acquire) {
+                    return;
+                }
+                match listener.accept() {
+                    Ok((connection, _)) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("private echo accept failed: {error}"),
+                }
+            };
+            connection.set_nonblocking(false).unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            connection
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0; 128];
+            while !stopping.load(Ordering::Acquire) {
+                match connection.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => connection.write_all(&buffer[..count]).unwrap(),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) =>
+                    {
+                        break
+                    }
+                    Err(error) => panic!("private echo read failed: {error}"),
+                }
+            }
+        });
+        Self {
+            address,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for EchoServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let result = thread.join();
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
+        }
+    }
+}
+
+struct PersistentFlow {
+    _echo: EchoServer,
+    worker: private_process::PrivateProcess,
+    worker_pid: u32,
+    worker_birth: u64,
+    cache: PathBuf,
+    local: String,
+}
+impl PersistentFlow {
+    fn open(
+        fixture: &Fixture,
+        input: &mut impl Write,
+        receiver: &mpsc::Receiver<String>,
+        pid: u32,
+    ) -> Self {
+        let echo = EchoServer::start();
+        writeln!(input, "stream-open {}", echo.address).unwrap();
+        input.flush().unwrap();
+        let line = receive(receiver, "persistent stream open");
+        let local = line
+            .strip_prefix(&format!("STREAM_OPEN {pid} local="))
+            .unwrap()
+            .to_owned();
+        writeln!(input, "stream-ping").unwrap();
+        input.flush().unwrap();
+        assert_eq!(
+            receive(receiver, "persistent stream before restart"),
+            format!("STREAM_OK {pid} local={local}")
+        );
+        let status = fixture.status();
+        let workers: Vec<_> = status["forward_workers"]["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|worker| worker["live_connections"].as_u64().unwrap() > 0)
+            .collect();
+        assert_eq!(
+            workers.len(),
+            1,
+            "expected one stream-owning worker: {status}"
+        );
+        let worker = workers[0];
+        let worker_pid = worker["pid"].as_u64().unwrap() as u32;
+        let worker_birth = worker["start_time"].as_u64().unwrap();
+        assert_ne!(worker_birth, 0);
+        let prefix = format!("hyperhub-forward-{}-", status["pid"].as_u64().unwrap());
+        let caches: Vec<_> = fs::read_dir(fixture.root.join("tmp"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&prefix)
+            })
+            .collect();
+        assert_eq!(
+            caches.len(),
+            1,
+            "private old worker cache not unique: {caches:?}"
+        );
+        let cache = caches[0].clone();
+        let executable = cache.join(format!(
+            "{}{}",
+            worker["sha256"].as_str().unwrap(),
+            std::env::consts::EXE_SUFFIX
+        ));
+        let handle = private_process::PrivateProcess::capture(worker_pid, &executable).unwrap();
+        assert!(!handle.exited());
+        eprintln!("RESTART_FLOW_OPEN target={pid} worker={worker_pid} birth={worker_birth} local={local} cache={}", cache.display());
+        Self {
+            _echo: echo,
+            worker: handle,
+            worker_pid,
+            worker_birth,
+            cache,
+            local,
+        }
+    }
+
+    fn finish(&self, input: &mut impl Write, receiver: &mpsc::Receiver<String>, pid: u32) {
+        writeln!(input, "stream-ping").unwrap();
+        input.flush().unwrap();
+        assert_eq!(
+            receive(receiver, "same persistent stream after restart"),
+            format!("STREAM_OK {pid} local={}", self.local)
+        );
+        assert!(!self.worker.exited(), "active old stream worker exited");
+        assert!(self.cache.is_dir(), "active old stream cache was removed");
+        eprintln!(
+            "RESTART_FLOW_SURVIVED target={pid} worker={} birth={} local={} cache={}",
+            self.worker_pid,
+            self.worker_birth,
+            self.local,
+            self.cache.display()
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        writeln!(input, "stream-close").unwrap();
+        input.flush().unwrap();
+        assert_eq!(
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("persistent stream close exceeded the 10s drain deadline"),
+            format!("STREAM_CLOSED {pid}")
+        );
+        while !self.worker.exited() || self.cache.exists() {
+            assert!(Instant::now() < deadline, "old worker/cache did not drain within 10s before FixtureDrop: worker={} birth={} worker_exited={} cache_exists={} cache={}", self.worker_pid, self.worker_birth, self.worker.exited(), self.cache.exists(), self.cache.display());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("RESTART_FLOW_DRAINED target={pid} worker={} cache_removed=true before_fixture_drop=true", self.worker_pid);
+    }
+}
 
 struct Fixture {
     root: PathBuf,
@@ -41,6 +233,9 @@ impl Fixture {
             .env("HOME", self.root.join("home"))
             .env("USERPROFILE", self.root.join("home"))
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
+            .env("TMPDIR", self.root.join("tmp"))
+            .env("TMP", self.root.join("tmp"))
+            .env("TEMP", self.root.join("tmp"))
             .stdin(Stdio::null());
         command
     }
@@ -246,7 +441,7 @@ fn rule(id: &str, path: &Path) -> FileSandboxRule {
         action: SandboxAction::Deny,
         patterns: vec![FileSandboxPattern {
             enabled: true,
-            pattern: path.to_string_lossy().into_owned(),
+            pattern: literal_path_pattern::exact(path),
         }],
         operations: vec![FileSandboxOperation::Read],
         protection: None,
@@ -292,7 +487,7 @@ fn scenario(mode: &str, backend: Option<&str>) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    for directory in ["home", "runtime"] {
+    for directory in ["home", "runtime", "tmp"] {
         fs::create_dir(root.join(directory)).unwrap();
     }
     #[cfg(unix)]
@@ -504,6 +699,7 @@ fn scenario(mode: &str, backend: Option<&str>) {
             "orphan trigger was not observed"
         );
     }
+    let flow = (mode == "flow").then(|| PersistentFlow::open(&fixture, &mut input, &receiver, pid));
     fixture.success(&["restart"]);
     let restored = fixture.status();
     assert_ne!(restored["pid"].as_u64().unwrap(), initial_serve);
@@ -523,6 +719,9 @@ fn scenario(mode: &str, backend: Option<&str>) {
     );
     fixture.wait_host(pid, historical_root);
     probe(&mut input, &receiver, pid, "allow");
+    if let Some(flow) = &flow {
+        flow.finish(&mut input, &receiver, pid);
+    }
     // Existing executors must receive a new authenticated policy snapshot after
     // their original subscription was disconnected.
     config
@@ -578,6 +777,11 @@ fn scenario(mode: &str, backend: Option<&str>) {
 #[ignore = "requires packaged CLI and native runtime; registered in platform Suites"]
 fn restart_keeps_live_executor_and_command_progress() {
     scenario("child", None);
+}
+#[test]
+#[ignore = "requires packaged CLI and native runtime; registered in platform Suites"]
+fn restart_preserves_tcp_stream_then_reclaims_old_worker_cache() {
+    scenario("flow", None);
 }
 #[test]
 #[ignore = "requires packaged CLI and native runtime; registered in platform Suites"]

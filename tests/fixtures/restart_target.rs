@@ -1,8 +1,10 @@
 //! Persistent executor used by the Serve restart Suite. No real credentials.
 use std::{
     fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
+    net::{Shutdown, TcpStream},
     process::{Command, Stdio},
+    time::Duration,
 };
 
 fn main() {
@@ -36,9 +38,47 @@ fn main() {
     }
     println!("READY {}", std::process::id());
     io::stdout().flush().unwrap();
+    let mut stream: Option<TcpStream> = None;
     for line in io::stdin().lock().lines() {
         match line.unwrap().as_str() {
             "quit" => return,
+            command if command.starts_with("stream-open ") => {
+                assert!(stream.is_none(), "persistent stream must only open once");
+                let connection =
+                    TcpStream::connect(command.strip_prefix("stream-open ").unwrap()).unwrap();
+                connection
+                    .set_read_timeout(Some(Duration::from_secs(4)))
+                    .unwrap();
+                connection
+                    .set_write_timeout(Some(Duration::from_secs(4)))
+                    .unwrap();
+                println!(
+                    "STREAM_OPEN {} local={}",
+                    std::process::id(),
+                    connection.local_addr().unwrap()
+                );
+                stream = Some(connection);
+                io::stdout().flush().unwrap();
+            }
+            "stream-ping" => {
+                let connection = stream.as_mut().unwrap();
+                let message = b"persistent-stream";
+                connection.write_all(message).unwrap();
+                let mut echoed = [0; 17];
+                connection.read_exact(&mut echoed).unwrap();
+                assert_eq!(&echoed, message);
+                println!(
+                    "STREAM_OK {} local={}",
+                    std::process::id(),
+                    connection.local_addr().unwrap()
+                );
+                io::stdout().flush().unwrap();
+            }
+            "stream-close" => {
+                stream.take().unwrap().shutdown(Shutdown::Both).unwrap();
+                println!("STREAM_CLOSED {}", std::process::id());
+                io::stdout().flush().unwrap();
+            }
             #[cfg(target_os = "linux")]
             operation @ ("allowed-marker" | "blocked-spawn") => {
                 use std::os::unix::process::ExitStatusExt;

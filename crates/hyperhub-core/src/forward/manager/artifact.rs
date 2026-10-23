@@ -12,14 +12,26 @@ struct Lease {
     root: Arc<Root>,
 }
 impl Root {
+    pub(super) fn directory(&self) -> &Path {
+        &self.0
+    }
+    #[cfg(test)]
     pub(super) fn new() -> io::Result<Arc<Self>> {
-        let mut random = [0; 16];
+        Self::new_authenticated(None)
+    }
+    pub(super) fn new_authenticated(key: Option<&[u8]>) -> io::Result<Arc<Self>> {
+        let mut random = [0; 32];
         rand::fill(&mut random);
-        let path = std::env::temp_dir().join(format!(
-            "hyperhub-forward-{}-{}",
-            std::process::id(),
-            hex(&random)
-        ));
+        let nonce = if let Some(key) = key {
+            let birth = crate::session::process_start_time(std::process::id())
+                .filter(|birth| *birth != 0)
+                .ok_or_else(|| io::Error::other("cache root owner birth unavailable"))?;
+            super::super::cleanup::root_nonce(key, std::process::id(), birth, &random)?
+        } else {
+            hex(&random[..16])
+        };
+        let path =
+            std::env::temp_dir().join(format!("hyperhub-forward-{}-{}", std::process::id(), nonce));
         let builder = fs::DirBuilder::new();
         #[cfg(unix)]
         let mut builder = builder;
@@ -31,7 +43,11 @@ impl Root {
         builder.create(&path)?;
         #[cfg(windows)]
         crate::config_store::restrict_file_to_current_user(&path)?;
-        Ok(Arc::new(Self(path, Mutex::new(HashMap::new()))))
+        let root = Arc::new(Self(path, Mutex::new(HashMap::new())));
+        if let Some(key) = key {
+            super::super::cleanup::bind_owner(root.directory(), key, random)?;
+        }
+        Ok(root)
     }
     pub(super) fn install(
         self: &Arc<Self>,

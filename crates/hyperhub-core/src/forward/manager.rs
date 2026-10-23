@@ -55,6 +55,8 @@ struct Inner {
     state: Mutex<State>,
     preparation: Mutex<()>,
     claims: Arc<Mutex<HashSet<(String, u32, u64)>>>,
+    closing: AtomicBool,
+    resident_sha256: String,
 }
 struct State {
     active: u64,
@@ -95,7 +97,14 @@ struct Offer {
 }
 impl WorkerManager {
     pub(crate) fn new(service: SocksService, executable: &Path) -> io::Result<Self> {
-        let root = artifact::Root::new()?;
+        Self::new_authenticated(service, executable, None)
+    }
+    pub(crate) fn new_authenticated(
+        service: SocksService,
+        executable: &Path,
+        key: Option<&[u8]>,
+    ) -> io::Result<Self> {
+        let root = artifact::Root::new_authenticated(key)?;
         let digest = artifact::source_digest(executable)?;
         let artifact = root.install(executable, &digest)?;
         let claims = Arc::new(Mutex::new(HashSet::new()));
@@ -111,6 +120,8 @@ impl WorkerManager {
             }),
             preparation: Mutex::new(()),
             claims,
+            closing: AtomicBool::new(false),
+            resident_sha256: digest,
         })))
     }
     /// Starts and validates a candidate without changing connection dispatch.
@@ -166,6 +177,11 @@ impl WorkerManager {
             .preparation
             .lock()
             .map_err(|_| io::Error::other("worker preparation state poisoned"))?;
+        if self.0.closing.load(Ordering::Acquire) {
+            return Err(io::Error::other(
+                "forwarding worker manager is shutting down",
+            ));
+        }
         let generation = {
             let mut state = self
                 .0
@@ -464,6 +480,94 @@ impl WorkerManager {
                 worker.retiring.store(true, Ordering::Release);
             }
         }
+    }
+    /// Transfer only this instance's cache retirement to an authenticated
+    /// helper. Existing granted streams remain owned by their old workers.
+    pub fn shutdown_cleanup(&self, executable: &Path, key: &[u8]) -> io::Result<()> {
+        let deadline = std::time::Instant::now() + super::cleanup::ADMISSION;
+        self.0.closing.store(true, Ordering::Release);
+        // A partially prepared generation must not appear after our process
+        // snapshot. Never wait without a deadline for preparation or its RPCs.
+        let _preparation = loop {
+            match self.0.preparation.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(io::Error::other("worker preparation state poisoned"))
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "cache cleanup could not snapshot an unfinished worker preparation",
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        };
+        let workers =
+            {
+                let state = loop {
+                    match self.0.state.try_lock() {
+                        Ok(state) => break state,
+                        Err(std::sync::TryLockError::Poisoned(_)) => {
+                            return Err(io::Error::other("worker group state poisoned"))
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            if std::time::Instant::now() >= deadline {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "cache cleanup worker snapshot deadline expired",
+                                ));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                    }
+                };
+                for worker in state.workers.values() {
+                    worker.retiring.store(true, Ordering::Release);
+                }
+                state
+                    .workers
+                    .values()
+                    .filter(|worker| !worker.exited.load(Ordering::Acquire))
+                    .map(|worker| {
+                        Ok(super::cleanup::ProcessIdentity {
+                            pid: worker.pid,
+                            birth: worker.start_time.filter(|birth| *birth != 0).ok_or_else(
+                                || io::Error::other("cache cleanup worker birth is unavailable"),
+                            )?,
+                        })
+                    })
+                    .collect::<io::Result<Vec<_>>>()?
+            };
+        let root = self.0.root.clone();
+        let executable = executable.to_owned();
+        let sha256 = self.0.resident_sha256.clone();
+        let key = zeroize::Zeroizing::new(key.to_vec());
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name("hh-cache-transfer".into())
+            .spawn(move || {
+                let result =
+                    super::cleanup::Job::capture(root.directory(), workers).and_then(|job| {
+                        super::cleanup::start(job, &executable, &sha256, &key, deadline)
+                    });
+                let _ = send.send(result);
+            })?;
+        let result = receive
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "cache cleanup admission deadline expired",
+                )
+            })
+            .and_then(|result| result);
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
+        result
     }
     fn refresh(&self) {
         if let Ok(mut state) = self.0.state.lock() {

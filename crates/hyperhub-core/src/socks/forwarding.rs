@@ -423,9 +423,22 @@ impl SocksService {
     pub async fn run_forward_worker() -> io::Result<()> {
         crate::forward::worker::run().await
     }
+    pub fn run_forward_cache_cleanup(key: &[u8]) -> io::Result<()> {
+        crate::forward::cleanup::run(key)
+    }
     /// Blocking preparation: call from spawn_blocking when a runtime is serving.
     pub fn with_forward_workers(mut self, executable: impl AsRef<Path>) -> io::Result<Self> {
         let manager = WorkerManager::new(self.clone(), executable.as_ref())?;
+        self.forward_workers = Some(manager);
+        Ok(self)
+    }
+    pub fn with_authenticated_forward_workers(
+        mut self,
+        executable: impl AsRef<Path>,
+        key: &[u8],
+    ) -> io::Result<Self> {
+        let manager =
+            WorkerManager::new_authenticated(self.clone(), executable.as_ref(), Some(key))?;
         self.forward_workers = Some(manager);
         Ok(self)
     }
