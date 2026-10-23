@@ -91,7 +91,28 @@ assert requests[0]["config_item_uuid"] is None
 assert re.fullmatch(r"[0-9a-f-]{36}", requests[1]["config_item_uuid"])
 assert re.fullmatch(r"[0-9a-f-]{36}", requests[2]["config_item_uuid"])
 assert requests[1]["config_item_uuid"] != requests[2]["config_item_uuid"]
-assert requests[1]["details"] == ["变量值=已脱敏"]
+environment_changes = [change for change in plan["changes"] if change["path"] == "/environment_variables"]
+assert len(environment_changes) == 1
+before = environment_changes[0]["before"]
+after = environment_changes[0]["after"]
+assert isinstance(before, list) and isinstance(after, list)
+assert len(after) == len(before) + 1
+assert after[:len(before)] == before
+assert after[-1]["name"] == "LLM_TEST_SECRET"
+assert after[-1]["uuid"] == requests[1]["config_item_uuid"]
+assert after[-1]["value"] == {"value": "<redacted>"}
+secret_path = f"/environment_variables/{len(before)}/value/value"
+assert requests[1]["details"] == [
+    "变量值=已脱敏",
+    f"更新 Secret：{secret_path}；待人工输入",
+]
+assert [change for change in plan["changes"] if change.get("kind") == "secret_update"] == [
+    {
+        "path": secret_path,
+        "kind": "secret_update",
+        "status": "awaiting_human_input",
+    }
+]
 assert any("行为=拒绝" in detail for detail in requests[2]["details"])
 assert any("example.com" in detail for detail in requests[2]["details"])
 PY
