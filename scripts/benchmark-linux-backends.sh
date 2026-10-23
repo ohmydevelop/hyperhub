@@ -138,6 +138,9 @@ trap cleanup EXIT INT TERM
 
 export RUSTUP_HOME=$original_rustup_home
 export CARGO_HOME=$original_cargo_home
+# Agent CA bundles belong to this suite and are removed with its private root.
+mkdir -m 0700 "$temporary/runtime"
+export XDG_RUNTIME_DIR="$temporary/runtime"
 mkdir -p "$result_dir" "$fixture_dir"
 result_dir=$(cd "$result_dir" && pwd)
 fixture_dir=$(cd "$fixture_dir" && pwd)

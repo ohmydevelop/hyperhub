@@ -86,3 +86,18 @@ other. macOS managed forwarding is outside this component workload.
 The descriptor-exhaustion subprocess is Unix-only. A Windows run must report
 that fault verification as not observed until an equivalent native fault test
 exists; other Windows tests passing cannot fill that measurement-model gap.
+
+Native Windows stdio cancellation is a mandatory, separate correctness gate.
+Rust parent ChildStdin/ChildStdout use overlapped IO; a synchronous CreatePipe
+pair cannot establish this behavior. The native regression starts the existing
+source silent-worker fixture through actual inherited stdio, blocks a parent
+read and a large write, and requires shutdown to finish within five seconds.
+Both operations must return before pipe/buffer ownership is released, and the
+child must still be alive after cancellation. The actual worker suite also
+retains its whole-phase 30-second bootstrap budget and control-loss drain test.
+A Linux run records both Windows boundaries as not observed and may collect its
+independent performance samples. Its final valid gate remains incomplete until
+saved exact-source Windows CI metadata and full job output confirm the new
+unit regression and all twelve actual worker cases. Bind that evidence with
+scripts/verify-forward-workers-windows.py; keep the prior Linux-only record.
+Unix socket tests never substitute for an observed Windows stdio trigger.

@@ -1,8 +1,8 @@
 {
   "schema_version": "1.1",
   "target": "HyperHub native Engine component",
-  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v8 worktree snapshot)",
-  "model_digest": "17ae45fb135e3fda926ffedad9b01e0598d2b81ae65e8e0f7e1e09225b1a9066",
+  "revision": "native-component-v1 (v0.2.13 final-lifecycle-v12 worktree snapshot)",
+  "model_digest": "6b192e2ce87b5f818fda9f35ec27787c1afeae5bdc7a0e6def4abbedc87b9bea",
   "cases": [
     {
       "source_refs": [
@@ -616,7 +616,11 @@
     ],
     "generation_notes": [
       "Initial model was refrozen before any performance execution to add an explicit all-four-worker overlap oracle; the denominator and requested scope were unchanged. A failed preflight was retained, operation-specific inputs were corrected, and a final refreeze binds the added ownership unit regression, dependency manifests and evidence recorder before the repeated run. The v6 refreeze adds the statically linked Engine lib.rs dependency and its bounded pure-policy capacity retry. The v7 refreeze binds Engine build/native Base source generation and the immutable r2 release context after the verified exec enrollment, ordinary-exit, process-birth and connection-claim lifecycle fixes. The final v8 refreeze binds the r3 immutable CLI after the Windows-only Winsock startup fix; Linux Agent, Engine and native Base remain byte-identical with r2. v5, v6 and v7 raw evidence remain archived separately; no prior performance observations are pooled into this run.",
-      "Self-reviewed complete category catalog; exclusions are local to this healthy-path timing experiment."
+      "Self-reviewed complete category catalog; exclusions are local to this healthy-path timing experiment.",
+      "The v9 provenance refreeze follows the Windows overlapped Stdio::piped cancellation correction. CancelSynchronousIo alone could not cancel the real parent's asynchronous child-pipe operations. The final r4 CLI and Serve Base are bound in model review notes. The native useful-work denominator, fixed trial order/count, source timing boundaries, correctness oracle, sampling and 100ms soft commit acceptance are unchanged. All v8 raw data remains archived separately; no older observation is pooled into the new measurement.",
+      "The v10 provenance refreeze follows the actual Windows joint LastError defect. Stable native slot and guard bookkeeping now preserves error state on entry/exit and final destruction. The r5 immutable artifacts and source hashes bind this context; Windows functional error semantics remain a separate real native probe/Suite gate. The native useful-work denominator, fixed trial order/count, source timing boundaries, oracle, sampling and 100ms soft commit acceptance are unchanged. All v9 raw data and reports remain archived separately and are not pooled.",
+      "The v11 provenance refreeze follows the minimal test-cfg layout correction that restores the documented tests-do-not-change-NativeBase invariant. Only source hash/current artifact context and review notes change; workload, full fault-category review, cases, oracle, timers, sampling and 100ms soft commit acceptance are preserved. All prior v10 raw observations and reports stay separate, with no pooled measurement or best-run selection.",
+      "The v12 source/artifact refreeze follows actual Unix fork handoff and application callback/signal safety corrections. All new lifecycle sources are bound as release context, while the native timed healthy workload and its complete category review, correctness oracle, trial protocol and acceptance threshold stay fixed. The unmeasured v11 freeze is preserved as such; earlier measured v10 evidence is separate and not pooled."
     ]
   }
 }

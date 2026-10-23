@@ -1,105 +1,60 @@
-# Local final CLI measurement r3, 2026-10-22
+# Final forwarding-worker component measurement
 
-The final 0.2.13 r3 Linux CLI passed the declared forwarding-worker component
-budgets on this host. This result supersedes the earlier local candidate report.
-Project release and native Windows acceptance remain separate.
+This fresh Linux batch passed the frozen forwarding-worker budgets and payload checks. Native Windows correctness is bound separately to successful CI 39810903916, job 119936546176.
 
-- CLI SHA-256: `649121688cfc7eff6b79103667bccd10eec578f57fa70bf9186295b4999a532d` (153045104 bytes).
-- Model digest: `dc63d466b15e31f0f000d8ce4b5cde3948cd94c954aad3ddf52fce177a3ea7f8`.
-- Plan digest: `cbbfe45742194359b107d1652da65e7231aa25c52111f5b7fcb35e11bd004c64`.
-- Forwarding unit preflight: 24/24 passed, 0.28 seconds.
-- Functional preflight: 12/12 actual subprocess cases passed, 35.62 seconds.
-- Native performance: 20 fresh worker groups, 25.69 seconds; 20480 validated
-  echoes, 640 validated admissions, 15 upgrades, zero failed or retried work.
-- Runner exit codes: unit preflight 0, native preflight 0, measurement 0,
-  checker 0; budget failure false.
-- Fixed checker report: [BENCHMARK.valid.md](BENCHMARK.valid.md).
+- CLI SHA-256: `535729536f8b00b993f58b04ef401458da9dcf9256f11da07933584e0037af94` (153121016 bytes).
+- NativeBase: `a23dc05b4ddf025d13f5d429fb0326dba4d5414f7b7991c74993f8cc1819bef2`.
+- Model digest: `df0e0ab65eb5288b2bc0c9f1699367f5eaa9646df5f19fa8e9fc0499c73cfbea` (195 source bindings).
+- Plan digest: `8a3df43d00db4cab8f29dfe1b542b08e912f69900ee19577b7d37e8fb45ab9ab`.
+- Product source commit: `0df20519b2a6af4d16d29da7b2e872e624a5f785`; native CI matched 192 product/build/fixture files.
+- Linux preflight: 24 unit regressions in 0.26s and twelve actual subprocess cases in 31.66s.
+- Twenty fresh worker groups produced 20480 byte-validated echoes, 640 admissions and fifteen upgrades; accounting contains no failed, retried or unfinished requests.
+- All preflight, measurement and completed valid-check exit codes are zero.
 
-The reviewed model binds five obligations, twelve explicit flow/fault boundaries
-and four measured states. It retains all eleven previous boundaries and adds
-exact Winsock BOOLEAN/DWORD decoding with strict invalid-size rejection.
-The transfer regression also rejects a duplicate live identity across generations
-before receiving CONNECT, while keeping both original streams usable.
-
-The controller and candidate workers use release builds. Each state has five
-fresh worker groups; the controller process and Tokio blocking pool are reused.
-There are eight established echo clients and a separate 32-client admission
-burst. Host background jobs were active; a supplementary host-pressure snapshot
-is retained with the raw results. This is a local fixed-work comparison, not a
-production capacity or tail-latency guarantee.
+The model retains five obligations, fourteen flow/fault boundaries and four measured states. The controller and workers use release builds. Each state has five independent groups, eight established echo clients, and a separate 32-client admission burst. This is fixed local work; request samples within a group are correlated.
 
 | State | Prepare median / max (ms) | Commit median / max (ms) | Echo median / observed P95 (us) | Echo/s median [min, max] | Admission median / max (ms) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| baseline | — | — | 41.221 / 65.100 | 139675 [95090, 153625] | 12.105 / 18.484 |
-| upgrade-0 | 98.33982 / 101.48668 | 0.00206 / 0.00219 | 46.041 / 63.072 | 165495 [164016, 172891] | 12.802 / 16.604 |
-| upgrade-1 | 97.74703 / 104.87086 | 0.00200 / 0.00236 | 45.378 / 71.828 | 151518 [100608, 161938] | 12.015 / 16.700 |
-| upgrade-4 | 97.96270 / 98.89019 | 0.00201 / 0.00205 | 43.915 / 64.479 | 161122 [121453, 171088] | 10.400 / 19.619 |
+| baseline | — | — | 41.273 / 62.222 | 143741 [131093, 191513] | 10.636 / 18.334 |
+| upgrade-0 | 88.15587 / 89.41708 | 0.00199 / 0.00220 | 43.892 / 63.737 | 162485 [108922, 175513] | 11.416 / 14.028 |
+| upgrade-1 | 88.39373 / 90.54804 | 0.00192 / 0.00239 | 42.329 / 62.939 | 156804 [117833, 176348] | 10.932 / 15.073 |
+| upgrade-4 | 87.82367 / 88.85123 | 0.00191 / 0.00209 | 44.901 / 63.687 | 160620 [126135, 174500] | 12.671 / 19.863 |
 
-Every measured prepare was below 30000 ms (largest 104.87086 ms) and
-every measured commit was below 100 ms (largest 0.00236 ms). All samples
-are retained. Prepare means the warm-artifact `WorkerManager::prepare` API,
-including supplied/cached executable verification and child bootstrap. Optional
-native Engine preflight is covered by functional tests, not this timed operation.
-Commit timestamps surround the synchronous pointer-switch API only.
+Largest measured prepare was 90.54804ms, below 30000ms. Largest commit was 0.00239ms, below 100ms. Prepare times cover the warm-artifact WorkerManager prepare API, verification and child bootstrap. Commit times cover the synchronous switch API. Optional native Engine preflight is exercised by functional tests and is outside this timed operation.
 
-Observed P95 uses nearest rank over the 5120 request samples in each state.
-Requests within each group are correlated. Five group trials and overlapping
-rate ranges do not establish a causal ordering between these states.
+Observed P95 uses nearest rank over 5120 requests per state; it is not a population tail guarantee. Overlapping rates from five groups do not establish causal ordering. Throughput, admission and resource observations have no acceptance thresholds in this model.
 
 | State | Controller peak threads | Controller peak RSS (MiB) | Summed worker peak threads | Summed worker peak RSS (MiB) |
 | --- | ---: | ---: | ---: | ---: |
-| baseline | 47 | 70.14 | 7 | 21.69 |
-| upgrade-0 | 54 | 216.36 | 14 | 37.18 |
-| upgrade-1 | 54 | 213.54 | 14 | 41.25 |
-| upgrade-4 | 75 | 216.44 | 35 | 99.73 |
+| baseline | 46 | 49.40 | 7 | 21.63 |
+| upgrade-0 | 53 | 209.32 | 14 | 36.86 |
+| upgrade-1 | 53 | 211.76 | 14 | 40.88 |
+| upgrade-4 | 74 | 213.70 | 35 | 98.14 |
 
-Resource sampling spans generation setup, prepare, admission and echo work.
-Thus even upgrade-0 can include both workers during preparation. Nominal 1 ms
-sampling gives observed lower bounds for transient peaks. Controller totals
-include the test origin, reused Tokio blocking pool and allocator high water;
-they are not the production Serve RSS. Business/resource metrics have no
-acceptance thresholds in this model.
+Nominal 1ms resource sampling spans setup, preparation, admission and echo work. Peaks are observed lower bounds; upgrade-0 can include both generations during prepare. Controller totals include the local origin, reused Tokio blocking pool and allocator high water, rather than production Serve memory.
 
-The same r3 CLI passed isolated sensitivity checks with a development controller
-build. Three normal medians were 154.4735, 188.582, 156.5975 us.
-A wrong origin byte failed the untimed independent payload oracle (exit 101),
-before any timed raw file existed. A 3 ms origin delay produced medians
-4399.4529999999995, 4420.032499999999, 4414.098 us; each exceeds the largest normal median
-by the predetermined 2500 us limit. Production source hashes stayed unchanged.
-These mutations validate the byte oracle and fixed-supply cost detection only.
+The same CLI passed a new sensitivity batch. Normal trial echo medians were 47.696, 45.648, 50.708us; 3ms-cost medians were 4139.776, 4201.149, 4139.533us. Every cost median exceeded the largest normal median by the predefined 2500us threshold. Wrong-byte mutation failed the independent untimed oracle with exit101 before a raw timing file existed. All bound source hashes remained unchanged. These mutations cover the byte oracle and fixed-supply cost detection, not every flow boundary.
 
-Raw files are generated under `target/` and are not committed. Reproduce with
-the commands in [README.md](README.md), using the exact frozen source bytes.
-This local run used:
+Formal evidence: `target/benchmarks/forward-workers/formal-013-r6/`. Sensitivity evidence: `target/benchmarks/forward-workers/sensitivity-013-r6/`. The original Linux-only run, exit codes and incomplete coverage report remain beside the exact-source Windows completion record. Earlier directories retain their own source/binary histories; no old samples or successful Windows records were substituted.
 
-- `target/benchmarks/forward-workers/formal-013-r3/` for environment,
-  raw samples, run records, logs and exit codes.
-- `target/benchmarks/forward-workers/sensitivity-013-r3/` for isolated mutation
-  source, logs and sensitivity summary.
+Five evidence-binding negative controls rejected a wrong commit, an incomplete CI run, a failed job, a partial log and stale committed sources. Every control left the pending formal record unchanged. The real Windows binding was then applied once from the successful exact-source run. Negative-control record: `target/diagnostics/forward-windows-binder-negative-final6/results.json`, SHA-256 `834be2becfcef8482cf767f0466fa36fe84bbdd7eb07488ba399e13504182f89`.
 
-The previous `formal-013/`, `formal-013-r2-final/`, and their sensitivity results
-remain historical evidence for their own snapshots. The initial r2 attempt under
-`formal-013-r2/` was rejected before native execution for missing entrypoint
-artifact paths; the plan metadata was corrected before this fresh run. No older
-measurement samples or successful records were substituted.
+Linux supplies these performance observations. Native Windows supplies the bound cancellation and twelve-case correctness evidence. macOS execution is not represented, and no ARM native Hook performance claim follows from package/QEMU export checks. Shared-host conditions and warm artifacts limit extrapolation to cold startup, saturation and production capacity. The checker validates declared coverage and hashes; it does not authenticate executions or prove semantic completeness.
 
-Final evidence SHA-256 values:
+Evidence SHA-256 values:
 
-- `target/benchmarks/forward-workers/formal-013-r3/raw.json`: `c2938569567f7455d09e4c8f96dce5d54bf20d45fc6401b1ec93f26c6847291e`.
-- `target/benchmarks/forward-workers/formal-013-r3/run.json`: `4173bfcb1364204a04a5fc762409c5898b39638a2b1620b1a53c5763f3059d8f`.
-- `target/benchmarks/forward-workers/formal-013-r3/environment.json`: `cfaf0c281636362f27a771b2bcdf151060fdec45e41c0830e424b0d85c3d419e`.
-- `target/benchmarks/forward-workers/formal-013-r3/unit-preflight.log`: `224325bd0496a036a88c1188ae90b3dc591b20925a152e5a37f12b657f53e2df`.
-- `target/benchmarks/forward-workers/formal-013-r3/preflight.log`: `37a3626778370986667ff912c8d8ac454d2a78eed2a7b382dc4229b9706439d3`.
-- `target/benchmarks/forward-workers/formal-013-r3/measurement.log`: `6a738d482d3f131c35eb9716adacde9d1271683485e81704d210092401cae9f2`.
-- `target/benchmarks/forward-workers/formal-013-r3/exit-codes.json`: `3e9a50b7731554f37c0b0001cb3941d25dc5cc3d85ddb20d68257eb28826be23`.
-- `target/benchmarks/forward-workers/formal-013-r3/host-pressure-supplement.json`: `cbc05cc810f54104ef92bc226f8061855859d2613d1635793723dadc01f9d2ce`.
-- `target/benchmarks/forward-workers/sensitivity-013-r3/summary.json`: `429de46750e5d8f18d108bad4872ce2515522e999617ca423e76c5bc6d3c71b7`.
-
-Linux is the executed platform for this measurement. Windows GNU source checks
-passed separately; native Windows shared-socket cancellation and pipe behavior
-must pass the registered Windows Suite before project release. The real resource
-exhaustion subprocess uses Unix RLIMIT_NOFILE; its trigger is not observed on
-Windows and the benchmark runner preserves that coverage gap there. macOS native
-execution is not represented by these results. The fixed checker validates the
-declared coverage, record structure and hashes; it does not authenticate execution
-or prove that the model captures all possible failures.
+- `target/benchmarks/forward-workers/formal-013-r6/raw.json`: `59e1009b0461b00a4c97c7ab57af05ec5e5952b12e841dab02a610c847e205b6`.
+- `target/benchmarks/forward-workers/formal-013-r6/run.json`: `284bf6904aefcaf69e06b9e94730b826cfde6f7526cb150f3a24f8ce6a50573f`.
+- `target/benchmarks/forward-workers/formal-013-r6/environment.json`: `030e177066efe6e0cfd14b5a0c898e11f7d4f9d68f1304b0fe8d5e99bc6a9fd9`.
+- `target/benchmarks/forward-workers/formal-013-r6/unit-preflight.log`: `e8c634e0671c41b727f7b39f1de8fcbc0c4cd5250e133c60e319b19ebe28ab35`.
+- `target/benchmarks/forward-workers/formal-013-r6/preflight.log`: `b2812a23d880bd8b411a77d2359b8deaedb0003ebbcf7546eb8f277277eeac9d`.
+- `target/benchmarks/forward-workers/formal-013-r6/measurement.log`: `c575691f11c29299dcf91ce70620e169fda6a80bb6a2652e8ae5f2bb9fc12b8d`.
+- `target/benchmarks/forward-workers/formal-013-r6/exit-codes.json`: `cdc352ad8da7f57c6cf546effdc0d4f169aefd691d2f5249d009cc9521363107`.
+- `target/benchmarks/forward-workers/formal-013-r6/host-pressure-supplement.json`: `f240431537a15edec27ee5002dded6ee648bc1187296eb1605d6bb813b641253`.
+- `target/benchmarks/forward-workers/formal-013-r6/run-linux-only.json`: `6d01bc35a93b9ffd5728ed6568fe6f7d4813bc5ba1d3795bbad2f1e8cb65df81`.
+- `target/benchmarks/forward-workers/formal-013-r6/exit-codes-linux-only.json`: `93baf01a9e31e558f269a2a9e74b2e9a9e50c68f716e818d266c20bfb43847b4`.
+- `target/benchmarks/forward-workers/formal-013-r6/windows-ci/binding.json`: `7f0f505ce51e942bc5bccebb15ed525aaad9ff045462a16168410957ad50a177`.
+- `target/benchmarks/forward-workers/formal-013-r6/windows-ci/run-metadata.json`: `197907513d525058a5772caa1901d80b5cff8f0af0a8013dce52bc0d544c86df`.
+- `target/benchmarks/forward-workers/formal-013-r6/windows-ci/job-metadata.json`: `1c10016201bcfdbbff2fa8b8d6699f75f2ba6d742bf693527ee2224f02ccd534`.
+- `target/benchmarks/forward-workers/formal-013-r6/windows-ci/job.log`: `c0353d9636c4f49296a28258d5b3daebb51842a0a5731ec5e11be5dde0d16e70`.
+- `target/benchmarks/forward-workers/sensitivity-013-r6/summary.json`: `30cb2f9377fefe284abce6944c93ee6c69a4ea3f7071c003a23cd8a1e1db35cd`.

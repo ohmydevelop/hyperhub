@@ -87,3 +87,24 @@ origin reply must raise every mutated trial's median echo latency by at least
 timeouts do not count as mutation detection. These checks cover the byte oracle
 and the fixed supplied-work measurement; they do not establish mutation coverage
 for every protocol, race or project obligation.
+
+The Windows overlapped stdio read/write boundaries are mandatory. A Linux run
+keeps `C-windows-stdio` blocked and returns a nonzero final checker status even
+when all Linux correctness and timed samples pass. After the exact-source native
+Windows CI succeeds, save the REST run/job metadata and complete job log, then
+bind that actual evidence without repeating or replacing the timed samples:
+
+```bash
+python3 scripts/verify-forward-workers-windows.py \
+  --run target/benchmarks/forward-workers/final-cli \
+  --ci-run target/diagnostics/windows-run.json \
+  --job target/diagnostics/windows-job.json \
+  --log target/diagnostics/windows-job.log \
+  --expected-commit <full-source-commit-sha>
+```
+
+Use `gh api repos/ohmydevelop/hyperhub/actions/runs/ID` and
+`gh api repos/ohmydevelop/hyperhub/actions/jobs/ID` for metadata. The binder checks
+successful native steps, explicit passing test results and committed source
+hashes. It preserves `run-linux-only.json` and the previous checker report;
+external evidence completes correctness coverage, not Linux timing.

@@ -6,9 +6,9 @@
 
 - schema_version: 1\.1
 - target: HyperHub forwarding\-worker local component
-- version_or_revision: 0\.2\.13 working tree; content\-fingerprinted component snapshot
-- model_digest: dc63d466b15e31f0f000d8ce4b5cde3948cd94c954aad3ddf52fce177a3ea7f8
-- plan_digest: cbbfe45742194359b107d1652da65e7231aa25c52111f5b7fcb35e11bd004c64
+- version_or_revision: 0\.2\.13 final\-worker\-formal6; product source 0df20519b2a6af4d16d29da7b2e872e624a5f785
+- model_digest: df0e0ab65eb5288b2bc0c9f1699367f5eaa9646df5f19fa8e9fc0499c73cfbea
+- plan_digest: 8a3df43d00db4cab8f29dfe1b542b08e912f69900ee19577b7d37e8fb45ab9ab
 
 导航：[准备](#准备) · [可靠性场景](#可靠性场景) · [性能场景](#性能场景) · [覆盖映射](#覆盖映射) · [未覆盖与后续](#未覆盖与后续)
 
@@ -85,7 +85,7 @@
       "source_refs": [
         {
           "first": 1,
-          "last": 88,
+          "last": 103,
           "path": "benchmarks/forward-workers/CONTRACT.md"
         },
         {
@@ -115,7 +115,7 @@
       "source_refs": [
         {
           "first": 1,
-          "last": 88,
+          "last": 103,
           "path": "benchmarks/forward-workers/CONTRACT.md"
         }
       ]
@@ -132,22 +132,22 @@
 
 | 类别 | 适用性 | 关联义务 | 理由 | 源码依据 |
 |---|---|---|---|---|
-| F01 | required | O\-flows, O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F02 | not\_applicable | 无 | Production numerical algorithms are not the requested worker switch/transport workload; benchmark duration and accounting checks are measurement quality, not a claim about all application arithmetic\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F03 | required | O\-flows | Native socket boolean return lengths are a representation boundary: accept the two supported sizes and reject unsupported sizes\. General private\-frame fuzzing remains outside this fixed\-work performance comparison\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F04 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F05 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F06 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F07 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F08 | required | O\-admission, O\-echo, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F09 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F10 | required | O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F11 | not\_applicable | 无 | Resident durable release journal, installer publication and power\-loss recovery are owned by project coordinator tests; this worker component measurement does not time or claim those mechanisms\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F12 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F13 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F14 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F15 | not\_applicable | 无 | Adversarial authorization/privacy and credential leakage validation remain independent project security obligations; this benchmark uses task\-owned sessions and no real secrets\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
-| F16 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-88 |
+| F01 | required | O\-flows, O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F02 | not\_applicable | 无 | Production numerical algorithms are not the requested worker switch/transport workload; benchmark duration and accounting checks are measurement quality, not a claim about all application arithmetic\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F03 | required | O\-flows | Native socket boolean return lengths are a representation boundary: accept the two supported sizes and reject unsupported sizes\. General private\-frame fuzzing remains outside this fixed\-work performance comparison\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F04 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F05 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F06 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F07 | required | O\-admission, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F08 | required | O\-admission, O\-echo, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F09 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F10 | required | O\-oracle | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F11 | not\_applicable | 无 | Resident durable release journal, installer publication and power\-loss recovery are owned by project coordinator tests; this worker component measurement does not time or claim those mechanisms\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F12 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F13 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F14 | required | O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F15 | not\_applicable | 无 | Adversarial authorization/privacy and credential leakage validation remain independent project security obligations; this benchmark uses task\-owned sessions and no real secrets\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
+| F16 | required | O\-control, O\-flows | Relevant component mechanism is represented by the linked flow, time, resource or valid\-work obligation; exclusions and measured domain are in CONTRACT\.md\. | benchmarks/forward\-workers/CONTRACT\.md:1\-103 |
 
 ### 基线
 
@@ -179,7 +179,7 @@
   },
   {
     "path": "benchmarks/forward-workers/CONTRACT.md",
-    "sha256": "75d76050df7e928f3c127ed90f19c6ea698a527ed3e38de2f8fd379a34665292"
+    "sha256": "0e37cb74f0af3074f7470d0ca0ead3d838ca547f09f1873d2046d8b187d0a611"
   },
   {
     "path": "build_support/native_base.rs",
@@ -199,15 +199,15 @@
   },
   {
     "path": "crates/hyperhub-agent-core/src/control.rs",
-    "sha256": "2df9a9ab2f5430f3cfa07744f2ebd5e6c385262801bf1b5091ed8aa4eb2458a8"
+    "sha256": "b44529c0dcde21f91bc870bf9e8fb71cfab829ffc86afa9b29446811b7020bc9"
   },
   {
     "path": "crates/hyperhub-agent-core/src/engine_call.rs",
-    "sha256": "ce316140d08fef6d9d3302b90876359b4ab61b71a3f86232ac45719051c5f7f9"
+    "sha256": "4a12bc5dba2e02de8d6fc897704f65c9557f6cf3976ba00f35e4ab2ff6450c7e"
   },
   {
     "path": "crates/hyperhub-agent-core/src/engine_call/slots.rs",
-    "sha256": "c603fc3474843c9c94de59c6c5dff628df07aca88f55f35ca71e6eb417930c04"
+    "sha256": "27ac1918a08f59892d93e2d63d6ccf27fe5bc54eab12d942690fabea8145ba05"
   },
   {
     "path": "crates/hyperhub-agent-core/src/engine_tests.rs",
@@ -251,11 +251,11 @@
   },
   {
     "path": "crates/hyperhub-agent-core/src/sandbox/mod.rs",
-    "sha256": "85399bc154331368f277d299424c52112868a238c5336de4f1474eab0e69235b"
+    "sha256": "d91c6761c50a42e7cc02ed2ce0eb307099beaffe418d653611e67d55c3d9111b"
   },
   {
     "path": "crates/hyperhub-agent-core/src/sandbox/network.rs",
-    "sha256": "3a101faa7bce38a995a62d8da8b6aab9092efeb5ab9e7102006bbb1ebabfb739"
+    "sha256": "df9802a6014cfc935c9e38ec996fcac1d8da92209cba8d96efe92d8aece2f1bc"
   },
   {
     "path": "crates/hyperhub-agent-core/src/sandbox/sanitizer.rs",
@@ -271,15 +271,19 @@
   },
   {
     "path": "crates/hyperhub-agent-core/src/unix_gum/adapters/native.rs",
-    "sha256": "9714b6d22bfe29cc905e665ffe9aa4dd4d0ea9dab60925bd551f6cbe9660cfd6"
+    "sha256": "7773e2b84aec9564264ab8cad530c334cda0079ed025c41cbfb0a9c8dde90276"
   },
   {
     "path": "crates/hyperhub-agent-core/src/unix_gum/fork.rs",
-    "sha256": "bb1cf8954c9760c3a9659cc1c74c35acae15bb9ec7eb19d6a586dfe1c6f19d67"
+    "sha256": "90d48a66b88bc2cebdf5eef4f9a74988d63567f209b658ef0b03c03da3fecddc"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/fork_handoff.rs",
+    "sha256": "fcc344df772dc4dcbf10cfec7d7aad1aa771162eb9f0088acea4757b89a5ca7e"
   },
   {
     "path": "crates/hyperhub-agent-core/src/unix_gum/gum.rs",
-    "sha256": "1ff18d9a3b452810ae78a9f3ca0ce1b95518d45f103e4fbe0b4385d09ebf0fe1"
+    "sha256": "f982244b1ade21b8ab3060660e8b1e48905dfa3d0e7120465dc367c424f8f323"
   },
   {
     "path": "crates/hyperhub-agent-core/src/unix_gum/manager.rs",
@@ -287,7 +291,7 @@
   },
   {
     "path": "crates/hyperhub-agent-core/src/unix_gum/mod.rs",
-    "sha256": "a3ce92534cbba523a9d84c60b095a776413f71b3a0033efc6b414b727fcae3e7"
+    "sha256": "12d83a39b753cf826cc72f719d861e1412f3757f80513643738c7b40eb94cf51"
   },
   {
     "path": "crates/hyperhub-agent-core/src/windows_gum/adapters/async_dns.rs",
@@ -367,7 +371,7 @@
   },
   {
     "path": "crates/hyperhub-agent-core/src/windows_gum/gum.rs",
-    "sha256": "693e0ff23c7c9bcc77d27db9f2cf2b64c7eb697f01bbbd6545ab320c494402c8"
+    "sha256": "c42423a2d45f0c556aeecbae9be0721eb32cbdba81b9fa2db0ef389bb1366e99"
   },
   {
     "path": "crates/hyperhub-agent-core/src/windows_gum/manager.rs",
@@ -466,12 +470,20 @@
     "sha256": "386ee921da3a7ab3907660d1b2d3ed1a75e46a2223d0fc083c8736f2d2b2cb59"
   },
   {
+    "path": "crates/hyperhub-cli/src/platform/linux/fork_handoff.rs",
+    "sha256": "4ec85b2ef49d2439b947b91f3ec09951023c3a03e3f397b36d5b46665d70d013"
+  },
+  {
     "path": "crates/hyperhub-cli/src/platform/linux/frida_core/child_gating.rs",
-    "sha256": "db25e199b2e2125260803f810ed37453e66c51804957645a4c22c15a271d61b5"
+    "sha256": "a251bb64afb86b95b006f61c914c829bdab19df046015c06b80b52e07dcbe0a0"
   },
   {
     "path": "crates/hyperhub-cli/src/platform/linux/frida_core/context.rs",
-    "sha256": "8d1f1c1a6b098f238045d31f409e454b262b90ba285e2f34851a8e66a54d69eb"
+    "sha256": "747e7a5cfc6570d1dd39d96ef655e32914fbe553b04ec76eda30ac1122be4d9b"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/fork_listener.rs",
+    "sha256": "6f03c7d2c088ac0ef3c6d4d842f4c432661ad5d049ab8302c156c9a13f620e87"
   },
   {
     "path": "crates/hyperhub-cli/src/platform/linux/frida_core/injector.rs",
@@ -479,7 +491,7 @@
   },
   {
     "path": "crates/hyperhub-cli/src/platform/linux/frida_core/mod.rs",
-    "sha256": "1cee8330fe1095c6f4ea930e23590121513dcc0b5c97343d3e1b732aa09e0948"
+    "sha256": "759ea620add421aae68eb0d2247c0fc5383f56f6ddb650999d0258f98a1fadf8"
   },
   {
     "path": "crates/hyperhub-cli/src/platform/linux/hook_manifest.rs",
@@ -487,11 +499,11 @@
   },
   {
     "path": "crates/hyperhub-cli/src/platform/linux/launcher.rs",
-    "sha256": "8bb1443b7db840efb2d902c4752319b5b2af0794fe0143801d07fd3945225842"
+    "sha256": "73d408a10750fba6ecfabad2251cc0e8d14f5123add8a08063971929caaa9d9a"
   },
   {
     "path": "crates/hyperhub-cli/src/platform/linux/mod.rs",
-    "sha256": "b8a617ea8efcf42949c1f4444047c49f764a58369d3a83762df5c65b8229b3be"
+    "sha256": "65ab5e181e7a4d1a4080c96ad96fc29d71b911acfc9b6779ec53732be098a800"
   },
   {
     "path": "crates/hyperhub-cli/src/platform/linux/pty.rs",
@@ -643,7 +655,7 @@
   },
   {
     "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
-    "sha256": "50e0a9659d0e29154c36597231f634be4f32c14c179dd6837573ca1d5fabbdd6"
+    "sha256": "62dddeb2a337ce3c59815ce6de355f344513b8ddc4d7e650b8f4e4685cb82dc6"
   },
   {
     "path": "crates/hyperhub-core/src/forward/worker.rs",
@@ -835,7 +847,7 @@
   },
   {
     "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
-    "sha256": "cd95345fdadff01a0e1f0877e3b2a415b2ef314eb21a313e5428848526f5292f"
+    "sha256": "e6c51b717fbcb18310aab9ea6f6a6540d4bb71d425e9ef0b95a771ce1adfea66"
   },
   {
     "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
@@ -903,7 +915,7 @@
   },
   {
     "path": "crates/hyperhub-runtime/src/artifact.rs",
-    "sha256": "f33f68ccac6839730bb09745bd61c113a559d6518d170b8595f840696d594e13"
+    "sha256": "d16ccaa65fb4b33239118b93bd9a3870ce9fb3583486373e389499d8186d3100"
   },
   {
     "path": "crates/hyperhub-runtime/src/generation.rs",
@@ -928,6 +940,14 @@
   {
     "path": "crates/hyperhub-runtime/src/native.rs",
     "sha256": "5fcc307a162c1c9d6c06fdfbd2971c49e0c5f7b7e9e22094c5c0f2f585ad9238"
+  },
+  {
+    "path": "scripts/benchmark-forward-workers.py",
+    "sha256": "6644812dde9a54dbaff01a11f86e9d71e91b2425c4bd36ce367eb18f1d22aa1b"
+  },
+  {
+    "path": "scripts/verify-forward-workers-windows.py",
+    "sha256": "f83773c0f73917db21f93a1b5a0a00c87504633213abf3510a2ee18ff10fce8c"
   }
 ]
 ```
@@ -938,6 +958,7 @@
 |---|---|---|---|---|
 | [C\-native\-suite](#case-C-native-suite) | C native suite | generated | implemented | 未提交执行记录 |
 | [C\-payload\-oracle](#case-C-payload-oracle) | C payload oracle | generated | implemented | 未提交执行记录 |
+| [C\-windows\-stdio](#case-C-windows-stdio) | Actual Windows inherited stdio cancellation | generated | implemented | 未提交执行记录 |
 
 <a id="case-C-native-suite"></a>
 
@@ -969,8 +990,8 @@
     "assertion": "A source child that never reads large bootstrap cannot escape the whole-phase 30s send deadline.",
     "assertion_refs": [
       {
-        "first": 420,
-        "last": 478,
+        "first": 444,
+        "last": 499,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ],
@@ -980,8 +1001,8 @@
     "trigger": "The named real subprocess integration test reaches its specified boundary.",
     "trigger_refs": [
       {
-        "first": 420,
-        "last": 478,
+        "first": 444,
+        "last": 499,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ]
@@ -991,7 +1012,7 @@
     "assertion_refs": [
       {
         "first": 15,
-        "last": 65,
+        "last": 63,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ],
@@ -1002,7 +1023,7 @@
     "trigger_refs": [
       {
         "first": 15,
-        "last": 65,
+        "last": 63,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ]
@@ -1012,7 +1033,7 @@
     "assertion_refs": [
       {
         "first": 286,
-        "last": 419,
+        "last": 440,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ],
@@ -1023,7 +1044,7 @@
     "trigger_refs": [
       {
         "first": 286,
-        "last": 419,
+        "last": 440,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ]
@@ -1032,8 +1053,8 @@
     "assertion": "A Booted child that stops consuming controls is quarantined by the 30s health deadline and retired.",
     "assertion_refs": [
       {
-        "first": 479,
-        "last": 535,
+        "first": 503,
+        "last": 559,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ],
@@ -1043,8 +1064,8 @@
     "trigger": "The named real subprocess integration test reaches its specified boundary.",
     "trigger_refs": [
       {
-        "first": 479,
-        "last": 535,
+        "first": 503,
+        "last": 559,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ]
@@ -1201,7 +1222,7 @@
     "assertion_refs": [
       {
         "first": 185,
-        "last": 221,
+        "last": 218,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ],
@@ -1212,7 +1233,7 @@
     "trigger_refs": [
       {
         "first": 185,
-        "last": 221,
+        "last": 218,
         "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
       }
     ]
@@ -1226,7 +1247,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   },
   {
@@ -1240,6 +1261,11 @@
     "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
   },
   {
+    "first": 370,
+    "last": 465,
+    "path": "crates/hyperhub-core/src/forward/wire/windows.rs"
+  },
+  {
     "first": 7,
     "last": 64,
     "path": "crates/hyperhub-core/src/forward/worker/tests.rs"
@@ -1251,7 +1277,7 @@
   },
   {
     "first": 1,
-    "last": 535,
+    "last": 559,
     "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
   },
   {
@@ -1309,7 +1335,9 @@
     "benchmarks/forward-workers/README.md",
     "crates/hyperhub-core/src/forward/worker/tests.rs",
     "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
-    "crates/hyperhub-core/src/forward/cancellation.rs"
+    "crates/hyperhub-core/src/forward/cancellation.rs",
+    "benchmarks/forward-workers/CONTRACT.md",
+    "crates/hyperhub-core/src/forward/wire/windows.rs"
   ],
   "cwd": "."
 }
@@ -1374,7 +1402,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -1418,6 +1446,218 @@
     "crates/hyperhub-core/src/forward/worker/tests.rs",
     "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
     "crates/hyperhub-core/src/forward/cancellation.rs"
+  ],
+  "cwd": "."
+}
+```
+
+- reported_result:
+
+未提交执行记录；未运行／未验证。
+
+<a id="case-C-windows-stdio"></a>
+
+### C\-windows\-stdio Actual Windows inherited stdio cancellation
+
+- id: C\-windows\-stdio
+- title: Actual Windows inherited stdio cancellation
+- kind: correctness
+- implementation_status: implemented
+- origin: generated
+- goal: Actual old/new TCP, TLS, WebSocket and SSH flows survive switching; cancellation and candidate/control failures release owned resources without corrupting future dispatch\.
+- obligation_ids: O\-flows
+- boundary_ids: B\-windows\-overlapped\-read, B\-windows\-overlapped\-write
+- preconditions: 见共用前提与场景输入；性能 preflight: 不适用
+- inputs: Native Windows process with actual Command::piped parent handles; existing source silent worker; exact\-source CI evidence when measurements execute on Linux\.
+- steps:
+  1. Run the real inherited stdio cancellation unit on native Windows and assert both read and write return within five seconds while the child stays alive\.
+  2. Run all twelve native worker subprocess regressions, including unchanged bootstrap deadline and control\-loss cancellation/drain assertions\.
+  3. When the local performance run is Linux, preserve pending Windows records until the exact\-source successful Windows job is bound with its full log and metadata\.
+- oracle.method: Native OS child liveness, operation completion channels, unchanged phase budgets and independently validated worker flows\.
+- oracle.assertion: Both overlapped operations finish before any handle or buffer is released, the peer remains alive after shutdown, and all twelve native worker cases pass\.
+- oracle.independence: A source child never reads stdin; parent completion and OS child liveness are checked separately\. GitHub metadata and committed source hashes bind external Windows evidence\.
+- workload_ids: W\-business, W\-switch
+- trigger_and_assertion_links:
+
+```json
+[
+  {
+    "assertion": "Actual native Windows ChildStdout read cancellation completes without waiting for the live child to exit; granted streams still drain and central cancellation remains effective.",
+    "assertion_refs": [
+      {
+        "first": 370,
+        "last": 465,
+        "path": "crates/hyperhub-core/src/forward/wire/windows.rs"
+      },
+      {
+        "first": 286,
+        "last": 440,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ],
+    "boundary_id": "B-windows-overlapped-read",
+    "id": "V-B-windows-overlapped-read",
+    "obligation_id": "O-flows",
+    "trigger": "The native Windows real ChildStdin/ChildStdout regression and corresponding actual worker case execute at the exact bound product source commit.",
+    "trigger_refs": [
+      {
+        "first": 370,
+        "last": 465,
+        "path": "crates/hyperhub-core/src/forward/wire/windows.rs"
+      },
+      {
+        "first": 286,
+        "last": 440,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ]
+  },
+  {
+    "assertion": "Actual native Windows ChildStdin write cancellation completes while the silent child remains alive; the complete bootstrap phase retains its 30-second deadline.",
+    "assertion_refs": [
+      {
+        "first": 370,
+        "last": 465,
+        "path": "crates/hyperhub-core/src/forward/wire/windows.rs"
+      },
+      {
+        "first": 444,
+        "last": 499,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ],
+    "boundary_id": "B-windows-overlapped-write",
+    "id": "V-B-windows-overlapped-write",
+    "obligation_id": "O-flows",
+    "trigger": "The native Windows real ChildStdin/ChildStdout regression and corresponding actual worker case execute at the exact bound product source commit.",
+    "trigger_refs": [
+      {
+        "first": 370,
+        "last": 465,
+        "path": "crates/hyperhub-core/src/forward/wire/windows.rs"
+      },
+      {
+        "first": 444,
+        "last": 499,
+        "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+      }
+    ]
+  }
+]
+```
+
+- code_references:
+
+```json
+[
+  {
+    "first": 1,
+    "last": 103,
+    "path": "benchmarks/forward-workers/CONTRACT.md"
+  },
+  {
+    "first": 128,
+    "last": 138,
+    "path": "crates/hyperhub-core/src/forward/cancellation.rs"
+  },
+  {
+    "first": 4,
+    "last": 53,
+    "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs"
+  },
+  {
+    "first": 370,
+    "last": 465,
+    "path": "crates/hyperhub-core/src/forward/wire/windows.rs"
+  },
+  {
+    "first": 7,
+    "last": 64,
+    "path": "crates/hyperhub-core/src/forward/worker/tests.rs"
+  },
+  {
+    "first": 1,
+    "last": 94,
+    "path": "crates/hyperhub-core/tests/forward_workers.rs"
+  },
+  {
+    "first": 1,
+    "last": 559,
+    "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+  },
+  {
+    "first": 286,
+    "last": 440,
+    "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+  },
+  {
+    "first": 444,
+    "last": 499,
+    "path": "crates/hyperhub-core/tests/forward_workers/faults.rs"
+  },
+  {
+    "first": 1,
+    "last": 216,
+    "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs"
+  },
+  {
+    "first": 1,
+    "last": 282,
+    "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs"
+  },
+  {
+    "first": 1,
+    "last": 199,
+    "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs"
+  }
+]
+```
+
+- matrix:
+
+```json
+{}
+```
+
+- automation / reproduction:
+
+```json
+{
+  "argv": [
+    "python3",
+    "scripts/verify-forward-workers-windows.py",
+    "--run",
+    "target/benchmarks/forward-workers/fresh-run",
+    "--ci-run",
+    "target/diagnostics/windows-run.json",
+    "--job",
+    "target/diagnostics/windows-job.json",
+    "--log",
+    "target/diagnostics/windows-job.log",
+    "--expected-commit",
+    "<full-source-commit-sha>"
+  ],
+  "artifact_paths": [
+    "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+    "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+    "crates/hyperhub-core/tests/forward_workers/support.rs",
+    "crates/hyperhub-core/tests/forward_workers.rs",
+    "crates/hyperhub-core/tests/forward_workers/faults.rs",
+    "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+    "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+    "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+    "tests/fixtures/forward_worker_probe.rs",
+    "tests/fixtures/forward_worker_silent.rs",
+    "scripts/benchmark-forward-workers.py",
+    "tests/fixtures/forward_worker_unresponsive.rs",
+    "benchmarks/forward-workers/sensitivity.py",
+    "benchmarks/forward-workers/README.md",
+    "crates/hyperhub-core/src/forward/worker/tests.rs",
+    "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+    "crates/hyperhub-core/src/forward/cancellation.rs",
+    "scripts/verify-forward-workers-windows.py",
+    "crates/hyperhub-core/src/forward/wire/windows.rs",
+    "benchmarks/forward-workers/CONTRACT.md"
   ],
   "cwd": "."
 }
@@ -1498,7 +1738,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -1742,7 +1982,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -1986,7 +2226,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -2230,7 +2470,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -2474,7 +2714,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   },
   {
@@ -2680,7 +2920,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   },
   {
@@ -2886,7 +3126,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   },
   {
@@ -3092,7 +3332,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3288,7 +3528,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3484,7 +3724,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3680,7 +3920,7 @@
 [
   {
     "first": 1,
-    "last": 88,
+    "last": 103,
     "path": "benchmarks/forward-workers/CONTRACT.md"
   }
 ]
@@ -3825,10 +4065,10 @@
 
 | 阶段 | 义务覆盖 | 子边界覆盖 | 关键缺口 | 完整模型门槛 |
 |---|---|---|---|---|
-| 设计 | 5/5 | 12/12 | 无 | 满足 |
-| 实现 | 5/5 | 12/12 | 无 | 满足 |
-| 申报执行 | 0/5 | 0/12 | O\-flows, O\-oracle | 未满足 |
-| 申报有效测量 | 0/5 | 0/12 | O\-flows, O\-oracle | 未满足 |
+| 设计 | 5/5 | 14/14 | 无 | 满足 |
+| 实现 | 5/5 | 14/14 | 无 | 满足 |
+| 申报执行 | 0/5 | 0/14 | O\-flows, O\-oracle | 未满足 |
+| 申报有效测量 | 0/5 | 0/14 | O\-flows, O\-oracle | 未满足 |
 
 ### 义务与子边界
 
@@ -3848,6 +4088,8 @@
 | B\-tls\-ws\-audit | 子边界 | Both generations retain live TLS/WebSocket streams, original CA/custom roots and one contiguous resident audit sequence\. | 已覆盖 |
 | B\-transfer | 子边界 | Actual parent/child TCP transfers preserve Fake\-IP session authority and centralized cancellation\. | 已覆盖 |
 | B\-ungranted\-disconnect | 子边界 | Control loss immediately releases ungranted offer claims, preserves granted cancellation watchers, and remains idempotent\. | 已覆盖 |
+| B\-windows\-overlapped\-read | 子边界 | Actual native Windows ChildStdout read cancellation completes without waiting for the live child to exit; granted streams still drain and central cancellation remains effective\. | 已覆盖 |
+| B\-windows\-overlapped\-write | 子边界 | Actual native Windows ChildStdin write cancellation completes while the silent child remains alive; the complete bootstrap phase retains its 30\-second deadline\. | 已覆盖 |
 | B\-winsock\-boolean | 子边界 | Native boolean decoder accepts the exact supported one\-byte BOOLEAN and four\-byte DWORD representations, ignores bytes outside optlen, and rejects every unsupported length\. | 已覆盖 |
 | B\-worker\-crash | 子边界 | Confirmed candidate crash permits rollback of future dispatch while prior generation stream survives\. | 已覆盖 |
 | O\-oracle | correctness / critical / required | Every offered timed echo and admission token has independent exact byte validation; failed or incomplete work cannot count as successful throughput\. / contract / benchmarks/forward\-workers/CONTRACT\.md; maintainer accepted worker scope and 30s/100ms soft budgets | 已覆盖 |
@@ -4061,6 +4303,7 @@
       "case_ids": [
         "C-native-suite",
         "C-payload-oracle",
+        "C-windows-stdio",
         "P-admission-baseline",
         "P-admission-upgrade-0",
         "P-admission-upgrade-1",
@@ -4080,6 +4323,7 @@
     {
       "case_ids": [
         "C-native-suite",
+        "C-windows-stdio",
         "P-control-upgrade-0",
         "P-control-upgrade-1",
         "P-control-upgrade-4"
@@ -4109,6 +4353,7 @@
       "case_ids": [
         "C-native-suite",
         "C-payload-oracle",
+        "C-windows-stdio",
         "P-admission-baseline",
         "P-admission-upgrade-0",
         "P-admission-upgrade-1",
@@ -4128,6 +4373,7 @@
     {
       "case_ids": [
         "C-native-suite",
+        "C-windows-stdio",
         "P-control-upgrade-0",
         "P-control-upgrade-1",
         "P-control-upgrade-4"
@@ -4208,6 +4454,14 @@
           "obligation_id": "O-flows"
         },
         {
+          "boundary_id": "B-windows-overlapped-read",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-windows-overlapped-write",
+          "obligation_id": "O-flows"
+        },
+        {
           "boundary_id": "B-winsock-boolean",
           "obligation_id": "O-flows"
         },
@@ -4271,6 +4525,14 @@
         },
         {
           "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-windows-overlapped-read",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-windows-overlapped-write",
           "obligation_id": "O-flows"
         },
         {
@@ -4357,6 +4619,14 @@
           "obligation_id": "O-flows"
         },
         {
+          "boundary_id": "B-windows-overlapped-read",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-windows-overlapped-write",
+          "obligation_id": "O-flows"
+        },
+        {
           "boundary_id": "B-winsock-boolean",
           "obligation_id": "O-flows"
         },
@@ -4420,6 +4690,14 @@
         },
         {
           "boundary_id": "B-ungranted-disconnect",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-windows-overlapped-read",
+          "obligation_id": "O-flows"
+        },
+        {
+          "boundary_id": "B-windows-overlapped-write",
           "obligation_id": "O-flows"
         },
         {
@@ -4492,6 +4770,8 @@
     "B-tls-ws-audit",
     "B-transfer",
     "B-ungranted-disconnect",
+    "B-windows-overlapped-read",
+    "B-windows-overlapped-write",
     "B-winsock-boolean",
     "B-worker-crash"
   ],
@@ -4544,6 +4824,8 @@
     "B-tls-ws-audit",
     "B-transfer",
     "B-ungranted-disconnect",
+    "B-windows-overlapped-read",
+    "B-windows-overlapped-write",
     "B-winsock-boolean",
     "B-worker-crash"
   ],
@@ -4604,5 +4886,6 @@
 - Controller resources include local origin and test harness; sampled1ms peaks can miss transient threads\.
 - Known\-cost and wrong\-byte sensitivity mutations will be run in isolated source copies; their results are reported separately\.
 - Unix descriptor\-exhaustion verification is not observed on Windows; its formal valid\-coverage report must retain that gap until an equivalent native fault test exists\.
+- Windows overlapped inherited stdio read/write boundaries remain mandatory\. Linux samples do not observe them: retain a blocked Windows record until exact\-source native CI metadata and complete logs establish both cancellation directions and all twelve worker subprocess cases\.
 - Coverage is relative to the declared model, source snapshot, and finite factor partitions\.
 - Hashes and declarations do not prove semantic completeness, oracle truth, execution authenticity, or statistical validity\.

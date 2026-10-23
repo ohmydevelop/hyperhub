@@ -1,8 +1,8 @@
 {
   "schema_version": "1.1",
   "target": "HyperHub forwarding-worker local component",
-  "revision": "0.2.13 working tree; content-fingerprinted component snapshot",
-  "model_digest": "dc63d466b15e31f0f000d8ce4b5cde3948cd94c954aad3ddf52fce177a3ea7f8",
+  "revision": "0.2.13 final-worker-formal6; product source 0df20519b2a6af4d16d29da7b2e872e624a5f785",
+  "model_digest": "df0e0ab65eb5288b2bc0c9f1699367f5eaa9646df5f19fa8e9fc0499c73cfbea",
   "cases": [
     {
       "id": "C-native-suite",
@@ -15,7 +15,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         },
         {
           "path": "crates/hyperhub-core/tests/forward_workers.rs",
@@ -25,7 +25,7 @@
         {
           "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
           "first": 1,
-          "last": 535
+          "last": 559
         },
         {
           "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
@@ -56,6 +56,11 @@
           "path": "crates/hyperhub-core/src/forward/cancellation.rs",
           "first": 128,
           "last": 138
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+          "first": 370,
+          "last": 465
         }
       ],
       "parameters": {},
@@ -101,7 +106,9 @@
           "benchmarks/forward-workers/README.md",
           "crates/hyperhub-core/src/forward/worker/tests.rs",
           "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
-          "crates/hyperhub-core/src/forward/cancellation.rs"
+          "crates/hyperhub-core/src/forward/cancellation.rs",
+          "benchmarks/forward-workers/CONTRACT.md",
+          "crates/hyperhub-core/src/forward/wire/windows.rs"
         ]
       },
       "protocol": null,
@@ -184,14 +191,14 @@
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
               "first": 15,
-              "last": 65
+              "last": 63
             }
           ],
           "assertion_refs": [
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
               "first": 15,
-              "last": 65
+              "last": 63
             }
           ]
         },
@@ -205,14 +212,14 @@
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
               "first": 286,
-              "last": 419
+              "last": 440
             }
           ],
           "assertion_refs": [
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
               "first": 286,
-              "last": 419
+              "last": 440
             }
           ]
         },
@@ -226,14 +233,14 @@
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
               "first": 185,
-              "last": 221
+              "last": 218
             }
           ],
           "assertion_refs": [
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
               "first": 185,
-              "last": 221
+              "last": 218
             }
           ]
         },
@@ -246,15 +253,15 @@
           "trigger_refs": [
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
-              "first": 420,
-              "last": 478
+              "first": 444,
+              "last": 499
             }
           ],
           "assertion_refs": [
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
-              "first": 420,
-              "last": 478
+              "first": 444,
+              "last": 499
             }
           ]
         },
@@ -267,15 +274,15 @@
           "trigger_refs": [
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
-              "first": 479,
-              "last": 535
+              "first": 503,
+              "last": 559
             }
           ],
           "assertion_refs": [
             {
               "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
-              "first": 479,
-              "last": 535
+              "first": 503,
+              "last": 559
             }
           ]
         },
@@ -390,7 +397,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {},
@@ -478,7 +485,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -651,7 +658,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -872,7 +879,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -1045,7 +1052,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -1266,7 +1273,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         },
         {
           "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -1449,7 +1456,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -1622,7 +1629,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -1843,7 +1850,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         },
         {
           "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -2026,7 +2033,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -2199,7 +2206,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         }
       ],
       "parameters": {
@@ -2420,7 +2427,7 @@
         {
           "path": "benchmarks/forward-workers/CONTRACT.md",
           "first": 1,
-          "last": 88
+          "last": 103
         },
         {
           "path": "crates/hyperhub-core/src/forward/manager.rs",
@@ -2591,6 +2598,203 @@
           ]
         }
       ]
+    },
+    {
+      "id": "C-windows-stdio",
+      "title": "Actual Windows inherited stdio cancellation",
+      "kind": "correctness",
+      "obligation_ids": [
+        "O-flows"
+      ],
+      "source_refs": [
+        {
+          "path": "benchmarks/forward-workers/CONTRACT.md",
+          "first": 1,
+          "last": 103
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+          "first": 370,
+          "last": 465
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "first": 286,
+          "last": 440
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "first": 444,
+          "last": 499
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers.rs",
+          "first": 1,
+          "last": 94
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "first": 1,
+          "last": 559
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "first": 1,
+          "last": 216
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "first": 1,
+          "last": 282
+        },
+        {
+          "path": "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "first": 1,
+          "last": 199
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "first": 7,
+          "last": 64
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "first": 4,
+          "last": 53
+        },
+        {
+          "path": "crates/hyperhub-core/src/forward/cancellation.rs",
+          "first": 128,
+          "last": 138
+        }
+      ],
+      "parameters": {},
+      "inputs": "Native Windows process with actual Command::piped parent handles; existing source silent worker; exact-source CI evidence when measurements execute on Linux.",
+      "procedure": [
+        "Run the real inherited stdio cancellation unit on native Windows and assert both read and write return within five seconds while the child stays alive.",
+        "Run all twelve native worker subprocess regressions, including unchanged bootstrap deadline and control-loss cancellation/drain assertions.",
+        "When the local performance run is Linux, preserve pending Windows records until the exact-source successful Windows job is bound with its full log and metadata."
+      ],
+      "oracle": {
+        "method": "Native OS child liveness, operation completion channels, unchanged phase budgets and independently validated worker flows.",
+        "assertion": "Both overlapped operations finish before any handle or buffer is released, the peer remains alive after shutdown, and all twelve native worker cases pass.",
+        "independence": "A source child never reads stdin; parent completion and OS child liveness are checked separately. GitHub metadata and committed source hashes bind external Windows evidence."
+      },
+      "preflight_ids": [],
+      "status": "implemented",
+      "entrypoint": {
+        "argv": [
+          "python3",
+          "scripts/verify-forward-workers-windows.py",
+          "--run",
+          "target/benchmarks/forward-workers/fresh-run",
+          "--ci-run",
+          "target/diagnostics/windows-run.json",
+          "--job",
+          "target/diagnostics/windows-job.json",
+          "--log",
+          "target/diagnostics/windows-job.log",
+          "--expected-commit",
+          "<full-source-commit-sha>"
+        ],
+        "cwd": ".",
+        "artifact_paths": [
+          "crates/hyperhub-core/tests/forward_worker_benchmark.rs",
+          "crates/hyperhub-core/tests/forward_worker_benchmark/resources.rs",
+          "crates/hyperhub-core/tests/forward_workers/support.rs",
+          "crates/hyperhub-core/tests/forward_workers.rs",
+          "crates/hyperhub-core/tests/forward_workers/faults.rs",
+          "crates/hyperhub-core/tests/forward_workers/protocols.rs",
+          "crates/hyperhub-core/tests/forward_workers/preflight.rs",
+          "crates/hyperhub-core/tests/forward_workers/ssh.rs",
+          "tests/fixtures/forward_worker_probe.rs",
+          "tests/fixtures/forward_worker_silent.rs",
+          "scripts/benchmark-forward-workers.py",
+          "tests/fixtures/forward_worker_unresponsive.rs",
+          "benchmarks/forward-workers/sensitivity.py",
+          "benchmarks/forward-workers/README.md",
+          "crates/hyperhub-core/src/forward/worker/tests.rs",
+          "crates/hyperhub-core/src/forward/manager/resident/tests.rs",
+          "crates/hyperhub-core/src/forward/cancellation.rs",
+          "scripts/verify-forward-workers-windows.py",
+          "crates/hyperhub-core/src/forward/wire/windows.rs",
+          "benchmarks/forward-workers/CONTRACT.md"
+        ]
+      },
+      "protocol": null,
+      "origin": "generated",
+      "workload_ids": [
+        "W-switch",
+        "W-business"
+      ],
+      "verifications": [
+        {
+          "id": "V-B-windows-overlapped-read",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-windows-overlapped-read",
+          "trigger": "The native Windows real ChildStdin/ChildStdout regression and corresponding actual worker case execute at the exact bound product source commit.",
+          "assertion": "Actual native Windows ChildStdout read cancellation completes without waiting for the live child to exit; granted streams still drain and central cancellation remains effective.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+              "first": 370,
+              "last": 465
+            },
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 286,
+              "last": 440
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+              "first": 370,
+              "last": 465
+            },
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 286,
+              "last": 440
+            }
+          ]
+        },
+        {
+          "id": "V-B-windows-overlapped-write",
+          "obligation_id": "O-flows",
+          "boundary_id": "B-windows-overlapped-write",
+          "trigger": "The native Windows real ChildStdin/ChildStdout regression and corresponding actual worker case execute at the exact bound product source commit.",
+          "assertion": "Actual native Windows ChildStdin write cancellation completes while the silent child remains alive; the complete bootstrap phase retains its 30-second deadline.",
+          "trigger_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+              "first": 370,
+              "last": 465
+            },
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 444,
+              "last": 499
+            }
+          ],
+          "assertion_refs": [
+            {
+              "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+              "first": 370,
+              "last": 465
+            },
+            {
+              "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
+              "first": 444,
+              "last": 499
+            }
+          ]
+        }
+      ],
+      "boundary_ids": [
+        "B-windows-overlapped-read",
+        "B-windows-overlapped-write"
+      ]
     }
   ],
   "artifacts": [
@@ -2612,7 +2816,7 @@
     },
     {
       "path": "crates/hyperhub-core/tests/forward_workers/faults.rs",
-      "sha256": "cd95345fdadff01a0e1f0877e3b2a415b2ef314eb21a313e5428848526f5292f"
+      "sha256": "e6c51b717fbcb18310aab9ea6f6a6540d4bb71d425e9ef0b95a771ce1adfea66"
     },
     {
       "path": "crates/hyperhub-core/tests/forward_workers/protocols.rs",
@@ -2636,7 +2840,7 @@
     },
     {
       "path": "scripts/benchmark-forward-workers.py",
-      "sha256": "2e937730a36dbf1038e3b5f7e8df6a146b55765b8ef624f4e7a47339e81216d1"
+      "sha256": "6644812dde9a54dbaff01a11f86e9d71e91b2425c4bd36ce367eb18f1d22aa1b"
     },
     {
       "path": "tests/fixtures/forward_worker_unresponsive.rs",
@@ -2648,7 +2852,7 @@
     },
     {
       "path": "benchmarks/forward-workers/README.md",
-      "sha256": "bb184ade0ffd780b934915762f4adcccd075392122723e47f3ead487ed8f0bcf"
+      "sha256": "f866975c57729ca4a4321008e75c6ce32f8504544c94baa9ced006bd660df404"
     },
     {
       "path": "crates/hyperhub-core/src/forward/worker/tests.rs",
@@ -2661,6 +2865,18 @@
     {
       "path": "crates/hyperhub-core/src/forward/cancellation.rs",
       "sha256": "addc1a953abd35513e95da9bf86d9e871b5106ae4991916674c955674ddec9e0"
+    },
+    {
+      "path": "scripts/verify-forward-workers-windows.py",
+      "sha256": "f83773c0f73917db21f93a1b5a0a00c87504633213abf3510a2ee18ff10fce8c"
+    },
+    {
+      "path": "crates/hyperhub-core/src/forward/wire/windows.rs",
+      "sha256": "62dddeb2a337ce3c59815ce6de355f344513b8ddc4d7e650b8f4e4685cb82dc6"
+    },
+    {
+      "path": "benchmarks/forward-workers/CONTRACT.md",
+      "sha256": "0e37cb74f0af3074f7470d0ca0ead3d838ca547f09f1873d2046d8b187d0a611"
     }
   ],
   "limitations": [
@@ -2668,7 +2884,8 @@
     "Five process trials and fixed offered work cannot establish production tail latency, maximum throughput or long-term memory leak absence.",
     "Controller resources include local origin and test harness; sampled1ms peaks can miss transient threads.",
     "Known-cost and wrong-byte sensitivity mutations will be run in isolated source copies; their results are reported separately.",
-    "Unix descriptor-exhaustion verification is not observed on Windows; its formal valid-coverage report must retain that gap until an equivalent native fault test exists."
+    "Unix descriptor-exhaustion verification is not observed on Windows; its formal valid-coverage report must retain that gap until an equivalent native fault test exists.",
+    "Windows overlapped inherited stdio read/write boundaries remain mandatory. Linux samples do not observe them: retain a blocked Windows record until exact-source native CI metadata and complete logs establish both cancellation directions and all twelve worker subprocess cases."
   ],
   "common_context": {
     "preconditions": [

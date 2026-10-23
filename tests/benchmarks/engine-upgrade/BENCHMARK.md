@@ -6,9 +6,9 @@
 
 - schema_version: 1\.1
 - target: HyperHub native Engine component
-- version_or_revision: native\-component\-v1 \(v0\.2\.13 final\-lifecycle\-v8 worktree snapshot\)
-- model_digest: 17ae45fb135e3fda926ffedad9b01e0598d2b81ae65e8e0f7e1e09225b1a9066
-- plan_digest: 05ef0b65ea2106514d47af29f68affea0a506e23215064a0abbc70a6f2cf9072
+- version_or_revision: native\-component\-v1 \(v0\.2\.13 final\-lifecycle\-v12 worktree snapshot\)
+- model_digest: 6b192e2ce87b5f818fda9f35ec27787c1afeae5bdc7a0e6def4abbedc87b9bea
+- plan_digest: 4c0dc7fd3d4b4c34de57998724aa8ae388a9a4047d6b842328fd10c426e300c9
 
 导航：[准备](#准备) · [可靠性场景](#可靠性场景) · [性能场景](#性能场景) · [覆盖映射](#覆盖映射) · [未覆盖与后续](#未覆盖与后续)
 
@@ -50,7 +50,11 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   ],
   "generation_notes": [
     "Initial model was refrozen before any performance execution to add an explicit all-four-worker overlap oracle; the denominator and requested scope were unchanged. A failed preflight was retained, operation-specific inputs were corrected, and a final refreeze binds the added ownership unit regression, dependency manifests and evidence recorder before the repeated run. The v6 refreeze adds the statically linked Engine lib.rs dependency and its bounded pure-policy capacity retry. The v7 refreeze binds Engine build/native Base source generation and the immutable r2 release context after the verified exec enrollment, ordinary-exit, process-birth and connection-claim lifecycle fixes. The final v8 refreeze binds the r3 immutable CLI after the Windows-only Winsock startup fix; Linux Agent, Engine and native Base remain byte-identical with r2. v5, v6 and v7 raw evidence remain archived separately; no prior performance observations are pooled into this run.",
-    "Self-reviewed complete category catalog; exclusions are local to this healthy-path timing experiment."
+    "Self-reviewed complete category catalog; exclusions are local to this healthy-path timing experiment.",
+    "The v9 provenance refreeze follows the Windows overlapped Stdio::piped cancellation correction. CancelSynchronousIo alone could not cancel the real parent's asynchronous child-pipe operations. The final r4 CLI and Serve Base are bound in model review notes. The native useful-work denominator, fixed trial order/count, source timing boundaries, correctness oracle, sampling and 100ms soft commit acceptance are unchanged. All v8 raw data remains archived separately; no older observation is pooled into the new measurement.",
+    "The v10 provenance refreeze follows the actual Windows joint LastError defect. Stable native slot and guard bookkeeping now preserves error state on entry/exit and final destruction. The r5 immutable artifacts and source hashes bind this context; Windows functional error semantics remain a separate real native probe/Suite gate. The native useful-work denominator, fixed trial order/count, source timing boundaries, oracle, sampling and 100ms soft commit acceptance are unchanged. All v9 raw data and reports remain archived separately and are not pooled.",
+    "The v11 provenance refreeze follows the minimal test-cfg layout correction that restores the documented tests-do-not-change-NativeBase invariant. Only source hash/current artifact context and review notes change; workload, full fault-category review, cases, oracle, timers, sampling and 100ms soft commit acceptance are preserved. All prior v10 raw observations and reports stay separate, with no pooled measurement or best-run selection.",
+    "The v12 source/artifact refreeze follows actual Unix fork handoff and application callback/signal safety corrections. All new lifecycle sources are bound as release context, while the native timed healthy workload and its complete category review, correctness oracle, trial protocol and acceptance threshold stay fixed. The unmeasured v11 freeze is preserved as such; earlier measured v10 evidence is separate and not pooled."
   ],
   "preconditions": [
     "Use source/model hashes exactly as frozen; build with the lockfile and a Rust release toolchain.",
@@ -144,8 +148,8 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
 ```json
 {
   "kind": "self",
-  "notes": "Reviewed all sixteen categories against this controlled healthy-path native component scope; excludes whole-product delivery, hostile inputs and crash recovery. Existing separate functional regressions are not substituted for timing evidence. Final release context: immutable CLI SHA256 649121688cfc7eff6b79103667bccd10eec578f57fa70bf9186295b4999a532d, Agent SHA256 f09a19ce5da463322ba9f14cc546f7ed5bd1f5c0d094b474053a550a7ad7416a, native Base 219dac7345afe39fb7d7f6f60fd351ecf7f26346a093b7e7fdbb6531183e4b8f. The r3 CLI includes a Windows-only Winsock startup fix; its Linux Agent and Engine are byte-identical with r2. This timing harness still measures the native Engine component, not CLI or Core RPC latency.",
-  "reviewer": "Codex remaining_engines"
+  "notes": "Re-reviewed the same sixteen fault categories for this controlled healthy-path native component timing scope. The authenticated Unix fork broker, pre-recovery policy rejection, original-thread signal-mask restoration and same-Core persistent native listener change the actual NativeBase and embedded artifacts. The process-lifetime Frida device owner avoids blocking SDK teardown on an unused failed-fork clone after the managed tree is drained. The model now binds their authoritative production sources and the separate actual source-fixture regressions. These sources are release context; the timed component workload does not claim to execute fork recovery, application signal handlers or product delivery. Functional before/after and full product gates remain separately required. Immutable build context: release-013-acceptance-r13; artifact SHA256 {\"hyperhub\": \"535729536f8b00b993f58b04ef401458da9dcf9256f11da07933584e0037af94\", \"libhyperhub_engine.so\": \"8954ddcced32a22ab22e5c8c8adb9618152fe7dffa1446e0280405f2b26f6fb3\", \"libhyperhub_gum_agent.so\": \"a5ad8fcd54b90e6a0bca0b3a8193855c8c4a6bee7587f87d7b0157ff9376633c\"}; Base context {\"abi\": 65536, \"frida_version\": \"17.17.0\", \"hooks\": 8191, \"installer_protocol\": 1, \"native_base_sha256\": \"a23dc05b4ddf025d13f5d429fb0326dba4d5414f7b7991c74993f8cc1819bef2\", \"serve_base_sha256\": \"1ab0a09259195121185e553e7a0248775dbf2301fc6b5eaa500b4fe5f268651f\", \"state_schema\": 2, \"worker_protocol\": 1}. Reviewed later test-only source deltas are explicitly recorded: the helper Host-registration oracle and the unified Linux Suite private0700 XDG_RUNTIME_DIR isolate actual CA artifacts from the full user runtime. Neither changes native timing workload or acceptance. The useful-work denominator, fixed baseline/upgrade trial order/count, overlap oracle, native timer boundaries, sampling, and 100ms soft-commit acceptance remain unchanged. The v11 source freeze was not measured. All actual v10 raw evidence and reports remain archived separately; observations are never pooled or selected.",
+  "reviewer": "Codex release_audit"
 }
 ```
 
@@ -166,6 +170,70 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   {
     "path": "build_support/native_base.rs",
     "sha256": "34391c5e8857e2e4a4806f3d39aaf7440624cd75c2fb452871691035694d7460"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/engine_call.rs",
+    "sha256": "4a12bc5dba2e02de8d6fc897704f65c9557f6cf3976ba00f35e4ab2ff6450c7e"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/engine_call/slots.rs",
+    "sha256": "27ac1918a08f59892d93e2d63d6ccf27fe5bc54eab12d942690fabea8145ba05"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/adapters/native.rs",
+    "sha256": "7773e2b84aec9564264ab8cad530c334cda0079ed025c41cbfb0a9c8dde90276"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/fork.rs",
+    "sha256": "90d48a66b88bc2cebdf5eef4f9a74988d63567f209b658ef0b03c03da3fecddc"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/fork_handoff.rs",
+    "sha256": "fcc344df772dc4dcbf10cfec7d7aad1aa771162eb9f0088acea4757b89a5ca7e"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/gum.rs",
+    "sha256": "f982244b1ade21b8ab3060660e8b1e48905dfa3d0e7120465dc367c424f8f323"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/unix_gum/mod.rs",
+    "sha256": "12d83a39b753cf826cc72f719d861e1412f3757f80513643738c7b40eb94cf51"
+  },
+  {
+    "path": "crates/hyperhub-agent-core/src/windows_gum/gum.rs",
+    "sha256": "c42423a2d45f0c556aeecbae9be0721eb32cbdba81b9fa2db0ef389bb1366e99"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/fork_handoff.rs",
+    "sha256": "4ec85b2ef49d2439b947b91f3ec09951023c3a03e3f397b36d5b46665d70d013"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/child_gating.rs",
+    "sha256": "a251bb64afb86b95b006f61c914c829bdab19df046015c06b80b52e07dcbe0a0"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/context.rs",
+    "sha256": "747e7a5cfc6570d1dd39d96ef655e32914fbe553b04ec76eda30ac1122be4d9b"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/fork_listener.rs",
+    "sha256": "6f03c7d2c088ac0ef3c6d4d842f4c432661ad5d049ab8302c156c9a13f620e87"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/frida_core/mod.rs",
+    "sha256": "759ea620add421aae68eb0d2247c0fc5383f56f6ddb650999d0258f98a1fadf8"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/launcher.rs",
+    "sha256": "73d408a10750fba6ecfabad2251cc0e8d14f5123add8a08063971929caaa9d9a"
+  },
+  {
+    "path": "crates/hyperhub-cli/src/platform/linux/mod.rs",
+    "sha256": "65ab5e181e7a4d1a4080c96ad96fc29d71b911acfc9b6779ec53732be098a800"
+  },
+  {
+    "path": "crates/hyperhub-cli/tests/engine_host_live.rs",
+    "sha256": "7fe5db95d3cc7c4e8841e8466b03ca6df16aface9461a82941b52398d0b2d268"
   },
   {
     "path": "crates/hyperhub-engine/Cargo.toml",
@@ -201,7 +269,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   },
   {
     "path": "crates/hyperhub-runtime/src/artifact.rs",
-    "sha256": "f33f68ccac6839730bb09745bd61c113a559d6518d170b8595f840696d594e13"
+    "sha256": "d16ccaa65fb4b33239118b93bd9a3870ce9fb3583486373e389499d8186d3100"
   },
   {
     "path": "crates/hyperhub-runtime/src/generation.rs",
@@ -212,12 +280,28 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
     "sha256": "5fcc307a162c1c9d6c06fdfbd2971c49e0c5f7b7e9e22094c5c0f2f585ad9238"
   },
   {
+    "path": "scripts/benchmark-linux-backends.sh",
+    "sha256": "98c2b3b1e159ffe402d314a2f5b1cc2ae682ab3688073436d52daa1a6462257b"
+  },
+  {
     "path": "tests/benchmarks/engine-upgrade/record.py",
     "sha256": "e90fb6032a41321a18a4fad7a821c4ec48c0be54732022402f82c2c4d76048cf"
   },
   {
     "path": "tests/fixtures/engine_fixture_build.rs",
     "sha256": "312ae35ffb2db399024beeeb07f63f063a497bce3f220ea37a49ac7c296752e2"
+  },
+  {
+    "path": "tests/fixtures/engine_host_target.rs",
+    "sha256": "6fa7462f395a6b2e26e6354e1e1f5b7872eef174b6ae7634279902a79fbf0516"
+  },
+  {
+    "path": "tests/fixtures/failed_fork_target.rs",
+    "sha256": "5239af1749dca5f053357ba84b33af6837e2b17e1673de53e83e6ebc9e23ca2a"
+  },
+  {
+    "path": "tests/fixtures/linux_fork_signal_target.rs",
+    "sha256": "58a175f4de6a3bf30957378d37702053dce38ead0dfd5f8da81a0cce6ca32c62"
   },
   {
     "path": "tests/fixtures/network_upgrade_engine.rs",
@@ -338,7 +422,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
+      "sha256": "ec5c77b10328714778b07813f312d38fea3515bbc0e0bc144c3e5d9663347382"
     }
   ],
   "measurement": "not_applicable",
@@ -564,13 +648,13 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
 {
   "acceptance": "not_evaluated",
   "accounting": {
-    "accepted": 14710,
+    "accepted": 26175,
     "cancelled": 0,
     "failed": 0,
-    "offered": 14710,
+    "offered": 26175,
     "rejected": 0,
     "retries": 0,
-    "succeeded": 14710,
+    "succeeded": 26175,
     "unfinished": 0,
     "work_unit_id": "decision_unit"
   },
@@ -602,7 +686,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
+      "sha256": "ec5c77b10328714778b07813f312d38fea3515bbc0e0bc144c3e5d9663347382"
     }
   ],
   "measurement": "valid",
@@ -612,25 +696,25 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   },
   "samples": {
     "unit_latency_ns_p50": [
-      167555,
-      166607,
-      168175,
-      168433,
-      170655
+      168315,
+      165420,
+      166289,
+      165850,
+      165802
     ],
     "unit_latency_ns_p99": [
-      3176419,
-      995731,
-      3212722,
-      4192934,
-      2187459
+      465933,
+      217108,
+      429444,
+      186579,
+      204032
     ],
     "units_per_second": [
-      14288.952666968136,
-      16599.548054589457,
-      12751.371940638297,
-      6052.3660761236,
-      7979.054407010283
+      18914.89211529286,
+      21360.34913764924,
+      21660.4090314671,
+      21618.345852759398,
+      20866.616142176892
     ]
   },
   "status": "completed",
@@ -845,13 +929,13 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
 {
   "acceptance": "not_evaluated",
   "accounting": {
-    "accepted": 11636,
+    "accepted": 26302,
     "cancelled": 0,
     "failed": 0,
-    "offered": 11636,
+    "offered": 26302,
     "rejected": 0,
     "retries": 0,
-    "succeeded": 11636,
+    "succeeded": 26302,
     "unfinished": 0,
     "work_unit_id": "decision_unit"
   },
@@ -883,7 +967,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
+      "sha256": "ec5c77b10328714778b07813f312d38fea3515bbc0e0bc144c3e5d9663347382"
     }
   ],
   "measurement": "valid",
@@ -893,25 +977,25 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   },
   "samples": {
     "unit_latency_ns_p50": [
-      172033,
-      170939,
-      168587,
-      171874,
-      172404
+      172810,
+      170997,
+      170753,
+      169915,
+      171671
     ],
     "unit_latency_ns_p99": [
-      1533564,
-      3181520,
-      179774,
-      4209536,
-      192807
+      188998,
+      217954,
+      287055,
+      182727,
+      3180548
     ],
     "units_per_second": [
-      12308.034944328183,
-      12464.486704554052,
-      5515.730668381677,
-      8530.482346145134,
-      6014.809451789374
+      18182.37815266687,
+      21201.440802608602,
+      22791.226064780116,
+      22852.271725228697,
+      19651.677817918728
     ]
   },
   "status": "completed",
@@ -1149,7 +1233,7 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "evidence": [
     {
       "path": "tests/benchmarks/engine-upgrade/evidence/linux-x64/raw.json",
-      "sha256": "af3643202298af375ecc1ae92f5fecec20466689dcdc4e6a7e39b0a4c7f1fe5f"
+      "sha256": "ec5c77b10328714778b07813f312d38fea3515bbc0e0bc144c3e5d9663347382"
     }
   ],
   "measurement": "valid",
@@ -1157,18 +1241,18 @@ Actual optimized native component run; fixed four\-worker/32\-rule workload, sha
   "parameters": {},
   "samples": {
     "commit_ns": [
-      1095,
+      1165,
+      1130,
       1121,
-      1488,
-      1087,
-      973
+      988,
+      1509
     ],
     "prepare_ns": [
-      62868438,
-      60358322,
-      85640721,
-      56098930,
-      53538912
+      81000545,
+      46633534,
+      45414031,
+      38074398,
+      45747315
     ]
   },
   "status": "completed",

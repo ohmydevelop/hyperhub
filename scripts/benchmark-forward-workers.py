@@ -161,6 +161,16 @@ def main():
         records.append(result)
 
     record("C-native-suite", preflight == 0, [unit_log]+([preflight_log] if preflight_log.exists() else []))
+    if os.name == "nt":
+        record("C-windows-stdio", preflight == 0, [unit_log]+([preflight_log] if preflight_log.exists() else []))
+    else:
+        case = cases["C-windows-stdio"]
+        records.append({"case_id": case["id"], "status": "blocked", "correctness": "not_checked", "measurement": "not_applicable",
+                        "acceptance": "not_evaluated", "parameters": case["parameters"], "checks": [], "samples": {}, "evidence": [],
+                        "details": "Native Windows overlapped stdio is not exercised by this platform. Supply actual exact-source Windows CI evidence before final valid acceptance.",
+                        "verifications": [{"id": item["id"], "trigger": "not_observed", "status": "not_checked", "evidence_paths": [],
+                                           "details": "Pending actual Windows stdio and worker subprocess execution; Unix IO does not establish this boundary."}
+                                          for item in case["verifications"]]})
     execution = preflight
     if preflight == 0:
         measurement_log = output/"measurement.log"
