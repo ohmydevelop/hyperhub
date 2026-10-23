@@ -219,7 +219,10 @@ mod windows_mapping {
         let status = unsafe {
             NtCreateFile(
                 &mut output,
-                0x1000_0000,
+                // NtCreateFile requires explicit SYNCHRONIZE for synchronous
+                // options, and FILE_SUPERSEDE requires DELETE on the old file.
+                // Retain GENERIC_ALL to exercise combined content rights.
+                0x1011_0000,
                 &object,
                 ios.as_mut_ptr().cast(),
                 std::ptr::null(),
@@ -457,6 +460,26 @@ fn main() {
             .nth(1)
             .expect("expected private fixture root"),
     );
+    #[cfg(windows)]
+    if std::env::args_os()
+        .nth(2)
+        .is_some_and(|mode| mode == "supersede-unmanaged")
+    {
+        // The driver runs this exact syscall without HyperHub before starting
+        // Serve. A policy denial cannot conceal invalid positive-control input.
+        let path = root.join("supersede-preflight.data");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"private-supersede-preflight").unwrap();
+        drop(file);
+        assert_eq!(windows_mapping::supersede(&path), "opened:replaced");
+        fs::remove_file(&path).unwrap();
+        println!("FILE_ALIAS_SUPERSEDE_PREFLIGHT_OK native_status=0 replaced=true");
+        return;
+    }
     #[cfg(windows)]
     let mappings = windows_mapping::Mappings::prepare(&root);
     println!("READY {}", std::process::id());

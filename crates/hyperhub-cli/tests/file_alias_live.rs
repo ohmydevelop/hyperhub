@@ -344,8 +344,6 @@ fn scenario(backend: &str) {
         .arg("--admin-password-file")
         .arg(fixture.root.join("password"));
     fixture.output(import);
-    fixture.success(&["start"]);
-
     let target = fixture
         .root
         .join(format!("file-alias-target{}", std::env::consts::EXE_SUFFIX));
@@ -359,6 +357,30 @@ fn scenario(backend: &str) {
         .arg("-o")
         .arg(&target);
     fixture.output(compiler);
+    #[cfg(windows)]
+    {
+        let mut preflight = Command::new(&target);
+        preflight
+            .arg(&fixture.root)
+            .arg("supersede-unmanaged")
+            .stdin(Stdio::null());
+        for name in [
+            "HYPERHUB_SESSION_ID",
+            "HYPERHUB_SESSION_TOKEN",
+            "HYPERHUB_SOCKS_ADDR",
+            "HYPERHUB_CONTROL_ENDPOINT",
+            "HYPERHUB_SESSION_ENV_KEYS",
+        ] {
+            preflight.env_remove(name);
+        }
+        let output = fixture.output(preflight);
+        assert_eq!(
+            String::from_utf8(output).unwrap().trim(),
+            "FILE_ALIAS_SUPERSEDE_PREFLIGHT_OK native_status=0 replaced=true"
+        );
+        eprintln!("FILE_ALIAS_SUPERSEDE_PREFLIGHT_OK backend={backend} unmanaged=true native_status=0 replaced=true");
+    }
+    fixture.success(&["start"]);
     let mut launch = fixture.command();
     launch.arg("run");
     #[cfg(target_os = "linux")]
