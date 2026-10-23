@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/uio.h>
@@ -128,6 +129,34 @@ static int network_probe(const char *name, const char *service, int nonblocking,
     return ok;
 }
 
+static int file_alias_probe(const char *path, const char *data, size_t length) {
+    const char *aliases[] = {"hyperhub-linux-fixture.link", "hyperhub-linux-fixture.link-at"};
+    int created[] = {link(path, aliases[0]),
+                     linkat(AT_FDCWD, path, AT_FDCWD, aliases[1], 0)};
+    struct stat source = {0};
+    int ok = stat(path, &source) == 0;
+    for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); ++i) {
+        if (created[i] != 0) {
+            ok = 0;
+            continue;
+        }
+        int fd = open(aliases[i], O_RDONLY);
+        struct stat alias = {0};
+        char readback[32] = {0};
+        char extra = 0;
+        if (fd < 0 || fstat(fd, &alias) != 0 || source.st_dev != alias.st_dev ||
+            source.st_ino != alias.st_ino || length > sizeof(readback) ||
+            read(fd, readback, length) != (ssize_t)length ||
+            memcmp(data, readback, length) != 0 || read(fd, &extra, 1) != 0)
+            ok = 0;
+        if (fd >= 0)
+            close(fd);
+        if (unlink(aliases[i]) != 0)
+            ok = 0;
+    }
+    return ok;
+}
+
 static int file_probe(void) {
     const char *path = "hyperhub-linux-fixture.data";
     const char *renamed = "hyperhub-linux-fixture.renamed";
@@ -193,6 +222,8 @@ static int file_probe(void) {
         close(opened);
     unlink("hyperhub-linux-fixture.creat");
 
+    int aliases_ok = file_alias_probe(path, data, sizeof(data));
+    ok = ok && aliases_ok;
     ok = ok && rename(path, renamed) == 0;
     ok = ok && renameat(AT_FDCWD, renamed, AT_FDCWD, renamed_at) == 0;
     ok = ok && unlinkat(AT_FDCWD, renamed_at, 0) == 0;
