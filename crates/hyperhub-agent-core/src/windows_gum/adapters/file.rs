@@ -801,18 +801,31 @@ mod tests {
         );
         let mut section = null_mut();
         let size = 4096_i64;
-        assert_eq!(
-            create_section(&mut section, file, FileOperation::Write, || create(
-                &mut section,
-                0x000F_001F,
-                null(),
-                &size,
-                4,
-                0x0800_0000,
-                file
-            )),
-            0
-        );
+        // Allocate the OS fixture without requiring an injected plugin runtime.
+        // Restore recursion state before every classification/policy assertion.
+        struct RestoreHook(bool);
+        impl Drop for RestoreHook {
+            fn drop(&mut self) {
+                INSIDE_HOOK.with(|inside| inside.set(self.0));
+            }
+        }
+        let previous = INSIDE_HOOK.with(Cell::get);
+        let result = {
+            let _restore = RestoreHook(INSIDE_HOOK.with(|inside| inside.replace(true)));
+            create_section(&mut section, file, FileOperation::Write, || {
+                create(
+                    &mut section,
+                    0x000F_001F,
+                    null(),
+                    &size,
+                    4,
+                    0x0800_0000,
+                    file,
+                )
+            })
+        };
+        assert_eq!(INSIDE_HOOK.with(Cell::get), previous);
+        assert_eq!(result, 0);
         assert!(!section.is_null());
         NativeSection(OwnedHandle::from_raw_handle(section))
     }
