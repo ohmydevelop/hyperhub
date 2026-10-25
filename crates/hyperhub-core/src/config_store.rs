@@ -155,7 +155,7 @@ fn resolve_hyperhub_home(
             "cannot determine HyperHub home; set {HYPERHUB_HOME_ENV} or the user home directory"
         ))
     })?;
-    Ok(PathBuf::from(home).join(".hyperhub"))
+    Ok(PathBuf::from(home).join(crate::release_channel::default_home_name()))
 }
 
 pub fn default_config_path() -> Result<PathBuf, StoreError> {
@@ -1107,9 +1107,9 @@ mod tests {
         assert_eq!(
             resolve_hyperhub_home(None, Some(user), &current).unwrap(),
             if cfg!(windows) {
-                PathBuf::from(r"C:\Users\user\.hyperhub")
+                PathBuf::from(r"C:\Users\user").join(crate::release_channel::default_home_name())
             } else {
-                PathBuf::from("/home/user/.hyperhub")
+                PathBuf::from("/home/user").join(crate::release_channel::default_home_name())
             }
         );
     }

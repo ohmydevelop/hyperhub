@@ -26,6 +26,8 @@ const CHECK_STATE_FILE: &str = "upgrade-check.json";
 #[derive(Debug, Clone, Deserialize)]
 struct Release {
     tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
     html_url: String,
     assets: Vec<ReleaseAsset>,
 }
@@ -52,6 +54,9 @@ struct ReleaseInfo {
 }
 
 pub(crate) fn check_on_start() -> Result<bool, String> {
+    if hyperhub_core::release_channel::development_build() {
+        return Ok(false);
+    }
     let now = now_ms();
     let mut state = load_state()?;
     if now.saturating_sub(state.last_check_ms) < CHECK_INTERVAL_MS {
@@ -115,6 +120,10 @@ pub(crate) fn check_on_start() -> Result<bool, String> {
 }
 
 pub(crate) fn run_manual() -> Result<i32, String> {
+    if hyperhub_core::release_channel::development_build() {
+        println!("Development builds are installed and updated by explicit release tag; no automatic replacement was performed.");
+        return Ok(0);
+    }
     let result = check_latest()?;
     let mut state = load_state()?;
     state.last_check_ms = now_ms();
@@ -370,7 +379,16 @@ fn check_latest() -> Result<ReleaseInfo, String> {
         .map_err(|error| format!("GitHub Releases returned an error: {error}"))?
         .json()
         .map_err(|error| format!("invalid GitHub release response: {error}"))?;
-    let version = release.tag_name.trim_start_matches('v').to_owned();
+    let parsed = hyperhub_core::release_channel::version(&release.tag_name)
+        .ok_or("release has an invalid semantic version")?;
+    if release.prerelease || !parsed.pre.is_empty() {
+        return Err("stable updates do not accept prerelease artifacts".into());
+    }
+    let version = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name)
+        .to_owned();
     let archive_name = asset_name()?;
     let archive = release
         .assets
@@ -524,20 +542,9 @@ fn binary_name() -> &'static str {
 }
 
 fn is_newer(candidate: &str, current: &str) -> bool {
-    parse_version(candidate) > parse_version(current)
-}
-
-fn parse_version(value: &str) -> (u64, u64, u64) {
-    let parts = value
-        .trim_start_matches('v')
-        .split('.')
-        .map(|part| part.parse().unwrap_or(0))
-        .collect::<Vec<u64>>();
-    (
-        parts.first().copied().unwrap_or(0),
-        parts.get(1).copied().unwrap_or(0),
-        parts.get(2).copied().unwrap_or(0),
-    )
+    hyperhub_core::release_channel::version(candidate)
+        .zip(hyperhub_core::release_channel::version(current))
+        .is_some_and(|(candidate, current)| candidate > current)
 }
 
 fn state_path() -> Result<PathBuf, String> {
@@ -601,8 +608,22 @@ mod tests {
 
     #[test]
     fn parses_release_versions_with_tag_prefix() {
-        assert_eq!(parse_version("v1.2.3"), (1, 2, 3));
-        assert_eq!(parse_version("1.2"), (1, 2, 0));
+        assert_eq!(
+            hyperhub_core::release_channel::version("v1.2.3")
+                .unwrap()
+                .to_string(),
+            "1.2.3"
+        );
+        assert_eq!(
+            hyperhub_core::release_channel::version("1.2")
+                .unwrap()
+                .to_string(),
+            "1.2.0"
+        );
+        assert!(is_newer("0.3.0-alpha.10", "0.3.0-alpha.2"));
+        assert!(is_newer("0.3.0", "0.3.0-rc.1"));
+        assert!(!is_newer("0.3.0+build", "0.3.0"));
+        assert!(!is_newer("invalid", "0.3.0"));
     }
 
     #[test]

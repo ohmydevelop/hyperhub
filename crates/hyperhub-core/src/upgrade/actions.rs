@@ -16,9 +16,9 @@ pub(super) fn apply(inner: &Inner, book: &mut Book, request: &Request, now: u64)
     } = &request.action
     {
         let all_sessions = matches!(request.action, Action::PrepareAll { .. });
-        if all_sessions && super::super::stable_version(&manifest.version).is_none() {
+        if all_sessions && super::super::release_version(&manifest.version).is_none() {
             return Err(io::Error::other(
-                "global deployment requires a stable numeric version",
+                "global deployment requires a valid semantic version",
             ));
         }
         let digest = fingerprint(&request.action)?;
@@ -42,10 +42,10 @@ pub(super) fn apply(inner: &Inner, book: &mut Book, request: &Request, now: u64)
                         && record.native_base_sha256 == *native_base_sha256
                         && record.manifest.target == manifest.target
                 })
-                .filter_map(|record| super::super::stable_version(&record.manifest.version))
+                .filter_map(|record| super::super::release_version(&record.manifest.version))
                 .max();
             if latest.is_some_and(|stable| {
-                super::super::stable_version(&manifest.version).unwrap() < stable
+                super::super::release_version(&manifest.version).unwrap() < stable
             }) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

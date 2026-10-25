@@ -77,6 +77,11 @@ pub(crate) fn print_embedded_skill() -> Result<i32, String> {
 }
 
 pub(crate) fn install_user_skill() -> Result<SkillInstallOutcome, String> {
+    if hyperhub_core::release_channel::development_build() {
+        let home =
+            hyperhub_core::config_store::hyperhub_home().map_err(|error| error.to_string())?;
+        return install_into(&home.join("skills"));
+    }
     let home = user_home_directory()?;
     install_into(&home.join(".agents").join("skills"))
 }

@@ -856,8 +856,8 @@ fn reject_older_release(
     plan: &super::Plan,
     workers: &crate::socks::WorkerGroupStatus,
 ) -> io::Result<()> {
-    let candidate = upgrade::stable_version(&plan.bundle.version)
-        .ok_or_else(|| io::Error::other("product upgrade requires a stable numeric version"))?;
+    let candidate = upgrade::release_version(&plan.bundle.version)
+        .ok_or_else(|| io::Error::other("product upgrade requires a valid semantic version"))?;
     let versions = book
         .records
         .values()
@@ -872,7 +872,7 @@ fn reject_older_release(
         )
         .chain(std::iter::once(env!("CARGO_PKG_VERSION")));
     if versions
-        .filter_map(upgrade::stable_version)
+        .filter_map(upgrade::release_version)
         .any(|version| candidate < version)
     {
         return Err(io::Error::other(

@@ -9,6 +9,7 @@ repository.workspace = true
 hyperhub-engine = { path = "../hyperhub-engine" }
 hyperhub-runtime = { path = "../hyperhub-runtime" }
 argon2 = "0.5"
+semver = "1"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

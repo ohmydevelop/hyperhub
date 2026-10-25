@@ -309,25 +309,13 @@ fn short_reason(reason: &str) -> String {
     text
 }
 
-// Product deployments are stable numeric releases; build metadata does not
-// change precedence. Unknown/prerelease versions never authorize a downgrade.
-pub(crate) fn stable_version(version: &str) -> Option<[u64; 3]> {
-    let version = version.split('+').next()?;
-    let mut result = [0; 3];
-    let parts: Vec<_> = version.split('.').collect();
-    if parts.is_empty() || parts.len() > 3 {
-        return None;
-    }
-    for (index, part) in parts.into_iter().enumerate() {
-        if part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        result[index] = part.parse().ok()?;
-    }
-    Some(result)
+// Deployment ordering includes prerelease identifiers and ignores build metadata.
+pub(crate) fn release_version(version: &str) -> Option<semver::Version> {
+    crate::release_channel::version(version)
 }
+
 fn not_older(candidate: &Manifest, host: &Manifest) -> bool {
-    stable_version(&candidate.version)
-        .zip(stable_version(&host.version))
+    release_version(&candidate.version)
+        .zip(release_version(&host.version))
         .is_some_and(|(candidate, host)| candidate >= host)
 }

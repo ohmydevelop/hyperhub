@@ -19,6 +19,7 @@ pub mod process;
 pub mod protection;
 pub(crate) mod protocol;
 pub mod release;
+pub mod release_channel;
 pub(crate) mod retention;
 pub mod runtime;
 pub mod sandbox;
