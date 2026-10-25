@@ -3,7 +3,11 @@ set -eu
 
 repo="${HYPERHUB_REPO:-ohmydevelop/hyperhub}"
 version="${HYPERHUB_VERSION:-latest}"
-install_dir="${HYPERHUB_INSTALL_DIR:-$HOME/.local/bin}"
+case "${version%%+*}" in
+  *-*) default_install_dir="$HOME/.local/opt/hyperhub-dev/${version#v}" ;;
+  *) default_install_dir="$HOME/.local/bin" ;;
+esac
+install_dir="${HYPERHUB_INSTALL_DIR:-$default_install_dir}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {

@@ -59,11 +59,15 @@ jobs:
       - name: Check HyperHub Skill benchmark contract
         run: ./scripts/benchmark-skill-subagent.sh --contract-only
 
+      - name: Test release readiness and installer isolation
+        run: python scripts/test-development-release.py
+
       - name: Test isolated HyperHub homes
         if: runner.os == 'Linux'
         run: |
           cargo build --release -p hyperhub --locked
           ./scripts/test-cli-multi-home.sh ./target/release/hyperhub
+          python3 scripts/test-development-release.py --hyperhub ./target/release/hyperhub
 
       - name: Test Linux Gum Agent
         if: runner.os == 'Linux'
@@ -72,7 +76,9 @@ jobs:
       - name: Build Windows embedded CLI
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .\scripts\build.ps1 -SkipTests
+        run: |
+          .\scripts\build.ps1 -SkipTests
+          .\scripts\test-development-install.ps1
 
       - name: Test Windows Hook semantics
         timeout-minutes: 30
@@ -140,3 +146,80 @@ jobs:
             target/benchmarks/linux-backends/dynamic-hooks.json
             target/benchmarks/linux-fixtures/*/manifest.json
           if-no-files-found: error
+
+  attachment-linux-soak:
+    name: Attachment soak (Linux ${{ matrix.backend }})
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/dev/') && contains(github.event.head_commit.message, '[attach soak]'))
+    needs: [rust, linux-targets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [ptrace, gum]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - name: Build embedded candidate
+        run: bash scripts/build.sh
+      - name: Exercise attachment lifecycle for two hours
+        run: |
+          python3 scripts/test-dynamic-attach.py \
+            --hyperhub target/release/hyperhub --backend '${{ matrix.backend }}' \
+            --origin attach --target-pty --cycles 100 --duration 7200 \
+            --output target/benchmarks/attachment-soak/${{ matrix.backend }}
+      - name: Exercise reversible run lifecycle
+        run: |
+          python3 scripts/test-dynamic-attach.py \
+            --hyperhub target/release/hyperhub --backend '${{ matrix.backend }}' \
+            --origin run --target-pty --cycles 3 \
+            --output target/benchmarks/attachment-run/${{ matrix.backend }}
+      - name: Upload bounded attachment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attachment-soak-linux-${{ matrix.backend }}
+          path: |
+            target/benchmarks/attachment-soak/${{ matrix.backend }}/result.json
+            target/benchmarks/attachment-soak/${{ matrix.backend }}/failure.json
+            target/benchmarks/attachment-run/${{ matrix.backend }}/result.json
+            target/benchmarks/attachment-run/${{ matrix.backend }}/failure.json
+          if-no-files-found: warn
+
+  attachment-windows-soak:
+    name: Attachment soak (Windows gum)
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/dev/') && contains(github.event.head_commit.message, '[attach soak]'))
+    needs: [rust, linux-targets]
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build embedded candidate
+        shell: pwsh
+        run: .\scripts\build.ps1 -SkipTests
+      - name: Exercise attachment lifecycle for two hours
+        shell: pwsh
+        run: |
+          python scripts/test-dynamic-attach-windows.py --hyperhub target/release/hyperhub.exe --origin attach --cycles 100 --duration 7200 --output target/benchmarks/attachment-soak/gum
+          if ($LASTEXITCODE -ne 0) { throw 'Windows attachment soak failed' }
+      - name: Exercise reversible run lifecycle
+        shell: pwsh
+        run: |
+          python scripts/test-dynamic-attach-windows.py --hyperhub target/release/hyperhub.exe --origin run --cycles 3 --output target/benchmarks/attachment-run/gum
+          if ($LASTEXITCODE -ne 0) { throw 'Windows reversible run failed' }
+      - name: Upload bounded attachment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attachment-soak-windows-gum
+          path: |
+            target/benchmarks/attachment-soak/gum/result.json
+            target/benchmarks/attachment-soak/gum/failure.json
+            target/benchmarks/attachment-run/gum/result.json
+            target/benchmarks/attachment-run/gum/failure.json
+          if-no-files-found: warn

@@ -2,7 +2,11 @@ $ErrorActionPreference = "Stop"
 
 $repo = if ($env:HYPERHUB_REPO) { $env:HYPERHUB_REPO } else { "ohmydevelop/hyperhub" }
 $version = if ($env:HYPERHUB_VERSION) { $env:HYPERHUB_VERSION } else { "latest" }
-$installDir = if ($env:HYPERHUB_INSTALL_DIR) { $env:HYPERHUB_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".hyperhub\bin" }
+$developmentBuild = $version -match '^v?[0-9]+\.[0-9]+\.[0-9]+-'
+$defaultInstallDir = if ($developmentBuild) {
+  Join-Path (Join-Path $env:USERPROFILE ".hyperhub-dev\bin") ($version -replace '^v', '')
+} else { Join-Path $env:USERPROFILE ".hyperhub\bin" }
+$installDir = if ($env:HYPERHUB_INSTALL_DIR) { $env:HYPERHUB_INSTALL_DIR } else { $defaultInstallDir }
 
 if ([Environment]::Is64BitOperatingSystem -eq $false) {
   throw "HyperHub supports Windows x64 only"
@@ -35,7 +39,7 @@ try {
 "@
   $shortcutContent | Set-Content -LiteralPath $shortcut -Encoding ascii
   $path = [Environment]::GetEnvironmentVariable("Path", "User")
-  if (($path -split ";") -notcontains $installDir) {
+  if (-not $developmentBuild -and ($path -split ";") -notcontains $installDir) {
     $newPath = if ([string]::IsNullOrWhiteSpace($path)) { $installDir } else { "$path;$installDir" }
     [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
     $env:Path = "$env:Path;$installDir"

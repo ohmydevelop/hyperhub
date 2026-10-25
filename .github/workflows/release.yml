@@ -9,10 +9,11 @@ on:
       version:
         description: "Release version without the leading v"
         required: true
-        default: "0.2.15"
+        default: "0.3.0-alpha.1"
 
 permissions:
   contents: write
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -123,6 +124,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify release channel and exact commit CI
+        id: release_meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/check-release-readiness.py
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -140,6 +150,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          make_latest: ${{ steps.release_meta.outputs.make_latest }}
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
