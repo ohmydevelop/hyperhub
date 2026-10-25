@@ -40,6 +40,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
 
+      - name: Check isolated CI permission setup
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s tests -p test_ci_linux_gum_environment.py
+
+      - name: Prepare unrestricted Gum environment in disposable test VM
+        if: runner.os == 'Linux'
+        run: bash scripts/ci-linux-gum-environment.sh prepare
+
       - name: Prepare Linux Frida devkits
         if: runner.os == 'Linux'
         shell: bash
@@ -94,6 +102,10 @@ jobs:
           path: target/benchmarks/windows-hooks/*
           if-no-files-found: warn
 
+      - name: Restore test VM permission policy
+        if: always() && runner.os == 'Linux'
+        run: bash scripts/ci-linux-gum-environment.sh restore
+
   linux-targets:
     name: Check Linux targets
     runs-on: ubuntu-latest
@@ -117,6 +129,9 @@ jobs:
 
       - name: Install Linux dependencies
         run: sudo apt-get update && sudo apt-get install -y clang gcc-aarch64-linux-gnu libclang-dev musl-tools busybox-static openssh-server openssl
+
+      - name: Prepare unrestricted Gum environment in disposable test VM
+        run: bash scripts/ci-linux-gum-environment.sh prepare
 
       - name: Check targets and fixtures
         run: ./scripts/test-platform.sh
@@ -147,6 +162,10 @@ jobs:
             target/benchmarks/linux-fixtures/*/manifest.json
           if-no-files-found: error
 
+      - name: Restore test VM permission policy
+        if: always()
+        run: bash scripts/ci-linux-gum-environment.sh restore
+
   attachment-linux-soak:
     name: Attachment soak (Linux ${{ matrix.backend }})
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/dev/') && contains(github.event.head_commit.message, '[attach soak]'))
@@ -163,6 +182,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - name: Prepare unrestricted Gum environment in disposable test VM
+        if: matrix.backend == 'gum'
+        run: bash scripts/ci-linux-gum-environment.sh prepare
       - name: Build embedded candidate
         run: bash scripts/build.sh
       - name: Exercise attachment lifecycle for two hours
@@ -188,6 +210,10 @@ jobs:
             target/benchmarks/attachment-run/${{ matrix.backend }}/result.json
             target/benchmarks/attachment-run/${{ matrix.backend }}/failure.json
           if-no-files-found: warn
+
+      - name: Restore test VM permission policy
+        if: always() && matrix.backend == 'gum'
+        run: bash scripts/ci-linux-gum-environment.sh restore
 
   attachment-windows-soak:
     name: Attachment soak (Windows gum)
