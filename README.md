@@ -30,6 +30,8 @@ Windows PowerShell：
 irm https://github.com/ohmydevelop/hyperhub/releases/latest/download/install.ps1 | iex
 ```
 
+动态附加功能在独立开发分支提供，通过明确的预发行标签安装。安装位置、审批操作和测试边界见 [动态附加开发版](docs/dynamic-attach.md)。
+
 ## 快速开始
 
 启动本地网关：
@@ -84,7 +86,7 @@ hyperhub approve
 
 ## 保护范围
 
-保护范围是通过 `hyperhub run` 托管的进程树。独立运行的服务或执行器需要单独纳入托管；仅启动网关不能覆盖全系统进程。可通过 `hyperhub status --json` 中的 `sessions[].processes` 核对实际执行器。
+保护范围是通过 `hyperhub run` 托管的进程树；支持动态附加的开发版也可通过审批接管正在运行的进程。独立运行的服务或执行器需要单独纳入托管；仅启动网关不能覆盖全系统进程。可通过 `hyperhub status --json` 中的 `sessions[].processes` 与 `attachments` 核对实际执行器及操作状态。
 
 文件策略按路径和操作授权，检查硬链接创建、符号链接解析和同时请求读写等场景。路径规则不能自动识别未观测过的既有硬链接别名，也不能替代操作系统级隔离。具体覆盖范围与限制见 [Hook 与平台覆盖](docs/hook-intent-matrix.md)。
 
@@ -94,3 +96,4 @@ hyperhub approve
 - [CLI / Agent 配置流程](docs/cli-llm-workflow.md)
 - [智能防护与 Jev Benchmark](docs/benchmarks/smart-protection.md)
 - [Hook 与平台覆盖](docs/hook-intent-matrix.md)
+- [动态附加开发版](docs/dynamic-attach.md)
