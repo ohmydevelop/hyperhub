@@ -132,6 +132,10 @@ require(skill, "何时升级到实现调试", "implementation-debug escalation g
 require(skill, "CLI 拒绝", "CLI refusal handling")
 require(skill, "JSON patch does not change the configuration", "older CLI compatibility guidance")
 require(skill, "更新已有 Secret", "existing Secret rotation workflow")
+require(skill, "references/attachments.md", "attachment approval routing")
+attachment = (source / "references" / "attachments.md").read_text(encoding="utf-8")
+for required in ("hyperhub attach", "hyperhub detach", "hyperhub approve <request-id>", "detached_resident", "FAKE-IP", "Agent 不得运行 approve", "API Key 不足以代替人工授权"):
+    require(attachment, required, "attachment operation contract")
 require(skill, "显式的 Secret 更新也应生成审批", "Secret intent independent of redacted diff")
 require(skill, "不删除并重建凭证", "credential recreation prohibition")
 require(skill, "ssh_transcript: false", "SSH transcript-off semantics")

@@ -3,10 +3,12 @@
 Builds HyperHub on a remote Linux host, installs it, and runs integrity smoke checks.
 
 .DESCRIPTION
-Archives a committed Git revision, transfers it and verified Linux Frida devkits with
+Archives a committed Git revision and transfers it with
 `hyperhub.exe run scp`, invokes the remote build through `hyperhub.exe run ssh`, installs
 the single-file CLI, and verifies that the embedded Agent is intact. The remote host must
-already provide the Linux build toolchain documented in README.md.
+already provide the Linux build prerequisites documented in third_party/frida/README.md.
+The default x86_64 remote build obtains the pinned patched Frida source recipe there.
+A native ARM64 remote host requires an explicit source-built Core/Gum SDK pair.
 
 .PARAMETER RemoteHost
 SSH destination such as user@linux-host.
@@ -49,12 +51,15 @@ param(
   [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
   [string]$RustToolchain,
 
+  [string]$LinuxFridaGumRoot,
+
+  [string]$LinuxFridaCoreRoot,
+
   [switch]$KeepRemote
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$fridaVersion = '17.17.0'
 
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
   & $Program @Arguments
@@ -79,27 +84,6 @@ function Resolve-ExistingFile([string]$Path, [string]$Description) {
   return $resolved
 }
 
-function Resolve-FridaArchive(
-  [string]$Kind,
-  [string]$Platform,
-  [string]$ExpectedSha256
-) {
-  $cache = Join-Path $repoRoot '.cache\frida'
-  New-Item -ItemType Directory -Force -Path $cache | Out-Null
-  $name = "frida-$Kind-devkit-$fridaVersion-$Platform.tar.xz"
-  $archive = Join-Path $cache $name
-  if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
-    $url = "https://github.com/frida/frida/releases/download/$fridaVersion/$name"
-    Write-Host "Downloading $name..."
-    Invoke-WebRequest -Uri $url -OutFile $archive
-  }
-  $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-  if ($actual -ne $ExpectedSha256) {
-    throw "$name SHA-256 mismatch: expected $ExpectedSha256, got $actual"
-  }
-  return $archive
-}
-
 function Assert-LocalTempPath([string]$Path) {
   $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
   $resolved = [IO.Path]::GetFullPath($Path)
@@ -110,6 +94,9 @@ function Assert-LocalTempPath([string]$Path) {
 
 if (-not $IsWindows) {
   throw 'This orchestrator must run on Windows because it launches hyperhub.exe.'
+}
+if ([bool]$LinuxFridaGumRoot -ne [bool]$LinuxFridaCoreRoot) {
+  throw 'Custom Linux Frida SDKs require both -LinuxFridaGumRoot and -LinuxFridaCoreRoot.'
 }
 if ($InstallPath -eq '/' -or $InstallPath.EndsWith('/')) {
   throw "InstallPath must name a file: $InstallPath"
@@ -178,21 +165,30 @@ try {
       'uname',
       '-m'
     ))
-  switch ($remoteArch) {
-    'x86_64' {
-      $platform = 'linux-x86_64'
-      $gumSha256 = '0987DD51E9901A6DDDD9D55BC9EF02CD90D95012A4947E29DAB942EC7F5348B7'
-      $coreSha256 = '483E1A25945CEBAA69E61C09D7804692C42D234CAB0C58261A73382163027A2E'
-    }
-    { $_ -in @('aarch64', 'arm64') } {
-      $platform = 'linux-arm64'
-      $gumSha256 = 'A035CB1F9F58F03822FA87D6DD578BBADB7C3452BC1B8C08EE31C1F14E29025F'
-      $coreSha256 = '93ACE484ED610961BA153B176C6363A5AC598A1DB3B245EF785175A8229568B0'
-    }
-    default { throw "unsupported remote Linux architecture: $remoteArch" }
+  if ($remoteArch -notin @('x86_64', 'aarch64', 'arm64')) {
+    throw "unsupported remote Linux architecture: $remoteArch"
   }
-  $gumArchive = Resolve-FridaArchive 'gum' $platform $gumSha256
-  $coreArchive = Resolve-FridaArchive 'core' $platform $coreSha256
+  if ($remoteArch -ne 'x86_64' -and -not $LinuxFridaGumRoot) {
+    throw 'Native ARM64 source builds require -LinuxFridaGumRoot and -LinuxFridaCoreRoot from the pinned x86_64 source recipe.'
+  }
+  $transfers = @(@($archive, $remoteArchive), @($helper, $remoteHelper))
+  if ($LinuxFridaGumRoot) {
+    if (-not (Get-Command 'tar' -ErrorAction SilentlyContinue)) {
+      throw 'tar is required to transfer the explicit Linux SDK pair.'
+    }
+    foreach ($sdk in @(
+        @('gum', $LinuxFridaGumRoot, $remoteGumArchive),
+        @('core', $LinuxFridaCoreRoot, $remoteCoreArchive)
+      )) {
+      $sdkRoot = [IO.Path]::GetFullPath($sdk[1])
+      foreach ($filename in @("frida-$($sdk[0]).h", "libfrida-$($sdk[0]).a", 'hyperhub-frida-sdk.json')) {
+        $null = Resolve-ExistingFile (Join-Path $sdkRoot $filename) 'source-built Linux SDK input'
+      }
+      $sdkArchive = Join-Path $localTemp ("frida-" + $sdk[0] + '.tar.xz')
+      Invoke-Checked 'tar' @('-cJf', $sdkArchive, '-C', $sdkRoot, '.')
+      $transfers += ,@($sdkArchive, $sdk[2])
+    }
+  }
 
   Invoke-Checked $HyperHub ($hyperhubRun + @('ssh') + $sshOptions + @(
       $RemoteHost,
@@ -202,13 +198,8 @@ try {
       $remoteRoot
     ))
   $remoteRootCreated = $true
-  Write-Host "Uploading source and verified $platform Frida devkits to $RemoteHost..."
-  foreach ($transfer in @(
-      @($archive, $remoteArchive),
-      @($helper, $remoteHelper),
-      @($gumArchive, $remoteGumArchive),
-      @($coreArchive, $remoteCoreArchive)
-    )) {
+  Write-Host "Uploading source and any explicit source-built SDK inputs to $RemoteHost..."
+  foreach ($transfer in $transfers) {
     Invoke-Checked $HyperHub ($hyperhubRun + @('scp') + $scpOptions + @(
         $transfer[0],
         "${RemoteHost}:$($transfer[1])"

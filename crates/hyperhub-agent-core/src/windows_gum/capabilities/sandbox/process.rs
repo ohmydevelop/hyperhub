@@ -15,12 +15,14 @@ struct ProcessSandboxPlugin {
 impl ProcessSandboxPlugin {
     fn new() -> Self {
         let (tx, rx) = sync_channel(256);
+        let worker = crate::attachment::background_enter();
         let audit = if cfg!(test) {
             None
         } else {
             std::thread::Builder::new()
                 .name("hyperhub-process-sandbox-audit".into())
                 .spawn(move || {
+                    let _worker = worker;
                     while let Ok(e) = rx.recv() {
                         let _ = crate::report_sandbox_audit(&e);
                     }
@@ -35,6 +37,13 @@ impl ProcessSandboxPlugin {
         exe: Option<&str>,
         cmd: Option<&str>,
     ) -> (crate::SandboxAction, Option<String>, String) {
+        if !crate::attachment::enforcing() {
+            return (
+                crate::SandboxAction::Pass,
+                None,
+                "attachment_detached".into(),
+            );
+        }
         let Some(s) = crate::process_sandbox_snapshot() else {
             return (crate::SandboxAction::Pass, None, "disabled".into());
         };

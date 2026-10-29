@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod file_reader_tests;
 mod network;
 mod sanitizer;
 #[cfg(test)]
@@ -91,6 +93,43 @@ pub(crate) struct CompiledProcessSandboxSnapshot {
 pub(crate) struct CompiledFileSandboxSnapshot {
     pub(crate) error_action: SandboxAction,
     wire: serde_json::Value,
+}
+
+/// One operation owns its policy and audit version. Publication locks are not
+/// held during path resolution, Core requests, or the original native I/O.
+#[derive(Clone)]
+pub(crate) struct FilePolicyReader {
+    pub(crate) snapshot: Option<Arc<CompiledFileSandboxSnapshot>>,
+    pub(crate) version: u64,
+    unavailable: bool,
+}
+impl FilePolicyReader {
+    pub(crate) fn from_snapshot(
+        snapshot: Option<Arc<CompiledFileSandboxSnapshot>>,
+        version: u64,
+    ) -> Self {
+        Self {
+            snapshot,
+            version,
+            unavailable: false,
+        }
+    }
+    pub(crate) fn error_action(&self) -> SandboxAction {
+        if self.unavailable {
+            SandboxAction::Deny
+        } else {
+            self.snapshot
+                .as_deref()
+                .map_or(SandboxAction::Pass, |snapshot| snapshot.error_action)
+        }
+    }
+    pub(crate) fn evaluate(
+        &self,
+        call: impl FnOnce() -> (SandboxAction, Option<String>, String),
+    ) -> (SandboxAction, Option<String>, String) {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+            .unwrap_or_else(|_| (self.error_action(), None, "error".into()))
+    }
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
@@ -216,21 +255,57 @@ pub(crate) fn file_decision_with_protection(
     path: &str,
     operation: FileSandboxOperation,
 ) -> (SandboxAction, Option<String>, String) {
-    let requested = file_requested_decision(path, operation);
+    let reader = file_policy_reader();
+    file_decision_with_reader(&reader, path, operation)
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn file_decision_with_reader(
+    reader: &FilePolicyReader,
+    path: &str,
+    operation: FileSandboxOperation,
+) -> (SandboxAction, Option<String>, String) {
+    file_paths_decision(
+        reader,
+        path,
+        operation,
+        file_requested_decision_with_reader,
+        |path, operation| {
+            if matches!(
+                operation,
+                FileSandboxOperation::Read | FileSandboxOperation::Write
+            ) {
+                resolved_content_path(path)
+            } else {
+                resolved_namespace_path(path)
+            }
+        },
+    )
+}
+
+#[cfg(any(test, all(any(windows, unix), feature = "gum-agent")))]
+fn file_paths_decision(
+    reader: &FilePolicyReader,
+    path: &str,
+    operation: FileSandboxOperation,
+    mut decide: impl FnMut(
+        &FilePolicyReader,
+        &str,
+        FileSandboxOperation,
+    ) -> (SandboxAction, Option<String>, String),
+    resolve: impl FnOnce(&str, FileSandboxOperation) -> Option<String>,
+) -> (SandboxAction, Option<String>, String) {
+    if reader.unavailable {
+        return (SandboxAction::Deny, None, "error".into());
+    }
+    let requested = decide(reader, path, operation);
     if requested.0 == SandboxAction::Deny {
         return requested;
     }
-    let resolved = if matches!(
-        operation,
-        FileSandboxOperation::Read | FileSandboxOperation::Write
-    ) {
-        resolved_content_path(path)
-    } else {
-        resolved_namespace_path(path)
-    };
+    let resolved = resolve(path, operation);
     if let Some(resolved) = resolved {
         if resolved != path {
-            let decision = file_requested_decision(&resolved, operation);
+            let decision = decide(reader, &resolved, operation);
             if decision.0 == SandboxAction::Deny {
                 return decision;
             }
@@ -271,17 +346,26 @@ fn resolved_namespace_path(path: &str) -> Option<String> {
 
 #[cfg(all(target_os = "linux", feature = "gum-agent"))]
 pub(crate) fn file_link_source_allows(path: &str, follow: bool) -> bool {
+    file_link_source_allows_reader(&file_policy_reader(), path, follow)
+}
+
+#[cfg(all(target_os = "linux", feature = "gum-agent"))]
+pub(crate) fn file_link_source_allows_reader(
+    reader: &FilePolicyReader,
+    path: &str,
+    follow: bool,
+) -> bool {
     let read = if follow {
-        file_decision_with_protection(path, FileSandboxOperation::Read)
+        file_decision_with_reader(reader, path, FileSandboxOperation::Read)
     } else {
-        file_requested_decision(path, FileSandboxOperation::Read)
+        file_requested_decision_with_reader(reader, path, FileSandboxOperation::Read)
     };
     if read.0 == SandboxAction::Deny {
         return false;
     }
     if !follow {
         if let Some(resolved) = resolved_namespace_path(path) {
-            if file_requested_decision(&resolved, FileSandboxOperation::Read).0
+            if file_requested_decision_with_reader(reader, &resolved, FileSandboxOperation::Read).0
                 == SandboxAction::Deny
             {
                 return false;
@@ -289,31 +373,35 @@ pub(crate) fn file_link_source_allows(path: &str, follow: bool) -> bool {
         }
     }
     let write = if follow {
-        file_decision_with_protection(path, FileSandboxOperation::Write)
+        file_decision_with_reader(reader, path, FileSandboxOperation::Write)
     } else {
-        file_requested_decision(path, FileSandboxOperation::Write)
+        file_requested_decision_with_reader(reader, path, FileSandboxOperation::Write)
     };
     if write.0 == SandboxAction::Deny {
         return false;
     }
     if !follow {
         if let Some(resolved) = resolved_namespace_path(path) {
-            if file_requested_decision(&resolved, FileSandboxOperation::Write).0
+            if file_requested_decision_with_reader(reader, &resolved, FileSandboxOperation::Write).0
                 == SandboxAction::Deny
             {
                 return false;
             }
         }
     }
-    file_decision_with_protection(path, FileSandboxOperation::Rename).0 != SandboxAction::Deny
+    file_decision_with_reader(reader, path, FileSandboxOperation::Rename).0 != SandboxAction::Deny
 }
 
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
-fn file_requested_decision(
+fn file_requested_decision_with_reader(
+    reader: &FilePolicyReader,
     path: &str,
     operation: FileSandboxOperation,
 ) -> (SandboxAction, Option<String>, String) {
-    let Some(snapshot) = file_sandbox_snapshot() else {
+    if reader.unavailable {
+        return (SandboxAction::Deny, None, "error".into());
+    }
+    let Some(snapshot) = reader.snapshot.as_deref() else {
         return (SandboxAction::Pass, None, "disabled".into());
     };
     let (action, rule_id, source) = file_sandbox_decision(&snapshot, path, operation);
@@ -333,6 +421,7 @@ fn file_requested_decision(
     let mut context_value =
         serde_json::to_value(&context).unwrap_or_else(|_| serde_json::json!({}));
     context_value["local_deny"] = serde_json::json!(sanitized.local_deny);
+    context_value["expected_sandbox_version"] = serde_json::json!(reader.version);
     match query_protection_gateway(
         &protection_id,
         Some(&matched_rule_id),
@@ -615,11 +704,41 @@ pub(crate) fn apply_sandbox_snapshot(snapshot: SandboxSnapshot) {
 }
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
 pub(crate) fn process_sandbox_snapshot() -> Option<Arc<CompiledProcessSandboxSnapshot>> {
+    if !crate::attachment::enforcing() {
+        return None;
+    }
     crate::state().lock().ok()?.sandbox.process.load_full()
 }
 #[cfg(all(any(windows, unix), feature = "gum-agent"))]
 pub(crate) fn file_sandbox_snapshot() -> Option<Arc<CompiledFileSandboxSnapshot>> {
-    crate::state().lock().ok()?.sandbox.file.load_full()
+    file_policy_reader().snapshot
+}
+
+#[cfg(all(any(windows, unix), feature = "gum-agent"))]
+pub(crate) fn file_policy_reader() -> FilePolicyReader {
+    if !crate::attachment::enforcing() {
+        return FilePolicyReader {
+            snapshot: None,
+            version: 0,
+            unavailable: false,
+        };
+    }
+    crate::state()
+        .lock()
+        .map(|core| {
+            let snapshot = core.sandbox.file.try_load_full();
+            let unavailable = snapshot.is_err();
+            FilePolicyReader {
+                snapshot: snapshot.ok().flatten(),
+                version: core.sandbox.version.load(Ordering::Acquire),
+                unavailable,
+            }
+        })
+        .unwrap_or(FilePolicyReader {
+            snapshot: None,
+            version: 0,
+            unavailable: true,
+        })
 }
 
 #[cfg_attr(not(all(any(windows, unix), feature = "gum-agent")), allow(dead_code))]

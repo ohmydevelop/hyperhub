@@ -36,8 +36,13 @@ pub struct SessionRecord {
     member_instances: HashMap<u32, u64>,
     process_policies: HashMap<u32, ProcessHookMetadata>,
     agent_heartbeats: HashMap<u32, AgentHeartbeat>,
+    // RAM evidence is monotonic. Cold restore marks every member as observed.
+    native_observed: std::collections::HashSet<(u32, u64)>,
+    cleanup_fence: Option<[u8; 32]>,
     fork_leases: HashMap<String, ForkLease>,
     fake_by_name: HashMap<(String, u8), IpAddr>,
+    fake_by_native: HashMap<(String, u8, [u8; 32]), IpAddr>,
+    native_by_fake: HashMap<IpAddr, hyperhub_runtime::attachment::NativeFallback>,
     name_by_fake: HashMap<IpAddr, String>,
     next_fake_id: u32,
     cancellation: CancellationToken,
@@ -149,6 +154,8 @@ pub struct DurableEngineManager {
     pub start_time: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ptrace_root: Option<DurablePtraceRoot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_scope: Option<crate::attachments::Scope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +177,8 @@ pub struct DurableFakeAddress {
     pub hostname: String,
     pub family: u8,
     pub address: IpAddr,
+    #[serde(default)]
+    pub native_fallback: Option<hyperhub_runtime::attachment::NativeFallback>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -571,7 +580,8 @@ impl SessionRegistry {
         cleanup(&mut state, now);
         if state.sessions.contains_key(&session_id)
             || !state.sessions.values().any(|record| {
-                record.lifecycle == SessionLifecycle::RootProcess
+                record.cleanup_fence.is_none()
+                    && record.lifecycle == SessionLifecycle::RootProcess
                     && record.members.contains_key(&authorizing_pid)
             })
         {
@@ -597,7 +607,8 @@ impl SessionRegistry {
         cleanup(&mut state, Instant::now());
         let instance = next_member_instance(&mut state);
         let record = state.sessions.values_mut().find(|record| {
-            record.lifecycle == SessionLifecycle::RootProcess
+            record.cleanup_fence.is_none()
+                && record.lifecycle == SessionLifecycle::RootProcess
                 && record.members.contains_key(&authorizing_pid)
                 && record
                     .member_births
@@ -639,6 +650,51 @@ impl SessionRegistry {
         )
     }
 
+    /// Private bridge used only after Core validated a fresh administrator
+    /// Attach grant, exact native members and actual Host alias snapshots.
+    pub(crate) fn prepare_approved_attachment(
+        &self,
+        session_id: &str,
+        token: &str,
+        executable: &str,
+        aliases: &[hyperhub_runtime::attachment::IssuedAliasSnapshot],
+    ) -> Result<(), String> {
+        if session_id.is_empty() || token.len() < 32 || executable.is_empty() {
+            return Err("approved session transport is incomplete".into());
+        }
+        let mut state = self.0.lock().map_err(|_| "session registry unavailable")?;
+        cleanup(&mut state, Instant::now());
+        if state.sessions.contains_key(session_id) {
+            return Err("approved session already exists; no transport was replaced".into());
+        }
+        let mut record = pending_session(
+            session_id.into(),
+            executable.into(),
+            Instant::now(),
+            Duration::from_secs(60),
+        );
+        record.token = token.into();
+        install_approved_aliases(&mut record, aliases)?;
+        state.sessions.insert(session_id.into(), record);
+        Ok(())
+    }
+    pub(crate) fn merge_approved_aliases(
+        &self,
+        session_id: &str,
+        token: &str,
+        aliases: &[hyperhub_runtime::attachment::IssuedAliasSnapshot],
+    ) -> Result<(), String> {
+        let mut state = self.0.lock().map_err(|_| "session registry unavailable")?;
+        let record = state
+            .sessions
+            .get_mut(session_id)
+            .ok_or("approved session is absent")?;
+        if !constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
+            return Err("approved session transport mismatch".into());
+        }
+        install_approved_aliases(record, aliases)
+    }
+
     pub fn activate_with_policy(
         &self,
         session_id: &str,
@@ -657,7 +713,8 @@ impl SessionRegistry {
         let Some(record) = state.sessions.get_mut(session_id) else {
             return false;
         };
-        if record.lifecycle != SessionLifecycle::Pending
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::Pending
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
         {
             return false;
@@ -712,7 +769,8 @@ impl SessionRegistry {
         let Some(record) = state.sessions.get_mut(session_id) else {
             return false;
         };
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !record.members.contains_key(&parent_pid)
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
         {
@@ -749,7 +807,8 @@ impl SessionRegistry {
         let now = Instant::now();
         cleanup(&mut state, now);
         let record = state.sessions.get_mut(session_id)?;
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !record.members.contains_key(&parent_pid)
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
             || record.fork_leases.len() >= MAX_FORK_LEASES
@@ -787,7 +846,8 @@ impl SessionRegistry {
         let Some(record) = state.sessions.get_mut(session_id) else {
             return false;
         };
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
             || child_pid == 0
             || executable.is_empty()
@@ -837,7 +897,8 @@ impl SessionRegistry {
         let Some(record) = state.sessions.get_mut(session_id) else {
             return false;
         };
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
             || !record.members.contains_key(&child_pid)
         {
@@ -1031,12 +1092,89 @@ impl SessionRegistry {
                     pid,
                     start_time: start,
                     ptrace_root: None,
+                    attachment_scope: None,
                 },
             );
         }
         true
     }
 
+    pub(crate) fn set_attachment_manager_scope(
+        &self,
+        session_id: &str,
+        token: &str,
+        pid: u32,
+        start: u64,
+        scope: crate::attachments::Scope,
+    ) -> bool {
+        if !self.authenticate_control(session_id, token) {
+            return false;
+        }
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        let Some(manager) = state
+            .engine_managers
+            .get_mut(session_id)
+            .and_then(|m| m.get_mut(&pid))
+        else {
+            return false;
+        };
+        if manager.start_time != start || process_start_time(pid) != Some(start) {
+            return false;
+        }
+        manager.attachment_scope = Some(scope);
+        true
+    }
+    pub(crate) fn attachment_manager_scope(
+        &self,
+        session_id: &str,
+        token: &str,
+        pid: u32,
+        start: u64,
+    ) -> Option<crate::attachments::Scope> {
+        if !self.authenticate_control(session_id, token) {
+            return None;
+        }
+        let state = self.0.lock().ok()?;
+        let manager = state.engine_managers.get(session_id)?.get(&pid)?;
+        (manager.start_time == start && process_start_time(pid) == Some(start))
+            .then_some(manager.attachment_scope)
+            .flatten()
+    }
+
+    /// Core-only orphan cleanup scope. It uses live registry incarnations,
+    /// not an actor or member list supplied in a public record file.
+    pub(crate) fn orphan_manager_has_live_members(
+        &self,
+        session_id: &str,
+        root_pid: u32,
+        manager: u32,
+        birth: u64,
+    ) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        cleanup(&mut state, Instant::now());
+        let Some(record) = state.sessions.get(session_id) else {
+            return false;
+        };
+        record.lifecycle == SessionLifecycle::RootProcess
+            && record.root_pid == root_pid
+            && state
+                .engine_managers
+                .get(session_id)
+                .and_then(|managers| managers.get(&manager))
+                .is_some_and(|actor| {
+                    actor.start_time == birth && process_start_time(manager) == Some(birth)
+                })
+            && record.member_births.iter().any(|(pid, birth)| {
+                *pid != root_pid
+                    && *birth != 0
+                    && record.members.contains_key(pid)
+                    && process_start_time(*pid) == Some(*birth)
+            })
+    }
     pub(crate) fn release_engine_manager(&self, session_id: &str, pid: u32, start: u64) {
         if let Ok(mut state) = self.0.lock() {
             if let Some(managers) = state.engine_managers.get_mut(session_id) {
@@ -1214,7 +1352,8 @@ impl SessionRegistry {
         let Some(record) = state.sessions.get_mut(session_id) else {
             return false;
         };
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
         {
             return false;
@@ -1253,7 +1392,8 @@ impl SessionRegistry {
         let Some(record) = state.sessions.get_mut(session_id) else {
             return false;
         };
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !record.members.contains_key(&pid)
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
         {
@@ -1288,7 +1428,8 @@ impl SessionRegistry {
         if !constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
             return false;
         }
-        record.lifecycle == SessionLifecycle::RootProcess
+        record.cleanup_fence.is_none()
+            && record.lifecycle == SessionLifecycle::RootProcess
             && peer_pid.is_some_and(|pid| record.members.contains_key(&pid))
             && !executable.is_empty()
     }
@@ -1320,7 +1461,8 @@ impl SessionRegistry {
         let mut state = self.0.lock().ok()?;
         cleanup(&mut state, Instant::now());
         let record = state.sessions.get(session_id)?;
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !record.members.contains_key(&pid)
             || !constant_time_eq(record.token.as_bytes(), password.as_bytes())
         {
@@ -1352,7 +1494,8 @@ impl SessionRegistry {
         let mut state = self.0.lock().ok()?;
         cleanup(&mut state, Instant::now());
         let record = state.sessions.get_mut(session_id)?;
-        if record.lifecycle != SessionLifecycle::RootProcess
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
             || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
         {
             return None;
@@ -1360,35 +1503,104 @@ impl SessionRegistry {
         if let Some(address) = record.fake_by_name.get(&(hostname.clone(), family)) {
             return Some(*address);
         }
-        let id = record.next_fake_id;
-        record.next_fake_id = record.next_fake_id.checked_add(1)?;
-        let address = if family == 4 {
-            if id >= (1 << 17) {
-                return None;
-            }
-            IpAddr::V4(Ipv4Addr::new(
-                198,
-                18 + ((id >> 16) as u8),
-                ((id >> 8) & 0xff) as u8,
-                (id & 0xff) as u8,
-            ))
-        } else {
-            IpAddr::V6(Ipv6Addr::new(
-                0xfdfe,
-                0x6879,
-                0x7065,
-                0x7268,
-                0x7562,
-                0,
-                (id >> 16) as u16,
-                id as u16,
-            ))
-        };
+        let address = allocate_fake_slot(record, family)?;
         record
             .fake_by_name
             .insert((hostname.clone(), family), address);
         record.name_by_fake.insert(address, hostname);
         Some(address)
+    }
+
+    pub(crate) fn resolve_fake_native(
+        &self,
+        session_id: &str,
+        token: &str,
+        hostname: &str,
+        native: &hyperhub_runtime::attachment::NativeFallback,
+    ) -> Option<IpAddr> {
+        native.validate_synthesis().ok()?;
+        let fingerprint = hyperhub_runtime::attachment::native_fallback_fingerprint(native).ok()?;
+        let family = u8::try_from(native.family).ok()?;
+        let name = hostname.trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() || name.len() > 253 {
+            return None;
+        }
+        let mut state = self.0.lock().ok()?;
+        cleanup(&mut state, Instant::now());
+        let record = state.sessions.get_mut(session_id)?;
+        if record.cleanup_fence.is_some()
+            || record.lifecycle != SessionLifecycle::RootProcess
+            || !constant_time_eq(record.token.as_bytes(), token.as_bytes())
+        {
+            return None;
+        }
+        if let Some(address) = record
+            .fake_by_native
+            .get(&(name.clone(), family, fingerprint))
+        {
+            return Some(*address);
+        }
+        let address = allocate_fake_slot(record, family)?;
+        record
+            .fake_by_native
+            .insert((name.clone(), family, fingerprint), address);
+        record.native_by_fake.insert(address, native.clone());
+        record
+            .fake_by_name
+            .entry((name.clone(), family))
+            .or_insert(address);
+        record.name_by_fake.insert(address, name);
+        Some(address)
+    }
+    pub(crate) fn merge_approved_issued_records(
+        &self,
+        session_id: &str,
+        token: &str,
+        records: &[hyperhub_runtime::attachment::IssuedRecord],
+    ) -> Result<(), String> {
+        let aliases = records
+            .iter()
+            .map(|record| hyperhub_runtime::attachment::IssuedAliasSnapshot {
+                address: record.address,
+                hostname: record.hostname.clone(),
+                ambiguous: record.ambiguous,
+            })
+            .collect::<Vec<_>>();
+        let mut state = self.0.lock().map_err(|_| "session registry unavailable")?;
+        let session = state
+            .sessions
+            .get_mut(session_id)
+            .ok_or("session alias history has no session")?;
+        if !constant_time_eq(session.token.as_bytes(), token.as_bytes()) {
+            return Err("session alias history transport mismatch".into());
+        }
+        // Validate all provenance before changing the live maps.
+        let mut native = session.native_by_fake.clone();
+        let mut by_native = session.fake_by_native.clone();
+        for record in records {
+            let fingerprint =
+                hyperhub_runtime::attachment::native_fallback_fingerprint(&record.native_fallback)
+                    .map_err(|e| e.to_string())?;
+            if native
+                .get(&record.address)
+                .is_some_and(|old| old != &record.native_fallback)
+            {
+                return Err("issued address has conflicting native fallback".into());
+            }
+            native.insert(record.address, record.native_fallback.clone());
+            by_native.insert(
+                (
+                    record.hostname.trim_end_matches('.').to_ascii_lowercase(),
+                    record.native_fallback.family as u8,
+                    fingerprint,
+                ),
+                record.address,
+            );
+        }
+        install_approved_aliases(session, &aliases)?;
+        session.native_by_fake = native;
+        session.fake_by_native = by_native;
+        Ok(())
     }
 
     pub fn restore_fake(&self, session_id: &str, address: IpAddr) -> Option<String> {
@@ -1436,6 +1648,149 @@ impl SessionRegistry {
         })
     }
 
+    pub(crate) fn cleanup_fenced(&self, session: &str, token: &str) -> bool {
+        self.0
+            .lock()
+            .map(|state| {
+                state.sessions.get(session).is_some_and(|record| {
+                    constant_time_eq(record.token.as_bytes(), token.as_bytes())
+                        && record.cleanup_fence.is_some()
+                })
+            })
+            .unwrap_or(true)
+    }
+    /// Called only after Core verifies the current consumed Detach and manager
+    /// possession. A fence closes future work; it is not completion or evidence
+    /// that already issued native capabilities have quiesced.
+    pub(crate) fn fence_attachment_cleanup(
+        &self,
+        session: &str,
+        token: &str,
+        nonce: [u8; 32],
+    ) -> Result<(), String> {
+        let mut state = self.0.lock().map_err(|_| "session registry unavailable")?;
+        let record = state
+            .sessions
+            .get_mut(session)
+            .ok_or("cleanup fence requires the original live session")?;
+        if nonce == [0; 32] || !constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
+            return Err("cleanup fence does not authenticate the original session".into());
+        }
+        record.cleanup_fence = Some(nonce);
+        Ok(())
+    }
+
+    /// A live manager cannot omit a process already admitted by this Core.
+    /// Check after the monotonic cleanup fence, so no later registration can
+    /// turn an exact roster into an incomplete one before cleanup starts.
+    pub(crate) fn validate_live_cleanup_roster(
+        &self,
+        session: &str,
+        token: &str,
+        members: &[crate::attachments::ProcessIdentity],
+        unstarted: &[crate::attachments::HostBootstrapBinding],
+    ) -> Result<(), String> {
+        let state = self.0.lock().map_err(|_| "session registry unavailable")?;
+        let record = state
+            .sessions
+            .get(session)
+            .ok_or("cleanup session is absent")?;
+        if !constant_time_eq(record.token.as_bytes(), token.as_bytes())
+            || record.cleanup_fence.is_none()
+        {
+            return Err("live cleanup roster requires the authenticated Core fence".into());
+        }
+        for (&pid, &birth) in &record.member_births {
+            if !crate::attachments::process_incarnation_exited(pid, birth)
+                && !members
+                    .iter()
+                    .any(|member| member.pid == pid && member.birth == birth)
+                && !unstarted
+                    .iter()
+                    .any(|binding| binding.identity.pid == pid && binding.identity.birth == birth)
+            {
+                return Err("startup cleanup roster omits a live Core member".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Conservative lifetime evidence: observing native enrollment can never
+    /// be undone by reattach, heartbeat expiry, member removal or cold restore.
+    pub(crate) fn note_native_observed(&self, session: &str, token: &str, pid: u32) {
+        if let Ok(mut state) = self.0.lock() {
+            if let Some(record) = state.sessions.get_mut(session) {
+                if constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
+                    if let Some(birth) = record.member_births.get(&pid) {
+                        record.native_observed.insert((pid, *birth));
+                    }
+                }
+            }
+        }
+    }
+    pub(crate) fn startup_aliases_empty(&self, session: &str, token: &str) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state.sessions.get(session).map(|record| {
+                    constant_time_eq(record.token.as_bytes(), token.as_bytes())
+                        && record.name_by_fake.is_empty()
+                        && record.fake_by_name.is_empty()
+                        && record.fake_by_native.is_empty()
+                        && record.native_by_fake.is_empty()
+                })
+            })
+            .unwrap_or(false)
+    }
+    pub(crate) fn validate_unstarted_members(
+        &self,
+        session: &str,
+        token: &str,
+        bindings: &[crate::attachments::HostBootstrapBinding],
+        empty_hosts: bool,
+    ) -> Result<(), String> {
+        let state = self.0.lock().map_err(|_| "session registry unavailable")?;
+        let record = state
+            .sessions
+            .get(session)
+            .ok_or("unstarted cleanup session is absent")?;
+        if !constant_time_eq(record.token.as_bytes(), token.as_bytes()) {
+            return Err("unstarted cleanup session token mismatch".into());
+        }
+        if empty_hosts
+            && (!record.native_observed.is_empty()
+                || !record.name_by_fake.is_empty()
+                || !record.fake_by_name.is_empty()
+                || !record.fake_by_native.is_empty()
+                || !record.native_by_fake.is_empty()
+                || !record.fork_leases.is_empty()
+                || record.process_policies.values().any(|policy| {
+                    policy.hook_status != "preparing"
+                        || policy.decision_source != "attachment_approval"
+                }))
+        {
+            return Err("empty startup cleanup has prior native activity or aliases".into());
+        }
+        for binding in bindings {
+            let id = &binding.identity;
+            if record.member_births.get(&id.pid) != Some(&id.birth)
+                || record.members.get(&id.pid) != Some(&id.executable)
+                || record.native_observed.contains(&(id.pid, id.birth))
+                || record.agent_heartbeats.contains_key(&id.pid)
+                || !record.process_policies.get(&id.pid).is_some_and(|policy| {
+                    policy.hook_status == "preparing"
+                        && policy.decision_source == "attachment_approval"
+                })
+            {
+                return Err(
+                    "unstarted cleanup member lacks monotonic pre-dispatch evidence".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn note_agent(
         &self,
         session_id: &str,
@@ -1456,6 +1811,9 @@ impl SessionRegistry {
         {
             return false;
         }
+        record
+            .native_observed
+            .insert((pid, record.member_births.get(&pid).copied().unwrap_or(0)));
         record.agent_heartbeats.insert(
             pid,
             AgentHeartbeat {
@@ -1484,54 +1842,7 @@ impl SessionRegistry {
                 sessions: Vec::new(),
             };
         };
-        let sessions = state
-            .sessions
-            .values()
-            .filter(|record| record.lifecycle == SessionLifecycle::RootProcess)
-            .map(|record| DurableSessionRecord {
-                session_id: record.session_id.clone(),
-                token: record.token.clone(),
-                root_pid: record.root_pid,
-                root_start_time: record
-                    .member_births
-                    .get(&record.root_pid)
-                    .copied()
-                    .unwrap_or(0),
-                executable: record.executable.clone(),
-                members: record
-                    .members
-                    .iter()
-                    .map(|(pid, executable)| DurableSessionMember {
-                        pid: *pid,
-                        executable: executable.clone(),
-                        start_time: record.member_births.get(pid).copied().unwrap_or(0),
-                    })
-                    .collect(),
-                engine_managers: state
-                    .engine_managers
-                    .get(&record.session_id)
-                    .into_iter()
-                    .flat_map(|managers| managers.iter())
-                    .map(|(_, manager)| manager.clone())
-                    .collect(),
-                fake_by_name: record
-                    .fake_by_name
-                    .iter()
-                    .map(|((hostname, family), address)| DurableFakeAddress {
-                        hostname: hostname.clone(),
-                        family: *family,
-                        address: *address,
-                    })
-                    .collect(),
-                next_fake_id: record.next_fake_id,
-            })
-            .collect();
-        DurableSessionState {
-            schema_version: 1,
-            saved_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(ttl_ms),
-            sessions,
-        }
+        successor::durable_snapshot_locked(&state, now_ms, ttl_ms)
     }
 
     pub fn restore_durable_state(
@@ -1584,8 +1895,23 @@ impl SessionRegistry {
             }
             let mut fake_by_name = HashMap::new();
             let mut name_by_fake = HashMap::new();
+            let mut fake_by_native = HashMap::new();
+            let mut native_by_fake = HashMap::new();
             for fake in durable.fake_by_name {
-                fake_by_name.insert((fake.hostname.clone(), fake.family), fake.address);
+                if let Some(native) = fake.native_fallback {
+                    if let Ok(fingerprint) =
+                        hyperhub_runtime::attachment::native_fallback_fingerprint(&native)
+                    {
+                        fake_by_native.insert(
+                            (fake.hostname.clone(), fake.family, fingerprint),
+                            fake.address,
+                        );
+                        native_by_fake.insert(fake.address, native);
+                    }
+                }
+                fake_by_name
+                    .entry((fake.hostname.clone(), fake.family))
+                    .or_insert(fake.address);
                 name_by_fake.insert(fake.address, fake.hostname);
             }
             if !managers.is_empty() {
@@ -1602,6 +1928,11 @@ impl SessionRegistry {
                     executable: durable.executable,
                     lifecycle: SessionLifecycle::RootProcess,
                     pending_expires_at: None,
+                    cleanup_fence: None,
+                    native_observed: member_births
+                        .iter()
+                        .map(|(pid, birth)| (*pid, *birth))
+                        .collect(),
                     members,
                     member_births,
                     member_monitors: HashMap::new(),
@@ -1610,6 +1941,8 @@ impl SessionRegistry {
                     agent_heartbeats: HashMap::new(),
                     fork_leases: HashMap::new(),
                     fake_by_name,
+                    fake_by_native,
+                    native_by_fake,
                     name_by_fake,
                     next_fake_id: durable.next_fake_id.max(1),
                     cancellation: CancellationToken::new(),
@@ -1768,6 +2101,94 @@ fn process_identity_matches(pid: u32, executable: &str, start_time: u64) -> bool
     }
 }
 
+fn allocate_fake_slot(record: &mut SessionRecord, family: u8) -> Option<IpAddr> {
+    if !matches!(family, 4 | 6) {
+        return None;
+    }
+    loop {
+        let id = record.next_fake_id;
+        record.next_fake_id = id.checked_add(1)?;
+        let address = if family == 4 {
+            if id >= (1 << 17) {
+                return None;
+            }
+            IpAddr::V4(Ipv4Addr::new(
+                198,
+                18 + ((id >> 16) as u8),
+                ((id >> 8) & 0xff) as u8,
+                (id & 0xff) as u8,
+            ))
+        } else {
+            IpAddr::V6(Ipv6Addr::new(
+                0xfdfe,
+                0x6879,
+                0x7065,
+                0x7268,
+                0x7562,
+                0,
+                (id >> 16) as u16,
+                id as u16,
+            ))
+        };
+        if !record.name_by_fake.contains_key(&address) {
+            return Some(address);
+        }
+    }
+}
+
+fn install_approved_aliases(
+    record: &mut SessionRecord,
+    aliases: &[hyperhub_runtime::attachment::IssuedAliasSnapshot],
+) -> Result<(), String> {
+    let mut by_address = record.name_by_fake.clone();
+    let mut by_name = record.fake_by_name.clone();
+    let mut next = record.next_fake_id;
+    for alias in aliases {
+        let name = alias.hostname.trim_end_matches('.').to_ascii_lowercase();
+        if alias.ambiguous || name.is_empty() || name.len() > 253 {
+            return Err("issued alias snapshot is ambiguous or invalid".into());
+        }
+        let (family, id) = match alias.address {
+            IpAddr::V4(ip) => {
+                let b = ip.octets();
+                if b[0] != 198 || !matches!(b[1], 18 | 19) {
+                    return Err("issued IPv4 alias is outside HyperHub allocator".into());
+                }
+                (
+                    4,
+                    ((b[1] as u32 - 18) << 16) | ((b[2] as u32) << 8) | b[3] as u32,
+                )
+            }
+            IpAddr::V6(ip) => {
+                let b = ip.segments();
+                if b[..6] != [0xfdfe, 0x6879, 0x7065, 0x7268, 0x7562, 0] {
+                    return Err("issued IPv6 alias is outside HyperHub allocator".into());
+                }
+                (6, ((b[6] as u32) << 16) | b[7] as u32)
+            }
+        };
+        if id == 0 {
+            return Err("issued alias uses reserved allocator zero".into());
+        }
+        if by_address
+            .get(&alias.address)
+            .is_some_and(|existing| existing != &name)
+        {
+            return Err("issued alias refers to conflicting hostnames".into());
+        }
+        by_address.insert(alias.address, name.clone());
+        by_name.entry((name, family)).or_insert(alias.address);
+        next = next.max(
+            id.checked_add(1)
+                .ok_or("issued alias allocator is exhausted")?,
+        );
+    }
+    record.name_by_fake = by_address;
+    record.fake_by_name = by_name;
+    record.next_fake_id = next;
+    Ok(())
+}
+
 fn pending_session(
     session_id: String,
     executable: String,
@@ -1787,8 +2208,12 @@ fn pending_session(
         member_instances: HashMap::new(),
         process_policies: HashMap::new(),
         agent_heartbeats: HashMap::new(),
+        native_observed: Default::default(),
+        cleanup_fence: None,
         fork_leases: HashMap::new(),
         fake_by_name: HashMap::new(),
+        fake_by_native: HashMap::new(),
+        native_by_fake: HashMap::new(),
         name_by_fake: HashMap::new(),
         next_fake_id: 1,
         cancellation: CancellationToken::new(),
@@ -1876,7 +2301,7 @@ fn update_field(mac: &mut Hmac<Sha256>, value: &[u8]) {
     mac.update(value);
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -1889,6 +2314,81 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
+    GetApprovalTrust,
+    GetApprovalRootCertificate {
+        bootstrap: hyperhub_runtime::attachment::Bootstrap,
+        challenge: hyperhub_runtime::attachment::ApprovalEnrollmentChallenge,
+    },
+    BeginApprovalEnrollment,
+    EnrollApprovalAuthority {
+        enrollment: crate::attachments::ApprovalEnrollment,
+    },
+    BeginAttachmentConsumption {
+        authorization: crate::attachments::Authorization,
+        manager: crate::attachments::ProcessIdentity,
+        bootstrap: hyperhub_runtime::attachment::Bootstrap,
+    },
+    ConsumeAttachmentAuthorization {
+        authorization: crate::attachments::Authorization,
+        manager: crate::attachments::ProcessIdentity,
+        bootstrap: hyperhub_runtime::attachment::Bootstrap,
+        nonce: [u8; 32],
+        possession: hyperhub_runtime::attachment::PossessionProof,
+    },
+    AttachmentPreparation {
+        authorization: crate::attachments::Authorization,
+        bootstrap: hyperhub_runtime::attachment::Bootstrap,
+        manager: crate::attachments::ProcessIdentity,
+        accepted: hyperhub_runtime::attachment::AcceptedOperationCertificate,
+        proof: crate::attachments::PreparationProof,
+    },
+    ActivateAttachment {
+        authorization: crate::attachments::Authorization,
+        session_id: String,
+        token: crate::attachments::Credential,
+        manager: crate::attachments::ProcessIdentity,
+        members: Vec<crate::attachments::ProcessIdentity>,
+        #[serde(default)]
+        hosts: Vec<crate::attachments::HostBootstrapBinding>,
+    },
+    PrepareAttachmentDetach {
+        authorization: crate::attachments::Authorization,
+        session_id: String,
+        token: crate::attachments::Credential,
+        manager: crate::attachments::ProcessIdentity,
+    },
+    FinishAttachmentDetach {
+        authorization: crate::attachments::Authorization,
+        session_id: String,
+        token: crate::attachments::Credential,
+        manager: crate::attachments::ProcessIdentity,
+    },
+    CancelAttachmentDetach {
+        authorization: crate::attachments::Authorization,
+        session_id: String,
+        token: crate::attachments::Credential,
+        manager: crate::attachments::ProcessIdentity,
+    },
+    ReportAttachmentExec {
+        attachment_id: String,
+        session_id: String,
+        token: crate::attachments::Credential,
+        manager: crate::attachments::ProcessIdentity,
+        previous: crate::attachments::ProcessIdentity,
+        current: crate::attachments::ProcessIdentity,
+        transition_nonce: [u8; 32],
+    },
+    InitializeOwnedAttachmentImage {
+        bootstrap: hyperhub_runtime::attachment::Bootstrap,
+        manager: crate::attachments::ProcessIdentity,
+        target: crate::attachments::ProcessIdentity,
+    },
+    GetAttachmentImage {
+        attachment_id: String,
+    },
+    GetAttachmentProfile {
+        bootstrap: hyperhub_runtime::attachment::Bootstrap,
+    },
     RetainEngineTree {
         session_id: String,
         token: String,
@@ -1954,6 +2454,46 @@ pub enum ControlRequest {
         proof: Vec<u8>,
     },
     BootstrapChild,
+    RecoverAttachment {
+        authorization: crate::attachments::Authorization,
+        session_id: String,
+        token: crate::attachments::Credential,
+        manager: crate::attachments::ProcessIdentity,
+        members: Vec<crate::attachments::ProcessIdentity>,
+        #[serde(default)]
+        startup_hosts: Vec<crate::attachments::HostBootstrapBinding>,
+        #[serde(default)]
+        unstarted: Vec<crate::attachments::HostBootstrapBinding>,
+        #[serde(default)]
+        unstarted_proof: Option<crate::attachments::UnstartedInjectionProof>,
+    },
+    RegisterOwnedAttachmentKeeper {
+        session_id: String,
+        token: crate::attachments::Credential,
+        attachment_id: String,
+        target: crate::attachments::ProcessIdentity,
+        keeper: crate::attachments::ProcessIdentity,
+        execution_digest: String,
+        secret_digest: String,
+    },
+    CancelOwnedAttachmentKeeper {
+        session_id: String,
+        token: crate::attachments::Credential,
+        attachment_id: String,
+        secret: crate::attachments::Credential,
+    },
+    ClaimOwnedAttachmentKeeper {
+        session_id: String,
+        token: crate::attachments::Credential,
+        attachment_id: String,
+        execution_digest: String,
+        secret: crate::attachments::Credential,
+    },
+    CompleteAttachment {
+        authorization: crate::attachments::Authorization,
+        session_id: String,
+        token: crate::attachments::Credential,
+    },
     ActivateSession {
         session_id: String,
         token: String,
@@ -2043,11 +2583,21 @@ pub enum ControlRequest {
     },
     ClearPasswordAuthorization,
     Ping,
+    RegisterAliasHost {
+        identity: Option<crate::attachments::ProcessIdentity>,
+        bootstrap: hyperhub_runtime::attachment::Bootstrap,
+        sequence: u64,
+        head: [u8; 32],
+        #[serde(default)]
+        root_image_challenge: Option<[u8; 32]>,
+    },
     ResolveName {
         session_id: String,
         token: String,
         hostname: String,
         family: u8,
+        #[serde(default)]
+        native_fallback: Option<hyperhub_runtime::attachment::NativeFallback>,
     },
     GetTrust {
         session_id: String,
@@ -2113,7 +2663,15 @@ pub enum ControlRequest {
         proof: Vec<u8>,
         config_json: String,
     },
+    PersistConfig {
+        authorization: crate::config_persistence::ConfigWriteAuthorization,
+        config_json: String,
+    },
+    GetConfigurationRevision,
     GetStatus,
+    RestartServe {
+        debug: bool,
+    },
     Shutdown {
         #[serde(default)]
         preserve_sessions: bool,
@@ -2123,6 +2681,41 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlResponse {
+    AttachmentPreparationAborted {
+        receipt: crate::attachments::PreparationAbortReceipt,
+    },
+    ServeSuccessor {
+        process: crate::attachments::ProcessIdentity,
+    },
+    AttachmentDetachPlan {
+        plan: crate::attachments::DetachBarrierPlan,
+    },
+    ConfigurationRevision {
+        runtime_digest: String,
+        persisted_digest: Option<String>,
+        core_epoch: Option<[u8; 32]>,
+        publication_error: Option<String>,
+    },
+    ConfigurationPersisted {
+        config_digest: String,
+        redacted_view_error: Option<String>,
+        publication_error: Option<String>,
+    },
+    OperationPossessionChallenge {
+        challenge: hyperhub_runtime::attachment::PossessionChallenge,
+    },
+    AcceptedAttachmentOperation {
+        certificate: hyperhub_runtime::attachment::AcceptedOperationCertificate,
+    },
+    ApprovalRootCertificate {
+        certificate: hyperhub_runtime::attachment::ApprovalRootCertificate,
+    },
+    ApprovalTrust {
+        trust: crate::attachments::ApprovalTrustView,
+    },
+    ApprovalEnrollmentChallenge {
+        challenge: crate::attachments::ApprovalEnrollmentChallenge,
+    },
     ReleaseUpgrade {
         record: crate::release::RecordView,
     },
@@ -2183,9 +2776,23 @@ pub enum ControlResponse {
         attested: bool,
     },
     Ok,
+    AttachmentImage {
+        state: hyperhub_runtime::attachment::RootImageState,
+    },
+    AttachmentProfile {
+        profile: crate::attachments::ManagerExecutionProfile,
+    },
+    AliasHostRegistration {
+        ready: bool,
+        snapshot: Option<hyperhub_runtime::attachment::SignedSessionAliasSnapshot>,
+        proof: Option<hyperhub_runtime::attachment::ApprovalProof>,
+        root_image: Option<hyperhub_runtime::attachment::SignedRootImage>,
+    },
     ResolvedName {
         address: String,
         ttl_secs: u32,
+        issued_sequence: Option<u64>,
+        issued_head: Option<[u8; 32]>,
     },
     TrustBootstrap {
         socks_address: String,
@@ -2223,6 +2830,12 @@ pub enum ControlResponse {
         sandbox: Option<crate::sandbox::SandboxSnapshot>,
     },
     Status {
+        #[serde(default)]
+        approval_trust: Option<crate::attachments::ApprovalStatus>,
+        #[serde(default)]
+        attachments: Vec<crate::attachments::Record>,
+        #[serde(default)]
+        attachment_state_error: Option<String>,
         pid: u32,
         socks_address: String,
         started_at_ms: u64,
@@ -2315,6 +2928,7 @@ mod tests {
                     hostname: "restart.example".into(),
                     family: 4,
                     address: "198.18.0.1".parse().unwrap(),
+                    native_fallback: None,
                 }],
                 next_fake_id: 2,
             }],
@@ -2517,6 +3131,7 @@ mod tests {
                 pid,
                 start_time,
                 ptrace_root: None,
+                attachment_scope: None,
             }];
             let registry = SessionRegistry::default();
             assert_eq!(registry.restore_durable_state(snapshot, 20), (0, 1));
@@ -3035,6 +3650,243 @@ mod tests {
     }
 
     #[test]
+    fn orphan_cleanup_requires_actual_registry_manager_and_live_member() {
+        let key = Zeroizing::new(vec![7; 32]);
+        let registry = SessionRegistry::new(key.clone(), crate::config_store::new_descriptor());
+        let challenge = registry
+            .begin_auth("orphan-scope".into(), "fixture".into(), [9; 32])
+            .unwrap();
+        let proof = session_proof(&key, &challenge).unwrap();
+        let session = registry
+            .finish_auth(&challenge.challenge_id, &proof, Duration::from_secs(10))
+            .unwrap();
+        let original_root = u32::MAX;
+        assert!(registry.activate(&session.session_id, &session.token, original_root));
+        let manager = std::process::id();
+        let birth = process_start_time(manager).unwrap();
+        assert!(registry.register_child(
+            &session.session_id,
+            &session.token,
+            original_root,
+            manager,
+            std::env::current_exe().unwrap().display().to_string()
+        ));
+        assert!(registry.retain_engine_manager(
+            &session.session_id,
+            &session.token,
+            manager,
+            birth
+        ));
+        assert!(registry.orphan_manager_has_live_members(
+            &session.session_id,
+            original_root,
+            manager,
+            birth
+        ));
+        assert!(!registry.orphan_manager_has_live_members(
+            &session.session_id,
+            original_root - 1,
+            manager,
+            birth
+        ));
+        assert!(!registry.orphan_manager_has_live_members(
+            &session.session_id,
+            original_root,
+            manager,
+            birth + 1
+        ));
+        let instance = registry
+            .member_instance(&session.session_id, &session.token, manager)
+            .unwrap();
+        registry.member_exited(&session.session_id, manager, instance);
+        assert!(!registry.orphan_manager_has_live_members(
+            &session.session_id,
+            original_root,
+            manager,
+            birth
+        ));
+    }
+    #[test]
+    fn native_resolution_meaning_changes_allocate_new_immutable_aliases() {
+        use hyperhub_runtime::attachment::{NativeAddress, NativeFallback};
+        let (registry, session) = authenticated_registry();
+        let first = NativeFallback {
+            family: 4,
+            addresses: vec![
+                NativeAddress {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    scope_id: 0,
+                    flowinfo: 0,
+                },
+                NativeAddress {
+                    ip: "127.0.0.2".parse().unwrap(),
+                    scope_id: 0,
+                    flowinfo: 0,
+                },
+            ],
+            failure: None,
+            unavailable: None,
+        };
+        let mut reordered = first.clone();
+        reordered.addresses.reverse();
+        let a = registry
+            .resolve_fake_native(&session.session_id, &session.token, "same.test", &first)
+            .unwrap();
+        let b = registry
+            .resolve_fake_native(&session.session_id, &session.token, "same.test", &reordered)
+            .unwrap();
+        assert_ne!(
+            a, b,
+            "native address order was erased from resolution identity"
+        );
+        assert_eq!(
+            registry.resolve_fake_native(&session.session_id, &session.token, "same.test", &first),
+            Some(a)
+        );
+        let failure = NativeFallback {
+            family: 4,
+            addresses: vec![],
+            failure: Some(-2),
+            unavailable: None,
+        };
+        let c = registry
+            .resolve_fake_native(&session.session_id, &session.token, "same.test", &failure)
+            .unwrap();
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+        let state = registry.0.lock().unwrap();
+        let record = &state.sessions[&session.session_id];
+        assert_eq!(record.native_by_fake[&a], first);
+        assert_eq!(record.native_by_fake[&b], reordered);
+        assert_eq!(record.native_by_fake[&c], failure);
+    }
+    #[test]
+    fn native_reserved_pool_answers_refuse_synthesis_without_burning_or_relabeling() {
+        use hyperhub_runtime::attachment::{NativeAddress, NativeFallback};
+        let (registry, session) = authenticated_registry();
+        for text in [
+            "198.18.0.1",
+            "198.19.255.254",
+            "fdfe:6879:7065:7268:7562:0:0:1",
+        ] {
+            let ip: IpAddr = text.parse().unwrap();
+            let native = NativeFallback {
+                family: if ip.is_ipv4() { 4 } else { 6 },
+                addresses: vec![NativeAddress {
+                    ip,
+                    scope_id: 0,
+                    flowinfo: 0,
+                }],
+                failure: None,
+                unavailable: None,
+            };
+            assert!(registry
+                .resolve_fake_native(
+                    &session.session_id,
+                    &session.token,
+                    "foreign.fixture.test",
+                    &native
+                )
+                .is_none());
+        }
+        let state = registry.0.lock().unwrap();
+        let record = &state.sessions[&session.session_id];
+        assert!(record.native_by_fake.is_empty());
+        assert!(record.fake_by_native.is_empty());
+        assert_eq!(record.next_fake_id, 1);
+    }
+    #[test]
+    fn native_alias_pool_exhaustion_never_reuses_an_existing_slot() {
+        use hyperhub_runtime::attachment::{NativeAddress, NativeFallback};
+        let (registry, session) = authenticated_registry();
+        registry
+            .0
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(&session.session_id)
+            .unwrap()
+            .next_fake_id = (1 << 17) - 1;
+        let native = NativeFallback {
+            family: 4,
+            addresses: vec![NativeAddress {
+                ip: "127.0.0.1".parse().unwrap(),
+                scope_id: 0,
+                flowinfo: 0,
+            }],
+            failure: None,
+            unavailable: None,
+        };
+        let last = registry
+            .resolve_fake_native(&session.session_id, &session.token, "last.test", &native)
+            .unwrap();
+        assert_eq!(last, "198.19.255.255".parse::<IpAddr>().unwrap());
+        assert!(registry
+            .resolve_fake_native(&session.session_id, &session.token, "next.test", &native)
+            .is_none());
+        assert_eq!(
+            registry.restore_fake(&session.session_id, last).as_deref(),
+            Some("last.test")
+        );
+    }
+
+    #[test]
+    fn approved_session_alias_restore_reserves_all_old_addresses_before_new_dns() {
+        let registry = SessionRegistry::default();
+        let aliases = vec![
+            hyperhub_runtime::attachment::IssuedAliasSnapshot {
+                address: "198.18.0.7".parse().unwrap(),
+                hostname: "old.example.test".into(),
+                ambiguous: false,
+            },
+            hyperhub_runtime::attachment::IssuedAliasSnapshot {
+                address: "fdfe:6879:7065:7268:7562:0:0:b".parse().unwrap(),
+                hostname: "old.example.test".into(),
+                ambiguous: false,
+            },
+        ];
+        let token = "dummy-approved-session-token-32-bytes";
+        registry
+            .prepare_approved_attachment("restored", token, "fixture", &aliases)
+            .unwrap();
+        assert!(registry.activate("restored", token, 7));
+        for alias in &aliases {
+            assert_eq!(
+                registry.restore_fake("restored", alias.address).as_deref(),
+                Some("old.example.test")
+            );
+        }
+        assert_eq!(
+            registry.resolve_fake("restored", token, "old.example.test", 4),
+            Some(aliases[0].address)
+        );
+        let next = registry
+            .resolve_fake("restored", token, "new.example.test", 4)
+            .unwrap();
+        assert_eq!(next, "198.18.0.12".parse::<IpAddr>().unwrap());
+        assert!(aliases.iter().all(|alias| alias.address != next));
+        let mut conflict = aliases.clone();
+        conflict.push(hyperhub_runtime::attachment::IssuedAliasSnapshot {
+            address: aliases[0].address,
+            hostname: "other.example.test".into(),
+            ambiguous: false,
+        });
+        let empty = SessionRegistry::default();
+        assert!(empty
+            .prepare_approved_attachment("conflict", token, "fixture", &conflict)
+            .is_err());
+        assert!(
+            empty.snapshot().is_empty(),
+            "conflicting alias snapshot partially created a session"
+        );
+        let mut ambiguous = aliases;
+        ambiguous[0].ambiguous = true;
+        assert!(empty
+            .prepare_approved_attachment("ambiguous", token, "fixture", &ambiguous)
+            .is_err());
+    }
+
+    #[test]
     fn allocates_and_restores_session_fake_addresses() {
         let (registry, record) = authenticated_registry();
         let first = registry
@@ -3095,3 +3947,11 @@ mod tests {
         assert!(connections.snapshot().is_empty());
     }
 }
+
+#[path = "session/successor.rs"]
+mod successor;
+pub(crate) use successor::SuccessorSessions;
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
+#[path = "session/startup_cleanup_tests.rs"]
+mod startup_cleanup_tests;

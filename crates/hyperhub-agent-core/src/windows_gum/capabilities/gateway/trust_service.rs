@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ptr::{null, null_mut};
 use std::sync::{Mutex, OnceLock};
 
@@ -28,9 +28,11 @@ struct SslExtraCertChainPolicyPara {
 }
 
 type SchannelTargets = Mutex<HashMap<(usize, usize), Vec<u16>>>;
+static SYSTEM_ROOT_STORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static HYPERHUB_ROOT_CONTEXT: OnceLock<usize> = OnceLock::new();
 static HYPERHUB_ROOT_STORE: OnceLock<usize> = OnceLock::new();
 static COMBINED_ROOT_STORE: OnceLock<usize> = OnceLock::new();
+static OWNED_CREDENTIALS: Mutex<Option<HashSet<(usize, usize)>>> = Mutex::new(None);
 static SCHANNEL_TARGETS: OnceLock<SchannelTargets> = OnceLock::new();
 
 pub(super) unsafe fn hyperhub_root_context() -> *const CERT_CONTEXT {
@@ -122,7 +124,7 @@ pub(super) unsafe fn virtualize_root_store(system: HCERTSTORE) -> HCERTSTORE {
     }
 
     CertCloseStore(system, 0);
-    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+    if crate::attachment::legacy_debug() {
         eprintln!("hyperhub-gum: virtualized process-local ROOT certificate store");
     }
     private_store
@@ -159,7 +161,8 @@ pub(super) unsafe fn combined_root_store() -> HCERTSTORE {
             CertCloseStore(system, 0);
             return 0;
         }
-        // The collection and its sibling stores live for the Agent lifetime.
+        SYSTEM_ROOT_STORE.store(system as usize, std::sync::atomic::Ordering::Release);
+        // Native credentials retain these until their final release hook.
         collection as usize
     }) as HCERTSTORE
 }
@@ -294,7 +297,7 @@ pub(super) unsafe fn validate_schannel_peer(
 
     trust_hyperhub_root_only(chain);
     if (*chain).TrustStatus.dwErrorStatus != 0 {
-        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+        if crate::attachment::legacy_debug() {
             eprintln!(
                 "hyperhub-gum: Schannel chain rejected trust=0x{:08x}",
                 (*chain).TrustStatus.dwErrorStatus
@@ -326,11 +329,95 @@ pub(super) unsafe fn validate_schannel_peer(
         &mut status,
     );
     CertFreeCertificateChain(chain);
-    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+    if crate::attachment::legacy_debug() {
         eprintln!(
             "hyperhub-gum: Schannel manual validation result={} error=0x{:08x}",
             verified, status.dwError
         );
     }
     verified != 0 && status.dwError == 0
+}
+
+/// Only native credentials whose validation flags we changed require retained
+/// compatibility. New credentials after detach use the original caller data.
+pub(in crate::windows_gum) unsafe fn remember_credential(handle: *mut SecHandle) {
+    if let Some(key) = context_key(handle) {
+        if let Ok(mut set) = OWNED_CREDENTIALS.lock() {
+            set.get_or_insert_with(HashSet::new).insert(key);
+        }
+    }
+}
+pub(in crate::windows_gum) unsafe fn owns_credential(handle: *mut SecHandle) -> bool {
+    context_key(handle).is_some_and(|key| {
+        OWNED_CREDENTIALS
+            .lock()
+            .map(|set| set.as_ref().is_some_and(|set| set.contains(&key)))
+            .unwrap_or(true)
+    })
+}
+pub(in crate::windows_gum) unsafe fn forget_credential(handle: *mut SecHandle) {
+    if let Some(key) = context_key(handle) {
+        if let Ok(mut set) = OWNED_CREDENTIALS.lock() {
+            if let Some(set) = set.as_mut() {
+                set.remove(&key);
+            }
+        }
+    }
+}
+pub(in crate::windows_gum) unsafe fn owns_context(handle: *mut SecHandle) -> bool {
+    context_key(handle).is_some_and(|key| {
+        SCHANNEL_TARGETS
+            .get()
+            .is_some_and(|set| set.lock().map(|set| set.contains_key(&key)).unwrap_or(true))
+    })
+}
+pub(in crate::windows_gum) unsafe fn forget_context(handle: *mut SecHandle) {
+    if let Some(key) = context_key(handle) {
+        if let Some(set) = SCHANNEL_TARGETS.get() {
+            if let Ok(mut set) = set.lock() {
+                set.remove(&key);
+            }
+        }
+    }
+}
+pub(in crate::windows_gum) fn compatibility_resources() -> bool {
+    OWNED_CREDENTIALS
+        .lock()
+        .map(|set| set.as_ref().is_some_and(|set| !set.is_empty()))
+        .unwrap_or(true)
+        || SCHANNEL_TARGETS
+            .get()
+            .is_some_and(|set| set.lock().map(|set| !set.is_empty()).unwrap_or(true))
+}
+
+/// No retained credentials/contexts and no native callback can refer to these
+/// private stores after the external manager's final thread-PC barrier.
+pub(in crate::windows_gum) unsafe fn release_trust_storage() {
+    if let Some(store) = COMBINED_ROOT_STORE.get().copied() {
+        if store != 0 {
+            CertCloseStore(store as HCERTSTORE, 0);
+        }
+    }
+    let system = SYSTEM_ROOT_STORE.swap(0, std::sync::atomic::Ordering::AcqRel);
+    if system != 0 {
+        CertCloseStore(system as HCERTSTORE, 0);
+    }
+    if let Some(store) = HYPERHUB_ROOT_STORE.get().copied() {
+        if store != 0 {
+            CertCloseStore(store as HCERTSTORE, 0);
+        }
+    }
+    if let Some(context) = HYPERHUB_ROOT_CONTEXT.get().copied() {
+        if context != 0 {
+            CertFreeCertificateContext(context as *const CERT_CONTEXT);
+        }
+    }
+    if let Ok(mut set) = OWNED_CREDENTIALS.lock() {
+        set.take();
+    }
+    if let Some(targets) = SCHANNEL_TARGETS.get() {
+        if let Ok(mut targets) = targets.lock() {
+            *targets = HashMap::new();
+        }
+    }
 }

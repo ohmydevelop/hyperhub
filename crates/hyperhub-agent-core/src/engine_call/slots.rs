@@ -139,3 +139,12 @@ mod tests {
         }
     }
 }
+
+/// Hooks and module workers must be quiescent before this is called. Deleting
+/// the OS key removes future callbacks into the native module.
+pub(super) fn retire() {
+    let key = KEY.swap(usize::MAX, Ordering::AcqRel);
+    if key != usize::MAX {
+        delete(key);
+    }
+}

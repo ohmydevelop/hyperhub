@@ -18,6 +18,11 @@ impl StartupDeadline {
     pub(crate) fn new() -> Self {
         Self(Instant::now() + Duration::from_secs(30))
     }
+    /// The synchronous Host reply has a three-second transport budget.
+    /// Trust, Engine and alias preparation share this shorter deadline.
+    pub(crate) fn host_command() -> Self {
+        Self(Instant::now() + Duration::from_secs(2))
+    }
 
     pub(crate) fn remaining(&self) -> io::Result<Duration> {
         self.0

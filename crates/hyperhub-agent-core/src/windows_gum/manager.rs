@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::Security::Authentication::Identity::{
@@ -18,12 +19,12 @@ use super::{
     ACQUIRE_CREDENTIALS_A, ACQUIRE_CREDENTIALS_W, CERT_GET_CHAIN, CERT_OPEN_SYSTEM_STORE_A,
     CERT_OPEN_SYSTEM_STORE_W, CERT_VERIFY_POLICY, CLOSESOCKET, CONNECT, CONNECTEX,
     CREATE_PROCESS_A, CREATE_PROCESS_INTERNAL_A, CREATE_PROCESS_INTERNAL_W, CREATE_PROCESS_W,
-    DNSQUERY_A, DNSQUERY_EX, DNSQUERY_UTF8, DNSQUERY_W, GETADDRINFO, GETADDRINFOEXA,
-    GETADDRINFOEXW, GETADDRINFOW, INITIALIZE_SECURITY_CONTEXT_A, INITIALIZE_SECURITY_CONTEXT_W,
-    IOCTLSOCKET, LDR_LOAD_DLL, MSYS_FORK, MSYS_VFORK, NT_CLOSE, NT_CREATE_FILE, NT_CREATE_SECTION,
-    NT_CREATE_USER_PROCESS, NT_DELETE_FILE, NT_DUPLICATE_OBJECT, NT_MAP_VIEW_OF_SECTION,
-    NT_OPEN_FILE, NT_READ_FILE, NT_SET_INFORMATION_FILE, NT_WRITE_FILE, RECV, RECVFROM, SEND,
-    SENDTO, WSACONNECT, WSARECV, WSARECVFROM, WSASEND, WSASENDTO,
+    DELETE_SECURITY_CONTEXT, DNSQUERY_A, DNSQUERY_EX, DNSQUERY_UTF8, DNSQUERY_W, FREE_CREDENTIALS,
+    GETADDRINFO, GETADDRINFOEXA, GETADDRINFOEXW, GETADDRINFOW, INITIALIZE_SECURITY_CONTEXT_A,
+    INITIALIZE_SECURITY_CONTEXT_W, IOCTLSOCKET, LDR_LOAD_DLL, MSYS_FORK, MSYS_VFORK, NT_CLOSE,
+    NT_CREATE_FILE, NT_CREATE_SECTION, NT_CREATE_USER_PROCESS, NT_DELETE_FILE, NT_DUPLICATE_OBJECT,
+    NT_MAP_VIEW_OF_SECTION, NT_OPEN_FILE, NT_READ_FILE, NT_SET_INFORMATION_FILE, NT_WRITE_FILE,
+    RECV, RECVFROM, SEND, SENDTO, WSACONNECT, WSARECV, WSARECVFROM, WSASEND, WSASENDTO,
 };
 
 #[derive(Clone, Copy)]
@@ -32,6 +33,8 @@ enum SecurityEntry {
     AcquireCredentialsW,
     InitializeSecurityContextA,
     InitializeSecurityContextW,
+    FreeCredentials,
+    DeleteSecurityContext,
 }
 
 #[derive(Clone, Copy)]
@@ -173,6 +176,20 @@ macro_rules! security_hook {
 }
 
 pub(super) static BUILTIN_HOOKS: &[HookDescriptor] = &[
+    security_hook!(
+        FREE_CREDENTIALS,
+        "FreeCredentialsHandle",
+        FreeCredentials,
+        hook_free_credentials,
+        ORIGINAL_FREE_CREDENTIALS
+    ),
+    security_hook!(
+        DELETE_SECURITY_CONTEXT,
+        "DeleteSecurityContext",
+        DeleteSecurityContext,
+        hook_delete_security_context,
+        ORIGINAL_DELETE_SECURITY_CONTEXT
+    ),
     export_hook!(
         GETADDRINFO,
         "getaddrinfo",
@@ -585,6 +602,9 @@ const MSYS_HOOK_WAITING: u32 = 0;
 const MSYS_HOOK_REQUESTED: u32 = 1;
 const MSYS_HOOK_INSTALLED: u32 = 2;
 const MSYS_HOOK_FAILED: u32 = 3;
+static OWNED_HOOKS: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
+static WATCHER_STOP: AtomicBool = AtomicBool::new(false);
+static WATCHER_COOKIE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 static DYNAMIC_INTERCEPTOR: AtomicPtr<GumInterceptor> = AtomicPtr::new(null_mut());
 static MSYS_RUNTIME_MODULE: AtomicUsize = AtomicUsize::new(0);
 static MSYS_HOOK_STATE: AtomicU32 = AtomicU32::new(MSYS_HOOK_WAITING);
@@ -618,6 +638,7 @@ unsafe extern "system" fn msys_runtime_dll_notification(
     data: *const c_void,
     _context: *mut c_void,
 ) {
+    let _attachment_callback = crate::attachment::enter();
     const LDR_DLL_NOTIFICATION_REASON_LOADED: u32 = 1;
     if reason != LDR_DLL_NOTIFICATION_REASON_LOADED || data.is_null() {
         return;
@@ -651,6 +672,15 @@ unsafe fn wide_runtime_name(buffer: *const u16, length: usize) -> bool {
 pub(in crate::windows_gum) fn start_msys_runtime_hook_watcher(
     interceptor: *mut GumInterceptor,
 ) -> bool {
+    let _state_gate = match crate::attachment::state_gate() {
+        Ok(guard)
+            if !crate::attachment::startup::cancelled()
+                && crate::attachment::startup::check().is_ok() =>
+        {
+            guard
+        }
+        _ => return false,
+    };
     DYNAMIC_INTERCEPTOR.store(interceptor, Ordering::Release);
     if !ORIGINAL_MSYS_FORK.load(Ordering::Acquire).is_null()
         && !ORIGINAL_MSYS_VFORK.load(Ordering::Acquire).is_null()
@@ -658,27 +688,35 @@ pub(in crate::windows_gum) fn start_msys_runtime_hook_watcher(
         MSYS_HOOK_STATE.store(MSYS_HOOK_INSTALLED, Ordering::Release);
         return true;
     }
+    WATCHER_STOP.store(false, Ordering::Release);
+    let worker = crate::attachment::background_enter();
     if std::thread::Builder::new()
         .name("hyperhub-msys-hook-loader".into())
-        .spawn(|| loop {
-            if MSYS_HOOK_STATE.load(Ordering::Acquire) == MSYS_HOOK_WAITING {
-                if let Some(module) = unsafe { loaded_msys_runtime_module() } {
-                    request_msys_runtime_hook_install(module);
+        .spawn(move || {
+            let _worker = worker;
+            loop {
+                if WATCHER_STOP.load(Ordering::Acquire) || crate::attachment::startup::cancelled() {
+                    return;
                 }
+                if MSYS_HOOK_STATE.load(Ordering::Acquire) == MSYS_HOOK_WAITING {
+                    if let Some(module) = unsafe { loaded_msys_runtime_module() } {
+                        request_msys_runtime_hook_install(module);
+                    }
+                }
+                if MSYS_HOOK_STATE.load(Ordering::Acquire) == MSYS_HOOK_REQUESTED {
+                    let installed = unsafe { install_loaded_msys_runtime_hooks() };
+                    MSYS_HOOK_STATE.store(
+                        if installed {
+                            MSYS_HOOK_INSTALLED
+                        } else {
+                            MSYS_HOOK_FAILED
+                        },
+                        Ordering::Release,
+                    );
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            if MSYS_HOOK_STATE.load(Ordering::Acquire) == MSYS_HOOK_REQUESTED {
-                let installed = unsafe { install_loaded_msys_runtime_hooks() };
-                MSYS_HOOK_STATE.store(
-                    if installed {
-                        MSYS_HOOK_INSTALLED
-                    } else {
-                        MSYS_HOOK_FAILED
-                    },
-                    Ordering::Release,
-                );
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
         })
         .is_err()
     {
@@ -700,7 +738,13 @@ pub(in crate::windows_gum) fn start_msys_runtime_hook_watcher(
             &mut cookie,
         )
     };
-    status >= 0 && !cookie.is_null()
+    if status >= 0 && !cookie.is_null() {
+        WATCHER_COOKIE.store(cookie, Ordering::Release);
+        true
+    } else {
+        WATCHER_STOP.store(true, Ordering::Release);
+        false
+    }
 }
 
 fn request_msys_runtime_hook_install(module: HMODULE) {
@@ -737,6 +781,12 @@ pub(in crate::windows_gum) fn complete_msys_runtime_hook_install(module: HMODULE
     false
 }
 
+#[cfg(test)]
+pub(super) fn fail_msys_runtime_hook_install_for_test() {
+    // Used only by the isolated native adapter test process.
+    MSYS_HOOK_STATE.store(MSYS_HOOK_FAILED, Ordering::Release);
+}
+
 unsafe fn install_loaded_msys_runtime_hooks() -> bool {
     let interceptor = DYNAMIC_INTERCEPTOR.load(Ordering::Acquire);
     let module = MSYS_RUNTIME_MODULE.load(Ordering::Acquire) as HMODULE;
@@ -753,6 +803,15 @@ unsafe fn install_loaded_msys_runtime_hooks() -> bool {
         (descriptor(MSYS_FORK).expect("fork descriptor"), fork),
         (descriptor(MSYS_VFORK).expect("vfork descriptor"), vfork),
     ];
+    let _state_gate = match crate::attachment::state_gate() {
+        Ok(guard)
+            if !crate::attachment::startup::cancelled()
+                && crate::attachment::startup::check().is_ok() =>
+        {
+            guard
+        }
+        _ => return false,
+    };
     gum_interceptor_begin_transaction(interceptor);
     let mut installed = Vec::<(*mut c_void, &'static HookDescriptor)>::with_capacity(targets.len());
     for (descriptor, target) in targets {
@@ -772,6 +831,11 @@ unsafe fn install_loaded_msys_runtime_hooks() -> bool {
         installed.push((target, descriptor));
     }
     gum_interceptor_end_transaction(interceptor);
+    if let Ok(mut owned) = OWNED_HOOKS.lock() {
+        for (target, descriptor) in installed {
+            owned.push((target as usize, descriptor.id));
+        }
+    }
     true
 }
 
@@ -895,6 +959,20 @@ impl HookManager {
             return report;
         }
 
+        // Lifecycle cancellation and a native Hook commit share one gate. All
+        // symbol resolution above can run without it; once cancelled, this
+        // initializer must never publish another native replacement.
+        let _state_gate = match crate::attachment::state_gate() {
+            Ok(guard) if crate::attachment::startup::check().is_ok() => guard,
+            _ => {
+                for hook in &mut report.hooks {
+                    if hook.status == HookInstallStatus::Installed {
+                        hook.status = HookInstallStatus::Skipped;
+                    }
+                }
+                return report;
+            }
+        };
         gum_interceptor_begin_transaction(self.interceptor);
         let mut installed = Vec::<(&ResolvedHook, *mut c_void)>::new();
         let mut failed = None;
@@ -933,6 +1011,13 @@ impl HookManager {
                         .any(|(installed, _)| installed.report_index == hook.report_index)
                 {
                     report.hooks[hook.report_index].status = HookInstallStatus::Skipped;
+                }
+            }
+        }
+        if failed.is_none() {
+            if let Ok(mut owned) = OWNED_HOOKS.lock() {
+                for (hook, _) in &installed {
+                    owned.push((hook.target as usize, hook.descriptor.id));
                 }
             }
         }
@@ -985,7 +1070,10 @@ unsafe fn resolve_security_entry(entry: SecurityEntry) -> Option<*mut c_void> {
                 _ => None,
             }
         }
-        SecurityEntry::AcquireCredentialsW | SecurityEntry::InitializeSecurityContextW => {
+        SecurityEntry::AcquireCredentialsW
+        | SecurityEntry::InitializeSecurityContextW
+        | SecurityEntry::FreeCredentials
+        | SecurityEntry::DeleteSecurityContext => {
             let table = InitSecurityInterfaceW();
             if table.is_null() {
                 return None;
@@ -993,6 +1081,12 @@ unsafe fn resolve_security_entry(entry: SecurityEntry) -> Option<*mut c_void> {
             let query = (*table).QueryContextAttributesW? as *const () as *mut c_void;
             QUERY_CONTEXT_ATTRIBUTES_W.store(query, Ordering::Release);
             match entry {
+                SecurityEntry::FreeCredentials => (*table)
+                    .FreeCredentialsHandle
+                    .map(|function| function as *const () as *mut c_void),
+                SecurityEntry::DeleteSecurityContext => (*table)
+                    .DeleteSecurityContext
+                    .map(|function| function as *const () as *mut c_void),
                 SecurityEntry::AcquireCredentialsW => (*table)
                     .AcquireCredentialsHandleW
                     .map(|function| function as *const () as *mut c_void),
@@ -1033,14 +1127,14 @@ mod tests {
                 Some(descriptor.name)
             );
         }
-        assert_eq!(BUILTIN_HOOKS.len(), DNSQUERY_EX as usize);
+        assert_eq!(BUILTIN_HOOKS.len(), DELETE_SECURITY_CONTEXT as usize);
         assert!(
             !descriptor(CONNECTEX)
                 .expect("ConnectEx descriptor")
                 .required
         );
         assert!(descriptor(0).is_none());
-        assert!(descriptor(DNSQUERY_EX + 1).is_none());
+        assert!(descriptor(DELETE_SECURITY_CONTEXT + 1).is_none());
     }
 
     #[test]
@@ -1072,5 +1166,64 @@ mod tests {
             }],
         };
         assert!(!failed.success());
+    }
+}
+
+/// Stop late module hooks before restoring only the replacements we installed.
+/// Original bridge addresses stay pinned until all native invocations finish.
+pub(super) unsafe fn retire_owned_hooks() -> Result<(), String> {
+    WATCHER_STOP.store(true, Ordering::Release);
+    let cookie = WATCHER_COOKIE.swap(null_mut(), Ordering::AcqRel);
+    if !cookie.is_null() {
+        let pointer = find_export("ntdll.dll", "LdrUnregisterDllNotification")
+            .ok_or("cannot unregister loader notification")?;
+        let unregister: unsafe extern "system" fn(*mut c_void) -> i32 =
+            std::mem::transmute(pointer);
+        if unregister(cookie) < 0 {
+            WATCHER_COOKIE.store(cookie, Ordering::Release);
+            return Err("loader notification is still registered".into());
+        }
+    }
+    if has_msys_runtime() {
+        return Err("msys_fork_runtime_requires_resident_native_base".into());
+    }
+    let interceptor = DYNAMIC_INTERCEPTOR.load(Ordering::Acquire);
+    if interceptor.is_null() {
+        return Ok(());
+    }
+    let mut owned = OWNED_HOOKS
+        .lock()
+        .map_err(|_| "hook registry unavailable")?;
+    gum_interceptor_begin_transaction(interceptor);
+    for &(target, _) in owned.iter().rev() {
+        gum_interceptor_revert(interceptor, target as *mut c_void);
+    }
+    gum_interceptor_end_transaction(interceptor);
+    if super::gum::gum_interceptor_flush(interceptor) == 0 {
+        return Err("native interceptor calls are still retiring".into());
+    }
+    owned.clear();
+    Ok(())
+}
+
+pub(super) unsafe fn finish_retirement() -> Result<(), String> {
+    if !OWNED_HOOKS
+        .lock()
+        .map_err(|_| "hook registry unavailable")?
+        .is_empty()
+    {
+        return Err("owned hooks remain".into());
+    }
+    let interceptor = DYNAMIC_INTERCEPTOR.swap(null_mut(), Ordering::AcqRel);
+    if !interceptor.is_null() {
+        super::gum::g_object_unref(interceptor.cast());
+        super::gum::gum_deinit_embedded();
+    }
+    Ok(())
+}
+
+pub(super) fn release_registry_storage() {
+    if let Ok(mut owned) = OWNED_HOOKS.lock() {
+        *owned = Vec::new();
     }
 }

@@ -41,6 +41,12 @@ struct AuditOutput {
 #[derive(Debug, Clone)]
 pub struct AuditWriter(Arc<Mutex<AuditOutput>>);
 
+pub(crate) struct PreparedDebug {
+    enabled: bool,
+    unchanged: bool,
+    file: Option<File>,
+}
+
 const AUDIT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -154,17 +160,35 @@ impl AuditWriter {
 
     /// 热更新详细调试事件输出。关闭时立即停止输出；再次开启时重新打开输出文件。
     pub fn set_debug(&self, enabled: bool) -> std::io::Result<()> {
-        let mut guard = self.0.lock().expect("audit mutex poisoned");
-        if guard.debug == enabled {
-            return Ok(());
-        }
-        if enabled {
-            guard.debug_file = open_append(guard.debug_output.as_deref())?;
-        } else {
-            guard.debug_file = None;
-        }
-        guard.debug = enabled;
+        let prepared = self.prepare_debug(enabled)?;
+        self.commit_debug(prepared);
         Ok(())
+    }
+
+    /// Perform fallible IO without enabling diagnostic output. Dropping this
+    /// handle before configuration commit leaves the previous state in place.
+    pub(crate) fn prepare_debug(&self, enabled: bool) -> std::io::Result<PreparedDebug> {
+        let guard = self.0.lock().expect("audit mutex poisoned");
+        let unchanged = guard.debug == enabled;
+        let file = if enabled && !unchanged {
+            open_append(guard.debug_output.as_deref())?
+        } else {
+            None
+        };
+        Ok(PreparedDebug {
+            enabled,
+            unchanged,
+            file,
+        })
+    }
+
+    pub(crate) fn commit_debug(&self, prepared: PreparedDebug) {
+        if prepared.unchanged {
+            return;
+        }
+        let mut guard = self.0.lock().expect("audit mutex poisoned");
+        guard.debug_file = prepared.file;
+        guard.debug = prepared.enabled;
     }
 
     pub fn debug_enabled(&self) -> bool {
@@ -446,6 +470,23 @@ fn normalize_attributes(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_debug_does_not_change_flags_until_commit() {
+        let writer = AuditWriter::open(None).unwrap();
+        let prepared = writer.prepare_debug(true).unwrap();
+        assert!(!writer.debug_enabled());
+        drop(prepared);
+        assert!(!writer.debug_enabled());
+        writer.commit_debug(writer.prepare_debug(true).unwrap());
+        assert!(writer.debug_enabled());
+        let prepared = writer.prepare_debug(false).unwrap();
+        assert!(writer.debug_enabled());
+        drop(prepared);
+        assert!(writer.debug_enabled());
+        writer.commit_debug(writer.prepare_debug(false).unwrap());
+        assert!(!writer.debug_enabled());
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn epoch_clock() -> u64 {

@@ -68,6 +68,16 @@ pub(in crate::windows_gum) unsafe fn has_msys_runtime() -> bool {
     })
 }
 
+/// Recognize the loaded runtime's ABI, including a renamed runtime module.
+pub(in crate::windows_gum) unsafe fn is_posix_fork_runtime_module(
+    module: windows_sys::Win32::Foundation::HMODULE,
+) -> bool {
+    !module.is_null()
+        && [c"fork", c"vfork", c"cygwin_internal", c"__errno"]
+            .iter()
+            .all(|name| GetProcAddress(module, name.as_ptr().cast()).is_some())
+}
+
 pub(in crate::windows_gum) unsafe fn find_connect_ex() -> Option<*mut c_void> {
     let mut data = WSADATA::default();
     if WSAStartup(0x0202, &mut data) != 0 {
@@ -108,7 +118,10 @@ pub(in crate::windows_gum) struct GumInterceptor {
 #[link(name = "frida-gum", kind = "static")]
 extern "C" {
     pub(in crate::windows_gum) fn gum_init_embedded();
+    pub(in crate::windows_gum) fn gum_deinit_embedded();
+    pub(in crate::windows_gum) fn g_object_unref(object: *mut c_void);
     pub(in crate::windows_gum) fn gum_interceptor_obtain() -> *mut GumInterceptor;
+    pub(in crate::windows_gum) fn gum_interceptor_flush(interceptor: *mut GumInterceptor) -> i32;
     pub(in crate::windows_gum) fn gum_interceptor_replace_fast(
         interceptor: *mut GumInterceptor,
         function_address: *mut c_void,

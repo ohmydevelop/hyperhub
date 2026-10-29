@@ -212,8 +212,49 @@ fn stop_with_persistence(preserve_sessions: bool) -> Result<i32, String> {
 }
 
 pub fn restart(config: StartConfig) -> Result<i32, String> {
-    stop_with_persistence(true)?;
-    start(config)
+    if !hyperhub_core::attachments::process_attachment_identity_available() {
+        stop_with_persistence(true)?;
+        return start(config);
+    }
+    if query_status()?.is_none() {
+        return start(config);
+    }
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let response = runtime
+        .block_on(control_request(
+            &discovery_control_endpoint(),
+            &ControlRequest::RestartServe {
+                debug: config.debug,
+            },
+        ))
+        .map_err(|e| {
+            format!(
+                "cannot prepare Core successor; original Core was not intentionally stopped: {e}"
+            )
+        })?;
+    let process = match response {
+        ControlResponse::ServeSuccessor { process } => process,
+        ControlResponse::Error { message } => return Err(message),
+        _ => return Err("Core returned an unexpected successor response".into()),
+    };
+    for _ in 0..300 {
+        if hyperhub_core::attachments::process_birth(process.pid) != Some(process.birth) {
+            return Err(format!("Core successor {} exited before readiness; inspect {}. Existing target processes were not restarted",process.pid,default_log_path()?.display()));
+        }
+        if let Ok(Some(status)) = query_status() {
+            if status.pid == process.pid {
+                hyperhub_core::attachments::verify_process(&process)?;
+                println!("HyperHub serve replaced by successor (pid {})", process.pid);
+                return Ok(0);
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "Core successor {} did not become ready within 30 seconds; inspect {}",
+        process.pid,
+        default_log_path()?.display()
+    ))
 }
 
 pub(crate) const PROCESS_SCOPE: &str = "registered process trees; not system-wide";
@@ -246,12 +287,23 @@ pub fn status(json: bool) -> Result<i32, String> {
         let home =
             hyperhub_core::config_store::hyperhub_home().map_err(|error| error.to_string())?;
         let control_endpoint = discovery_control_endpoint();
+        let (attachments, attachment_state_error) = match hyperhub_core::attachments::directory()
+            .and_then(|directory| hyperhub_core::attachments::records(&directory))
+        {
+            Ok(records) => (records, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         if json {
             let output = serde_json::json!({
                 "state": "stopped",
                 "hyperhub_home": home,
                 "control_endpoint": control_endpoint,
                 "protection_scope": protection_scope(None),
+                "attachments": attachments,
+                "attachment_state_error": attachment_state_error,
+                "attachment_status_source": "durable_record",
+                "approval_trust": null,
+                "approval_trust_source": "unavailable",
             });
             println!(
                 "{}",
@@ -261,6 +313,20 @@ pub fn status(json: bool) -> Result<i32, String> {
             println!("HyperHub serve is stopped");
             println!("home: {}", home.display());
             println!("control: {control_endpoint}");
+            println!("runtime approval authority: unavailable (Serve is offline)");
+            println!(
+                "attachments: {} (durable records; Serve is offline)",
+                attachments.len()
+            );
+            for attachment in &attachments {
+                println!(
+                    "  attachment={} pid={} phase={:?}",
+                    attachment.spec.id, attachment.spec.target.pid, attachment.phase
+                );
+            }
+            if let Some(error) = &attachment_state_error {
+                eprintln!("attachment state: {error}");
+            }
             print_scope_notice();
         }
         return Ok(3);
@@ -285,6 +351,11 @@ pub fn status(json: bool) -> Result<i32, String> {
             "engine_upgrades": status.engine_upgrades,
             "release_upgrades": status.release_upgrades,
             "forward_workers": status.forward_workers,
+            "attachments": status.attachments,
+            "attachment_state_error": status.attachment_state_error,
+            "attachment_status_source": "serve_snapshot",
+            "approval_trust": status.approval_trust,
+            "approval_trust_source": if status.approval_trust.is_some() { "serve_memory" } else { "unavailable" },
             "protection_scope": protection_scope(Some(managed)),
         });
         println!(
@@ -302,6 +373,14 @@ pub fn status(json: bool) -> Result<i32, String> {
         );
         println!("control: {}", discovery_control_endpoint());
         println!("socks: {}", status.socks_address);
+        if let Some(trust) = &status.approval_trust {
+            println!(
+                "runtime approval authority: {} (expected root: {})",
+                trust.state, trust.expected_root
+            );
+        } else {
+            println!("runtime approval authority: unavailable");
+        }
         println!("sessions: {}", status.sessions.len());
         println!("managed processes: {managed}");
         print_scope_notice();
@@ -316,6 +395,16 @@ pub fn status(json: bool) -> Result<i32, String> {
                     process.executable
                 );
             }
+        }
+        println!("attachments: {}", status.attachments.len());
+        for attachment in &status.attachments {
+            println!(
+                "  attachment={} pid={} phase={:?}",
+                attachment.spec.id, attachment.spec.target.pid, attachment.phase
+            );
+        }
+        if let Some(error) = &status.attachment_state_error {
+            eprintln!("attachment state: {error}");
         }
         println!("connections: {}", status.connections.len());
         println!("log: {}", default_log_path()?.display());
@@ -374,6 +463,9 @@ struct ServeStatus {
     engine_upgrades: Option<hyperhub_core::upgrade::Status>,
     release_upgrades: Option<hyperhub_core::release::Status>,
     forward_workers: Option<hyperhub_core::socks::WorkerGroupStatus>,
+    attachments: Vec<hyperhub_core::attachments::Record>,
+    attachment_state_error: Option<String>,
+    approval_trust: Option<hyperhub_core::attachments::ApprovalStatus>,
 }
 
 fn query_status() -> Result<Option<ServeStatus>, String> {
@@ -410,6 +502,9 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
             engine_upgrades,
             release_upgrades,
             forward_workers,
+            attachments,
+            attachment_state_error,
+            approval_trust,
         } => Ok(Some(ServeStatus {
             pid,
             socks_address,
@@ -421,6 +516,9 @@ fn query_status() -> Result<Option<ServeStatus>, String> {
             engine_upgrades,
             release_upgrades,
             forward_workers,
+            attachments,
+            attachment_state_error,
+            approval_trust,
         })),
         _ => Err("HyperHub serve returned an unexpected status response".into()),
     }

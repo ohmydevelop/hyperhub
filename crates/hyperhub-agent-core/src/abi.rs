@@ -5,6 +5,11 @@ pub const HH_ERR_INVALID: i32 = -1;
 pub const HH_ERR_NOT_INITIALIZED: i32 = -2;
 pub const HH_ERR_BUFFER_TOO_SMALL: i32 = -3;
 pub const HH_ERR_PROTOCOL: i32 = -4;
+pub const HH_ERR_ALIAS_CONFLICT: i32 = -5;
+pub const HH_ERR_NATIVE_ALIAS_UNAVAILABLE: i32 = -6;
+pub const HH_ERR_ACTIVATION_BUSY: i32 = -7;
+/// Only this flag interprets connection_id as native IPv6 scope/flow metadata.
+pub const HH_CONNECT_NATIVE_COMPAT: u16 = 1;
 pub(crate) const CONTROL_MAX_FRAME: usize = 1024 * 1024;
 
 #[repr(C)]
@@ -44,6 +49,9 @@ fn ffi_result<F>(f: F) -> i32
 where
     F: FnOnce() -> Result<i32, i32>,
 {
+    let Some(_runtime_access) = crate::runtime::sdk_access() else {
+        return HH_ERR_NOT_INITIALIZED;
+    };
     catch_unwind(AssertUnwindSafe(f))
         .unwrap_or(Err(HH_ERR_INVALID))
         .unwrap_or_else(|error| error)
@@ -128,10 +136,12 @@ pub unsafe extern "C" fn hh_agent_engine_control(
 
 #[no_mangle]
 pub extern "C" fn hh_agent_is_initialized() -> i32 {
-    state()
-        .lock()
-        .map(|core| i32::from(core.session.initialized))
-        .unwrap_or(HH_ERR_INVALID)
+    ffi_result(|| {
+        state()
+            .lock()
+            .map(|core| i32::from(core.session.initialized))
+            .map_err(|_| HH_ERR_INVALID)
+    })
 }
 
 #[no_mangle]
@@ -193,7 +203,12 @@ pub unsafe extern "C" fn hh_agent_resolve_name(
     capacity: usize,
     written: *mut usize,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
+    let _publication = crate::attachment::begin_alias_publication();
     ffi_result(|| {
+        if !_publication.admitted() {
+            return Err(HH_ERR_ACTIVATION_BUSY);
+        }
         if hostname.is_null() || output_family.is_null() || output.is_null() || written.is_null() {
             return Err(HH_ERR_INVALID);
         }
@@ -205,6 +220,9 @@ pub unsafe extern "C" fn hh_agent_resolve_name(
             6 => 6,
             _ => return Err(HH_ERR_INVALID),
         };
+        if !crate::attachment::enforcing() {
+            return Err(HH_BYPASS);
+        }
         let (endpoint, session_id, token) = {
             let core = state().lock().map_err(|_| HH_ERR_INVALID)?;
             if !core.session.initialized {
@@ -216,21 +234,60 @@ pub unsafe extern "C" fn hh_agent_resolve_name(
                 core.session.token.clone(),
             )
         };
-        let address = resolve_fake_control(&endpoint, &session_id, &token, hostname, family)?;
+        if !crate::attachment::enforcing() {
+            return Err(HH_BYPASS);
+        }
+        if crate::attachment::managed() && !crate::alias_namespace::supports_issuance() {
+            crate::native_dns::native_only_admission(hostname)?;
+            return Err(HH_BYPASS);
+        }
+        let native = crate::native_dns::prefetch(hostname, family)?;
+        native.validate_synthesis().map_err(|_| HH_BYPASS)?;
+        if !_publication.may_publish() {
+            return Err(HH_ERR_PROTOCOL);
+        }
+        let (address, issued_sequence, issued_head) = resolve_fake_control(
+            &endpoint,
+            &session_id,
+            &token,
+            hostname,
+            family as u8,
+            if crate::attachment::managed() {
+                Some(&native)
+            } else {
+                None
+            },
+        )?;
         let bytes: Vec<u8> = match address {
-            IpAddr::V4(address) => {
-                unsafe { output_family.write(4) };
-                address.octets().to_vec()
-            }
-            IpAddr::V6(address) => {
-                unsafe { output_family.write(6) };
-                address.octets().to_vec()
-            }
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
         };
         if capacity < bytes.len() {
             return Err(HH_ERR_BUFFER_TOO_SMALL);
         }
+        {
+            if !_publication.may_publish() {
+                return Err(HH_ERR_PROTOCOL);
+            }
+            let mut core = state().lock().map_err(|_| HH_ERR_PROTOCOL)?;
+            let name =
+                hyperhub_engine::normalize(&crate::engine_call::calling(&core.engine)?, hostname)
+                    .map_err(|_| HH_ERR_PROTOCOL)?;
+            if crate::attachment::managed() {
+                crate::alias_namespace::confirm_publication(
+                    &core.gateway,
+                    address,
+                    &name,
+                    &native,
+                    issued_sequence.ok_or(HH_ERR_PROTOCOL)?,
+                    issued_head.ok_or(HH_ERR_PROTOCOL)?,
+                )?;
+            } else {
+                core.gateway.issue_native_alias(address, name, native)?;
+            }
+        }
         unsafe {
+            output_family.write(if address.is_ipv4() { 4 } else { 6 });
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
             written.write(bytes.len());
         }
@@ -420,17 +477,19 @@ pub extern "C" fn hh_agent_socket_nonblocking(socket: u64) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn hh_agent_handshake_complete(socket: u64) -> i32 {
-    state()
-        .lock()
-        .ok()
-        .and_then(|core| {
-            core.gateway
-                .sockets
-                .get(&socket)
-                .map(|socket| socket.handshake_complete)
-        })
-        .map(i32::from)
-        .unwrap_or(HH_ERR_INVALID)
+    ffi_result(|| {
+        state()
+            .lock()
+            .ok()
+            .and_then(|core| {
+                core.gateway
+                    .sockets
+                    .get(&socket)
+                    .map(|socket| socket.handshake_complete)
+            })
+            .map(i32::from)
+            .ok_or(HH_ERR_INVALID)
+    })
 }
 
 #[no_mangle]

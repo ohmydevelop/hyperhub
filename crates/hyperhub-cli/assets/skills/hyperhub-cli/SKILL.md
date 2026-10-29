@@ -1,6 +1,6 @@
 ---
 name: hyperhub-cli
-description: Use for HyperHub CLI configuration and runtime operations, including show, Schema v2 RFC 6902 proposals, human approval handoff, Serve lifecycle, target-program and SSH tests, status, logs, and diagnostics. The bundled reference covers configuration fields and examples; implementation debugging is a separate workflow when the task actually requires it.
+description: Use for HyperHub CLI configuration and runtime operations, including configuration proposals, attach/detach proposals, human approval handoff, Serve lifecycle, target-program and SSH tests, status, logs, and diagnostics. The bundled references cover configuration and process attachment; implementation debugging is a separate workflow when the task actually requires it.
 ---
 
 # HyperHub CLI 操作手册
@@ -42,6 +42,7 @@ description: Use for HyperHub CLI configuration and runtime operations, includin
 | 查看运行态 | `status --json`；异常时补 `doctor` 和相关 `logs` | `read_only_report` 或诊断结论 |
 | 新增/修改/删除配置 | `show` + 配置参考相关章节，生成最小 RFC 6902 Patch，提交 `config patch` | `proposal_submitted` |
 | 修改 Secret | 使用 `${APPROVE:name}`，以 UUID 保护现有对象并提交 `config patch`；由人在审批时输入 | `proposal_submitted` |
+| 附加或卸载运行中程序 | 按[进程附加参考](references/attachments.md)确认目标身份与范围，主动提交 `attach` / `detach` 审批 | `proposal_submitted`，人工审批后核对真实执行阶段 |
 | 配置智能防护 | 参考“智能防护 Profile”“路由与智能防护绑定”“沙盒与智能防护”，确认 observe/enforce 与失败动作 | Proposal + 审批后 Provider/引用验证 |
 | 配置 SSH 审计 | 同时核对 SSH 凭证、SSH 审计 Profile、路由绑定与 transcript 语义 | Proposal + 审批后结构化事件验证 |
 | 启停 Serve | `start`、`stop`、`restart`、`status --json`；冷启动和重启使用 API Key | 实际运行态 |
@@ -56,7 +57,7 @@ description: Use for HyperHub CLI configuration and runtime operations, includin
 
 - `read_only_report`：只读取并报告，没有提交变更。
 - `needs_user_decision`：缺少必须由用户选择的语义，尚未提交变更。
-- `proposal_submitted`：已提交 Proposal，**配置尚未生效**，等待用户执行 `hyperhub approve`。
+- `proposal_submitted`：已提交 Proposal，**配置尚未生效**或运行时操作尚未执行，等待用户执行 `hyperhub approve`。
 - `approved_verified`：用户已确认审批完成，且已执行配置与运行态验证。
 - `cli_limitation`：CLI 明确拒绝或不支持请求；没有采取替代修改。
 - `runtime_tested`：已通过 `hyperhub run -- ...` 完成用户明确要求的目标程序测试，并报告实际结果。
@@ -72,6 +73,7 @@ description: Use for HyperHub CLI configuration and runtime operations, includin
 - 只读检查：配置摘要、状态、日志、诊断；
 - 配置变更：路由、凭证、审计、信任、沙盒、智能防护、环境变量；
 - Serve 生命周期：start/stop/restart/status；
+- 进程接管：对运行中目标创建 attach/detach 审批；不重启目标，不用启动替代进程代替附加；
 - 目标程序测试：必须通过 `hyperhub run -- target args...`；
 - 实现调试：用户要求根因、代码修复或实现审查，或公开操作语义不足以完成任务。
 
@@ -84,9 +86,11 @@ type -a hyperhub
 printf 'HYPERHUB_HOME=%s\n' "${HYPERHUB_HOME-}"
 ```
 
-- 使用 PATH 中的 `hyperhub`。
+- 用户没有指定二进制时使用 PATH 中的 `hyperhub`；用户指定开发版或绝对路径时，后续命令使用同一个二进制，不静默切回稳定版。
 - 用户指定 `HYPERHUB_HOME` 后，后续所有命令必须使用同一个值。
+- 交给人类执行的审批命令也必须使用已核实的 CLI 绝对路径并显式保留同一 `HYPERHUB_HOME`；不要只给裸 `hyperhub approve`，以免新终端切换到其他二进制或实例。
 - 不同 Home 是完全独立的配置、Proposal、Serve 和审计实例。
+- 开发版默认使用 `.hyperhub-dev`，Skill 安装在该实例的私有 `skills` 目录；显式使用开发版的 `hyperhub skill` 获取指引，不覆盖用户级稳定 Skill。
 - Home、远端或目标不明确时，不猜测。
 
 ### 3. 读取一次现状

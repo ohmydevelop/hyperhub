@@ -127,16 +127,33 @@ impl Stream {
         if error != ERROR_IO_PENDING {
             return Err(io::Error::from_raw_os_error(error as i32));
         }
-        let result = (|| match unsafe { WaitForSingleObject(event, self.wait_ms()?) } {
-            WAIT_OBJECT_0 => {
-                if unsafe { GetOverlappedResult(pipe, &operation, &mut transferred, 0) } != 0 {
-                    Ok(transferred as usize)
-                } else {
-                    Err(io::Error::last_os_error())
+        let result = (|| loop {
+            let wait = if self.deadline.is_none() && crate::attachment::managed() {
+                100
+            } else {
+                self.wait_ms()?
+            };
+            let waited = unsafe { WaitForSingleObject(event, wait) };
+            if waited == WAIT_TIMEOUT && self.deadline.is_none() && crate::attachment::managed() {
+                if crate::attachment::stopping_background() {
+                    break Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "attachment control retired",
+                    ));
                 }
+                continue;
             }
-            WAIT_TIMEOUT => Err(timeout()),
-            _ => Err(io::Error::last_os_error()),
+            break match waited {
+                WAIT_OBJECT_0 => {
+                    if unsafe { GetOverlappedResult(pipe, &operation, &mut transferred, 0) } != 0 {
+                        Ok(transferred as usize)
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                }
+                WAIT_TIMEOUT => Err(timeout()),
+                _ => Err(io::Error::last_os_error()),
+            };
         })();
         if result.is_err() {
             // CancelIoEx requests cancellation; it does not complete it. Drain

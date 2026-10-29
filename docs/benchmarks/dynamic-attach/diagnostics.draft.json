@@ -1,0 +1,72 @@
+{
+  "kind": "historical_diagnostic_index",
+  "formal_run_binding": null,
+  "records": [
+    {
+      "id": "r4-ptrace-cycle3-terminal-slot-race",
+      "status": "failed",
+      "observed_scope": "Two cycles completed; the next attach approval failed File exists after its resident slot reached Detached. This is preserved pre-fix diagnostic evidence, not a formal current-plan run.",
+      "evidence": [
+        {
+          "path": "target/diagnostics/attach-ptrace-100-r4/failure.json",
+          "sha256": "4dd448d6716ad529677b6bba91e96e1c3c739568bd4eb08118963509de35827d"
+        },
+        {
+          "path": "target/diagnostics/attach-ptrace-100-r4/failure-status.json",
+          "sha256": "884d31968b4e13d84bb8b6954a0d39d4aeb2718f59caa304bff7d1a87caa5dc9"
+        },
+        {
+          "path": "target/diagnostics/attach-ptrace-100-r4/approval-19.log",
+          "sha256": "87205596c159b23e8b7fb23c2ef8475bfb45a8c9afabeeb5e3a97e2b80dac1f4"
+        }
+      ]
+    },
+    {
+      "id": "r13-build-subsets-and-real-gum-tree",
+      "status": "partial_failed",
+      "observed_scope": "Five build stages succeeded with 318 unchanged inputs; Core 367 passed/1 ignored and Runtime17 passed. Default workspace retained two owned-launch timeouts; Agent Gum retained one parser-unit failure. Release-CLI-only control passed the same seven engine-host runners but is not default-debug acceptance. Yama0 guest Gum tree completed two cycles with nineteen checks. No formal current-plan run binding.",
+      "evidence": [
+        {
+          "path": "target/diagnostics/attach-candidate-r13/build.json",
+          "sha256": "4ea85a6a8f3663d2cefe20f4482708c19c9f2ce5d8c555019371bc1a09608875"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/sources.json",
+          "sha256": "f317aff0c28916550aa344e9e7fced516e68802d2b6bc616892b5f5b09fbaee3"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/test-results.json",
+          "sha256": "88d2cad069006e68773882123321afc69fcf666af5d894320999c5ef8ba7098b"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/extra-lib-tests.json",
+          "sha256": "06c15afacb80a50e3d611aea13955238f363d58ce1542ccaf78de9f0b315fa44"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/core-lib.log",
+          "sha256": "186476b3840393708ae27bc204cf40625b3d4713b33088735d71e43dcf286d92"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/runtime-lib.log",
+          "sha256": "31286050c0ec75e91e969849cea49f57a06b7583c42392567880a27d9b6d1792"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/workspace-default.log",
+          "sha256": "c87f798fd32d240ec1996b5eb185e9d7c8e47f38ecf1a6cc28cf725f5d18149e"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/agent-gum.log",
+          "sha256": "c9753504187103ff6c78762c810ad9c864f8416be26d622272140dd76091c59a"
+        },
+        {
+          "path": "target/diagnostics/attach-candidate-r13/engine-host-release-control.log",
+          "sha256": "02e1cdb45fb6b4b024c5d1d32baf570d5eee9b7abb60cd73fb9c0f5e9872b0aa"
+        },
+        {
+          "path": "target/diagnostics/gum-kvm-guest/gum-tree-r13/result.json",
+          "sha256": "f71c22898dcfbd0b2933dca7dc24a48841903224e61b9b494dd16cc154c353e8"
+        }
+      ]
+    }
+  ]
+}

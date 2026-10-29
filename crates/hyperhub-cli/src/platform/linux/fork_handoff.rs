@@ -143,6 +143,13 @@ impl State {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BrokerIdentity {
+    pub directory: PathBuf,
+    pub socket: PathBuf,
+    pub secret: [u8; 32],
+}
 pub(super) struct ForkHandoffBroker {
     directory: PathBuf,
     socket: PathBuf,
@@ -161,17 +168,119 @@ impl ForkHandoffBroker {
         ));
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let socket = directory.join("s");
-        let listener = match UnixListener::bind(&socket) {
-            Ok(listener) => listener,
-            Err(error) => {
-                let _ = std::fs::remove_dir(&directory);
-                return Err(error);
-            }
-        };
-        let mut broker = Self {
+        Self::bind(BrokerIdentity {
             directory,
             socket,
             secret: rand::random(),
+        })
+    }
+    pub fn identity(&self) -> BrokerIdentity {
+        BrokerIdentity {
+            directory: self.directory.clone(),
+            socket: self.socket.clone(),
+            secret: self.secret,
+        }
+    }
+    pub fn restore(identity: BrokerIdentity) -> io::Result<Self> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if !identity.directory.is_absolute()
+            || identity.socket != identity.directory.join("s")
+            || identity
+                .directory
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "fork recovery endpoint has an invalid private directory",
+            ));
+        }
+        match std::fs::symlink_metadata(&identity.directory) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // A graceful failed owner removes its own endpoint in Drop.
+                // Restore that exact private identity, including its secret,
+                // rather than silently assigning a new broker to old callbacks.
+                let parent = identity.directory.parent().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "fork recovery directory has no parent",
+                    )
+                })?;
+                let metadata = std::fs::symlink_metadata(parent)?;
+                let owner = unsafe { libc::geteuid() };
+                if !metadata.is_dir()
+                    || (metadata.uid() != owner && metadata.uid() != 0)
+                    || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "fork recovery parent is not an owned private or trusted sticky directory",
+                    ));
+                }
+                match std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&identity.directory)
+                {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let metadata = std::fs::symlink_metadata(&identity.directory)?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+            || identity.socket != identity.directory.join("s")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "fork recovery endpoint has incompatible ownership",
+            ));
+        }
+        match std::fs::symlink_metadata(&identity.socket) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() }
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "fork recovery endpoint is not an owned socket",
+                    ));
+                }
+                match UnixStream::connect(&identity.socket) {
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AddrInUse,
+                            "previous fork broker still has a listener",
+                        ))
+                    }
+                    Err(error)
+                        if matches!(
+                            error.raw_os_error(),
+                            Some(libc::ENOENT | libc::ECONNREFUSED)
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+                std::fs::remove_file(&identity.socket)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Self::bind(identity)
+    }
+    fn bind(identity: BrokerIdentity) -> io::Result<Self> {
+        let BrokerIdentity {
+            directory,
+            socket,
+            secret,
+        } = identity;
+        let listener = UnixListener::bind(&socket)?;
+        let mut broker = Self {
+            directory,
+            socket,
+            secret,
             state: Arc::new(Mutex::new(State::default())),
             stop: Arc::new(AtomicBool::new(false)),
             workers: Vec::new(),
@@ -293,6 +402,46 @@ impl ForkHandoffBroker {
         }
         lease.attached = true;
         Ok(())
+    }
+
+    /// Core permission must be released after retaining the child session.
+    /// Only the native return gate can then prove Core recovery has finished.
+    pub fn wait_ready(&self, lease_id: LeaseId) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| io::Error::other("fork broker poisoned"))?;
+                state.check()?;
+                let lease = state
+                    .leases
+                    .get(&lease_id)
+                    .ok_or_else(|| io::Error::other("unknown fork handoff"))?;
+                if !lease.attached {
+                    return Err(io::Error::other(
+                        "fork readiness requires a retained child session",
+                    ));
+                }
+                let child = lease
+                    .child
+                    .ok_or_else(|| io::Error::other("fork handoff has no candidate"))?;
+                if identity(child.pid)? != child {
+                    return Err(io::Error::other("fork child process identity changed"));
+                }
+                if lease.ready {
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "fork child did not complete Core recovery",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// The manager calls this only after the exact candidate completed enrollment.
@@ -459,6 +608,116 @@ mod tests {
         let mut reply = [0u8; REPLY_SIZE];
         stream.read_exact(&mut reply).unwrap();
         (reply[0], reply[1..].try_into().unwrap())
+    }
+
+    #[test]
+    fn graceful_owner_drop_can_restore_the_same_private_broker_and_capability() {
+        let broker = ForkHandoffBroker::new().unwrap();
+        let saved = broker.identity();
+        let directory = saved.directory.clone();
+        let socket = saved.socket.clone();
+        let secret = saved.secret;
+        drop(broker);
+        assert!(!directory.exists());
+        let mut restored = ForkHandoffBroker::restore(saved).unwrap();
+        assert_eq!(restored.identity().directory, directory);
+        assert_eq!(restored.identity().socket, socket);
+        assert_eq!(restored.identity().secret, secret);
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        restored.allow_parent(me().pid, me().birth).unwrap();
+        restored.secret[0] ^= 1;
+        assert_eq!(exchange(&restored, 1, [0; 32]).0, 1);
+        restored.secret = secret;
+        let (status, lease) = exchange(&restored, 1, [0; 32]);
+        assert_eq!(status, 0);
+        assert_ne!(lease, [0; 32]);
+        assert_eq!(exchange(&restored, 3, lease), (0, lease));
+        drop(restored);
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn restoring_a_live_broker_or_non_socket_collision_preserves_its_owner() {
+        let broker = ForkHandoffBroker::new().unwrap();
+        let saved = broker.identity();
+        assert_eq!(
+            ForkHandoffBroker::restore(saved).err().unwrap().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        broker.allow_parent(me().pid, me().birth).unwrap();
+        let (status, lease) = exchange(&broker, 1, [0; 32]);
+        assert_eq!(status, 0);
+        assert_eq!(exchange(&broker, 3, lease), (0, lease));
+        let saved = broker.identity();
+        drop(broker);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&saved.directory)
+            .unwrap();
+        std::fs::write(&saved.socket, b"owned fixture collision").unwrap();
+        let directory = saved.directory.clone();
+        let socket = saved.socket.clone();
+        assert_eq!(
+            ForkHandoffBroker::restore(saved).err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(std::fs::read(&socket).unwrap(), b"owned fixture collision");
+        std::fs::remove_file(socket).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_refuses_symlink_public_directory_and_invalid_socket_without_replacing_them() {
+        let broker = ForkHandoffBroker::new().unwrap();
+        let saved = broker.identity();
+        let directory = saved.directory.clone();
+        let socket = saved.socket.clone();
+        let secret = saved.secret;
+        drop(broker);
+        let invalid = BrokerIdentity {
+            directory: directory.clone(),
+            socket: directory.join("wrong"),
+            secret,
+        };
+        assert!(ForkHandoffBroker::restore(invalid).is_err());
+        assert!(!directory.exists());
+        let other = directory.with_extension("fixture-target");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&other)
+            .unwrap();
+        std::os::unix::fs::symlink(&other, &directory).unwrap();
+        assert!(ForkHandoffBroker::restore(BrokerIdentity {
+            directory: directory.clone(),
+            socket: socket.clone(),
+            secret
+        })
+        .is_err());
+        assert!(std::fs::symlink_metadata(&directory)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_dir(&other).unwrap().next().is_none());
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::remove_dir(&other).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ForkHandoffBroker::restore(saved).is_err());
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -767,6 +1026,10 @@ mod tests {
             broker.complete(lease).is_err(),
             "completion requires a retained child session"
         );
+        assert!(
+            broker.wait_ready(lease).is_err(),
+            "readiness cannot precede a retained Core child session"
+        );
         assert_eq!(exchange(&broker, 5, lease).0, 8);
         let original_child = {
             let mut state = broker.state.lock().unwrap();
@@ -794,6 +1057,13 @@ mod tests {
         broker.mark_attached(lease).unwrap();
         assert_eq!(exchange(&broker, 5, lease), (0, lease));
         assert_eq!(broker.snapshot().unwrap().pending_count, 1);
+        assert!(
+            !broker.snapshot().unwrap().candidates[0].ready,
+            "attaching does not prove recovery finished"
+        );
+        child.0.stdin.as_mut().unwrap().write_all(b"R").unwrap();
+        broker.wait_ready(lease).unwrap();
+        assert!(broker.snapshot().unwrap().candidates[0].ready);
         broker.complete(lease).unwrap();
         assert_eq!(exchange(&broker, 5, lease).0, 5);
         assert_eq!(broker.snapshot().unwrap().pending_count, 0);
@@ -848,5 +1118,15 @@ mod tests {
         std::io::stdout().flush().unwrap();
         let mut release = [0];
         std::io::stdin().read_exact(&mut release).unwrap();
+        if release[0] == b'R' {
+            let mut ready =
+                UnixStream::connect(std::env::var_os("HYPERHUB_FORK_HANDOFF_SOCKET").unwrap())
+                    .unwrap();
+            request[5] = 4;
+            ready.write_all(&request).unwrap();
+            ready.read_exact(&mut reply).unwrap();
+            assert_eq!(reply[0], 0);
+            std::io::stdin().read_exact(&mut release).unwrap();
+        }
     }
 }

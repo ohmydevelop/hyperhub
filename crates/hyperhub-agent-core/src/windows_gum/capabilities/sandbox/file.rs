@@ -30,12 +30,14 @@ struct FileSandboxPlugin {
 impl FileSandboxPlugin {
     fn new() -> Self {
         let (tx, rx) = sync_channel(256);
+        let worker = crate::attachment::background_enter();
         let audit = if cfg!(test) {
             None
         } else {
             std::thread::Builder::new()
                 .name("hyperhub-file-sandbox-audit".into())
                 .spawn(move || {
+                    let _worker = worker;
                     while let Ok(e) = rx.recv() {
                         let _ = crate::report_sandbox_audit(&e);
                     }
@@ -50,19 +52,22 @@ impl FileSandboxPlugin {
         path: Option<&str>,
         op: FileOperation,
     ) -> (crate::SandboxAction, Option<String>, String) {
-        let snapshot = crate::file_sandbox_snapshot();
-        Self::decide_with_snapshot(snapshot.as_deref(), path, op)
+        Self::decide_with_reader(&crate::file_policy_reader(), path, op)
     }
-    fn decide_with_snapshot(
-        snapshot: Option<&crate::CompiledFileSandboxSnapshot>,
+    fn decide_with_reader(
+        reader: &crate::FilePolicyReader,
         path: Option<&str>,
         op: FileOperation,
     ) -> (crate::SandboxAction, Option<String>, String) {
-        let Some(s) = snapshot else {
-            return (crate::SandboxAction::Pass, None, "disabled".into());
+        let Some(_) = reader.snapshot.as_deref() else {
+            return if reader.error_action() == crate::SandboxAction::Deny {
+                (crate::SandboxAction::Deny, None, "error".into())
+            } else {
+                (crate::SandboxAction::Pass, None, "disabled".into())
+            };
         };
         if path.is_none() {
-            return (s.error_action, None, "error".into());
+            return (reader.error_action(), None, "error".into());
         }
         let mapped = match op {
             FileOperation::Read => crate::FileSandboxOperation::Read,
@@ -71,18 +76,11 @@ impl FileSandboxPlugin {
             FileOperation::Delete => crate::FileSandboxOperation::Delete,
             FileOperation::Rename => crate::FileSandboxOperation::Rename,
         };
-        crate::file_decision_with_protection(path.unwrap_or_default(), mapped)
-    }
-    fn failure_mode(&self) -> HookFailureMode {
-        match crate::file_sandbox_snapshot() {
-            Some(snapshot) if snapshot.error_action == crate::SandboxAction::Deny => {
-                HookFailureMode::FailClosed
-            }
-            _ => HookFailureMode::FailOpen,
-        }
+        crate::file_decision_with_reader(reader, path.unwrap_or_default(), mapped)
     }
     fn audit(
         &self,
+        snapshot_version: u64,
         decision: crate::SandboxAction,
         id: Option<String>,
         source: String,
@@ -104,7 +102,7 @@ impl FileSandboxPlugin {
                 reason,
                 process_pid: unsafe { GetCurrentProcessId() },
                 process_tid: unsafe { GetCurrentThreadId() },
-                snapshot_version: crate::sandbox_version(),
+                snapshot_version,
             });
         }
     }
@@ -117,26 +115,30 @@ impl AgentHookPlugin for FileSandboxPlugin {
 pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError> {
     let p = Arc::new(FileSandboxPlugin::new());
     let cb = p.clone();
-    let provider = p.clone();
     registrar.file_operation_before_with_failure_mode_provider(
         p.id(),
         CallbackCategory::Control,
-        HookFailureMode::FailOpen,
-        move || provider.failure_mode(),
+        HookFailureMode::FailClosed,
+        move || HookFailureMode::FailClosed,
         move |c: &mut FileOperationContext| {
             let path = c.path.as_deref();
-            let (a, id, src) = cb.decide(path, c.operation);
-            if src == "error" || a == crate::SandboxAction::Deny {
-                cb.audit(
-                    a,
-                    id.clone(),
-                    src.clone(),
-                    c.operation,
-                    path.unwrap_or("<unresolved>").to_owned(),
-                    (a == crate::SandboxAction::Deny && path.is_none())
-                        .then(|| unresolved_handle_reason(c._handle)),
-                );
-            }
+            let (a, _, _) = c.reader.evaluate(|| {
+                let (a, id, src) =
+                    FileSandboxPlugin::decide_with_reader(&c.reader, path, c.operation);
+                if src == "error" || a == crate::SandboxAction::Deny {
+                    cb.audit(
+                        c.reader.version,
+                        a,
+                        id.clone(),
+                        src.clone(),
+                        c.operation,
+                        path.unwrap_or("<unresolved>").to_owned(),
+                        (a == crate::SandboxAction::Deny && path.is_none())
+                            .then(|| unresolved_handle_reason(c._handle)),
+                    );
+                }
+                (a, id, src)
+            });
             if a == crate::SandboxAction::Deny {
                 Ok(HookDecision::Deny(0xC000_0022u32 as i32))
             } else {
@@ -184,8 +186,11 @@ mod tests {
             rules: Vec::new(),
         })
         .unwrap();
-        let decision =
-            FileSandboxPlugin::decide_with_snapshot(Some(&snapshot), None, FileOperation::Read);
+        let decision = FileSandboxPlugin::decide_with_reader(
+            &crate::FilePolicyReader::from_snapshot(Some(Arc::new(snapshot)), 7),
+            None,
+            FileOperation::Read,
+        );
         assert_eq!(decision.0, crate::SandboxAction::Pass);
         assert_eq!(decision.1, None);
         assert_eq!(decision.2, "error");

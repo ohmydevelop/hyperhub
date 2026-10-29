@@ -132,6 +132,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_ldr_load_dll(
     name: *const UnicodeString,
     module: *mut HMODULE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_LDR_LOAD_DLL, LdrLoadDllFn) else {
         return STATUS_DLL_INIT_FAILED;
     };
@@ -140,11 +141,19 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_ldr_load_dll(
     if status >= 0
         && !module.is_null()
         && !(*module).is_null()
-        && is_msys_runtime_unicode(name)
-        && !crate::windows_gum::manager::complete_msys_runtime_hook_install(*module)
-        && !fork_observe_mode()
+        && (is_msys_runtime_unicode(name)
+            || (crate::attachment::externally_attached()
+                && crate::windows_gum::gum::is_posix_fork_runtime_module(*module)))
     {
-        windows_sys::Win32::System::Threading::ExitProcess(ERROR_DLL_INIT_FAILED);
+        if crate::attachment::externally_attached() {
+            crate::windows_gum::mark_external_posix_runtime_unsupported();
+        }
+        let installed = crate::windows_gum::manager::complete_msys_runtime_hook_install(*module);
+        if !installed && !crate::attachment::externally_attached() && !fork_observe_mode() {
+            // Preserve the existing owned-launcher failure contract. An
+            // external attachment never terminates a caller's live process.
+            windows_sys::Win32::System::Threading::ExitProcess(ERROR_DLL_INIT_FAILED);
+        }
     }
     status
 }
@@ -188,10 +197,12 @@ struct ForkControlContext {
 }
 
 pub(in crate::windows_gum) unsafe extern "C" fn hook_msys_fork() -> i32 {
+    let _attachment_call = crate::attachment::enter();
     run_msys_fork_export(ORIGINAL_MSYS_FORK.load(Ordering::Acquire))
 }
 
 pub(in crate::windows_gum) unsafe extern "C" fn hook_msys_vfork() -> i32 {
+    let _attachment_call = crate::attachment::enter();
     run_msys_fork_export(ORIGINAL_MSYS_VFORK.load(Ordering::Acquire))
 }
 
@@ -201,6 +212,25 @@ unsafe fn run_msys_fork_export(original: *mut c_void) -> i32 {
         return -1;
     }
     let original = std::mem::transmute::<*mut c_void, MsysForkFn>(original);
+    if crate::attachment::externally_attached() {
+        if !crate::attachment::logically_detached() {
+            // The full copied-heap, Engine and Winsock remapping protocol is
+            // not implemented. Reject before creating a lease or a child.
+            crate::windows_gum::mark_external_posix_runtime_unsupported();
+            set_msys_errno_access_denied();
+            return -1;
+        }
+        // Logical detach never enters managed child reinitialization and
+        // never invokes its ExitProcess failure branch. Full MSYS native
+        // compatibility remains a separate, unverified capability.
+        AUTHORIZED_MSYS_FORK.with(|authorized| authorized.set(true));
+        let result = original();
+        AUTHORIZED_MSYS_FORK.with(|authorized| authorized.set(false));
+        if result == 0 {
+            crate::attachment::after_fork_unmanaged_child();
+        }
+        return result;
+    }
     if INSIDE_MSYS_FORK_EXPORT.with(|inside| inside.replace(true)) {
         return original();
     }
@@ -411,6 +441,9 @@ unsafe fn set_msys_errno_access_denied() {
 }
 
 fn fork_observe_mode() -> bool {
+    if let Some(bootstrap) = crate::attachment::bootstrap() {
+        return bootstrap.observe;
+    }
     const NAME: [u16; 26] = [
         b'H' as u16,
         b'Y' as u16,
@@ -463,6 +496,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_create_process_w(
     startup: *const STARTUPINFOW,
     information: *mut PROCESS_INFORMATION,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
+    let _attachment_spawn = crate::attachment::enter_spawn();
     let Some(original) = original!(ORIGINAL_CREATE_PROCESS_W, CreateProcessWFn) else {
         SetLastError(ERROR_DLL_INIT_FAILED);
         return 0;
@@ -519,6 +554,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_create_process_a(
     startup: *const STARTUPINFOA,
     information: *mut PROCESS_INFORMATION,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
+    let _attachment_spawn = crate::attachment::enter_spawn();
     let Some(original) = original!(ORIGINAL_CREATE_PROCESS_A, CreateProcessAFn) else {
         SetLastError(ERROR_DLL_INIT_FAILED);
         return 0;
@@ -560,6 +597,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_create_process_interna
     information: *mut PROCESS_INFORMATION,
     new_token: *mut HANDLE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
+    let _attachment_spawn = crate::attachment::enter_spawn();
     let Some(original) = original!(ORIGINAL_CREATE_PROCESS_INTERNAL_W, CreateProcessInternalWFn)
     else {
         SetLastError(ERROR_DLL_INIT_FAILED);
@@ -619,6 +658,7 @@ unsafe fn remember_msys_fork_child_pid(result: i32, information: *mut PROCESS_IN
 }
 
 unsafe fn is_msys_fork_w(command_line: *const u16, startup: *const STARTUPINFOW) -> bool {
+    let _error = crate::engine_call::WindowsLastErrorGuard::capture();
     if command_line.is_null() || startup.is_null() {
         return false;
     }
@@ -728,6 +768,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_create_process_interna
     information: *mut PROCESS_INFORMATION,
     new_token: *mut HANDLE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
+    let _attachment_spawn = crate::attachment::enter_spawn();
     let Some(original) = original!(ORIGINAL_CREATE_PROCESS_INTERNAL_A, CreateProcessInternalAFn)
     else {
         SetLastError(ERROR_DLL_INIT_FAILED);
@@ -858,6 +900,103 @@ fn first_command_line_token(value: &str) -> Option<String> {
     Some(value.split_whitespace().next()?.to_owned())
 }
 
+#[cfg(test)]
+mod external_posix_capability_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    static ORIGINAL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn native_fork_stub() -> i32 {
+        ORIGINAL_CALLS.fetch_add(1, Ordering::SeqCst);
+        SetLastError(19);
+        123
+    }
+    unsafe extern "system" fn native_loader_stub(
+        _search: *const u16,
+        _flags: *const u32,
+        _name: *const UnicodeString,
+        module: *mut HMODULE,
+    ) -> i32 {
+        unsafe { *module = 1usize as HMODULE };
+        0x1234
+    }
+
+    #[test]
+    fn external_posix_fork_gate_precedes_native_call_and_detach_skips_rebuild() {
+        const NAME: &str = "external_posix_fork_gate_precedes_native_call_and_detach_skips_rebuild";
+        if std::env::var("HH_TEST_EXTERNAL_POSIX_GATE").as_deref() != Ok("child") {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(format!(
+                    "windows_gum::adapters::process::external_posix_capability_tests::{NAME}"
+                ))
+                .arg("--nocapture")
+                .env("HH_TEST_EXTERNAL_POSIX_GATE", "child")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while child.try_wait().unwrap().is_none() {
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("isolated external POSIX capability test exceeded its deadline");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let result = child.wait_with_output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let boot: hyperhub_runtime::attachment::Bootstrap = serde_json::from_value(serde_json::json!({
+            "external_attachment":true,"attachment_id":"private-capability-fixture","session_id":"private-session",
+            "token":"t".repeat(64),"control_endpoint":"unused","socks_address":"127.0.0.1:1",
+            "tls_ca_pem":"-----BEGIN CERTIFICATE-----fixture","observe":false,
+            "host_endpoint":"unused","host_token":"h".repeat(64),"scope_tree":true,"root_pid":std::process::id(),
+            "approval_authority_file":"unused","approval_instance_id":"private-instance",
+            "approval_core_pid":0,"approval_core_birth":0,"approval_cli_sha256":"c".repeat(64)
+        })).unwrap();
+        crate::attachment::initialize_rebuilt(&boot).unwrap();
+        crate::attachment::mark_native_ready().unwrap();
+        assert!(crate::attachment::native_ready());
+        crate::windows_gum::manager::fail_msys_runtime_hook_install_for_test();
+        ORIGINAL_LDR_LOAD_DLL.store(
+            native_loader_stub as *const () as *mut c_void,
+            Ordering::Release,
+        );
+        let runtime_name = "msys-2.0.dll".encode_utf16().collect::<Vec<_>>();
+        let name = UnicodeString {
+            length: (runtime_name.len() * 2) as u16,
+            _maximum_length: (runtime_name.len() * 2) as u16,
+            buffer: runtime_name.as_ptr(),
+        };
+        let mut module = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { hook_ldr_load_dll(std::ptr::null(), std::ptr::null(), &name, &mut module) },
+            0x1234
+        );
+        assert_eq!(module, 1usize as HMODULE);
+        let result = unsafe { run_msys_fork_export(native_fork_stub as *const () as *mut c_void) };
+        assert_eq!(result, -1);
+        assert_eq!(ORIGINAL_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(unsafe { GetLastError() }, ERROR_ACCESS_DENIED);
+        assert!(!crate::attachment::native_ready());
+        assert!(crate::attachment::status()
+            .compatibility_reasons
+            .iter()
+            .any(|reason| reason == "external_posix_runtime_fork_unsupported"));
+        crate::attachment::after_fork_unmanaged_child();
+        let result = unsafe { run_msys_fork_export(native_fork_stub as *const () as *mut c_void) };
+        assert_eq!(result, 123);
+        assert_eq!(ORIGINAL_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(unsafe { GetLastError() }, 19);
+    }
+}
+
 pub(in crate::windows_gum) unsafe fn intercept_child_creation(
     creation_flags: u32,
     environment: *const c_void,
@@ -866,6 +1005,7 @@ pub(in crate::windows_gum) unsafe fn intercept_child_creation(
     command_line: Option<String>,
     call_original: impl FnOnce(&mut ChildProcessContext) -> i32,
 ) -> i32 {
+    let entry_error = GetLastError();
     if information.is_null() || INSIDE_HOOK.with(Cell::get) {
         let mut context = ChildProcessContext::new(
             creation_flags,
@@ -893,13 +1033,16 @@ pub(in crate::windows_gum) unsafe fn intercept_child_creation(
         executable,
         command_line,
     ));
-    runtime().process_create.dispatch(
+    let mut original_outcome = None;
+    let result = runtime().process_create.dispatch(
         &mut context,
         |context| {
             let ProcessCreateContext::Win32(context) = context else {
                 unreachable!("Win32 child adapter changed context variant")
             };
+            SetLastError(entry_error);
             context.result = call_original(context);
+            original_outcome = Some((context.result, GetLastError()));
             context.result
         },
         |context, current, _| {
@@ -908,7 +1051,16 @@ pub(in crate::windows_gum) unsafe fn intercept_child_creation(
             };
             deny_child_process_callback(context, current.copied())
         },
-    )
+    );
+    let error = match original_outcome {
+        Some((original, error)) if (original != 0) == (result != 0) => error,
+        _ => GetLastError(),
+    };
+    // Context cleanup can close a ready-event handle. Restore only afterward;
+    // HookGuard's own Drop already preserves the selected application error.
+    drop(context);
+    SetLastError(error);
+    result
 }
 
 pub(in crate::windows_gum) unsafe fn deny_child_process_callback(
@@ -938,6 +1090,9 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_user_process
     create_info: *mut c_void,
     attribute_list: *const c_void,
 ) -> i32 {
+    let entry_error = GetLastError();
+    let _attachment_call = crate::attachment::enter();
+    let _attachment_spawn = crate::attachment::enter_spawn();
     let Some(original) = original!(ORIGINAL_NT_CREATE_USER_PROCESS, NtCreateUserProcessFn) else {
         return STATUS_DLL_INIT_FAILED;
     };
@@ -984,12 +1139,14 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_user_process
         rule_id: None,
         decision_source: "unknown".into(),
     });
-    runtime().process_create.dispatch(
+    let mut original_outcome = None;
+    let result = runtime().process_create.dispatch(
         &mut context,
         |context| {
             let ProcessCreateContext::Native(context) = context else {
                 unreachable!("native child adapter changed context variant")
             };
+            SetLastError(entry_error);
             context.result = original(
                 context.process_handle,
                 context.thread_handle,
@@ -1003,6 +1160,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_user_process
                 create_info,
                 attribute_list,
             );
+            original_outcome = Some((context.result, GetLastError()));
             context.result
         },
         |context, current, _| {
@@ -1011,7 +1169,14 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_user_process
             };
             deny_native_child_process_callback(context, current.copied())
         },
-    )
+    );
+    let error = match original_outcome {
+        Some((original, error)) if (original >= 0) == (result >= 0) => error,
+        _ => GetLastError(),
+    };
+    drop(context);
+    SetLastError(error);
+    result
 }
 
 pub(in crate::windows_gum) unsafe fn deny_native_child_process_callback(

@@ -1,0 +1,66 @@
+diff --git a/glib/gwakeup.c b/glib/gwakeup.c
+index 2528ac0..5470253 100644
+--- a/glib/gwakeup.c
++++ b/glib/gwakeup.c
+@@ -316,6 +316,23 @@ g_wakeup_free (GWakeup *wakeup)
+ #   error Please implement for your architecture
+ #  endif
+ # endif
++# ifndef __NR_eventfd2
++#  if defined (__i386__)
++#   define __NR_eventfd2 328
++#  elif defined (__x86_64__)
++#   define __NR_eventfd2 290
++#  elif defined (__arm__)
++#   define __NR_eventfd2 (__NR_SYSCALL_BASE + 356)
++#  elif defined (__mips__)
++#   if _MIPS_SIM == _MIPS_SIM_ABI32
++#    define __NR_eventfd2 4325
++#   elif _MIPS_SIM == _MIPS_SIM_ABI64
++#    define __NR_eventfd2 5284
++#   elif _MIPS_SIM == _MIPS_SIM_NABI32
++#    define __NR_eventfd2 6288
++#   endif
++#  endif
++# endif
+ # ifndef EFD_CLOEXEC
+ #  define EFD_CLOEXEC 0x80000
+ # endif
+@@ -495,7 +512,36 @@ static int
+ g_try_eventfd (unsigned int count,
+                int flags)
+ {
+-  return syscall (__NR_eventfd, count, flags);
++  int fd, value, saved_errno;
++
++  fd = syscall (__NR_eventfd2, count, flags);
++  if (fd != -1 || errno != ENOSYS)
++    return fd;
++
++  fd = syscall (__NR_eventfd, count);
++  if (fd == -1)
++    return -1;
++
++  if ((flags & EFD_CLOEXEC) != 0)
++    {
++      value = fcntl (fd, F_GETFD);
++      if (value == -1 || fcntl (fd, F_SETFD, value | FD_CLOEXEC) == -1)
++        goto error;
++    }
++  if ((flags & EFD_NONBLOCK) != 0)
++    {
++      value = fcntl (fd, F_GETFL);
++      if (value == -1 || fcntl (fd, F_SETFL, value | O_NONBLOCK) == -1)
++        goto error;
++    }
++
++  return fd;
++
++error:
++  saved_errno = errno;
++  close (fd);
++  errno = saved_errno;
++  return -1;
+ }
+ 
+ #endif

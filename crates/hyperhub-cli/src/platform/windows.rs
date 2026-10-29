@@ -1,23 +1,25 @@
+mod attachment;
+pub(super) use attachment::validate_external_runtime;
+pub use attachment::{
+    detach_attachment, inspect_attachment_target, reattach_attachment, run_attachment_manager,
+    run_attachment_recovery, run_owned_attachment_manager,
+};
 use std::collections::BTreeMap;
 use std::ffi::{c_void, OsStr, OsString};
 use std::io::IsTerminal;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::ptr::{null, null_mut};
+use std::ptr::null;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
-use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
-use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-use windows_sys::Win32::System::Memory::{
-    VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
-};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateProcessW, CreateRemoteThread, GetExitCodeProcess, GetExitCodeThread,
-    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED,
-    CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateEventW, CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess,
+    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE,
+    PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
@@ -364,6 +366,7 @@ where
             return Err(last_error("cannot resume target main thread"));
         }
         process.resumed = true;
+        process.finished = true;
         if WaitForSingleObject(process.process.0, INFINITE) == WAIT_FAILED {
             return Err(last_error("waiting for target process failed"));
         }
@@ -375,84 +378,92 @@ where
         return Ok(status as i32);
     }
 
-    let library = wide_null(runtime.as_os_str())?;
-    let byte_count = library.len() * std::mem::size_of::<u16>();
-    let remote = VirtualAllocEx(
+    let owned_execution = crate::attachment::owned_run_execution(env)?;
+
+    // Toolhelp cannot enumerate modules while a newly-created process remains
+    // at CREATE_SUSPENDED. Let the Windows loader initialize, but hold the
+    // primary thread on the original executable entrypoint until protection,
+    // durable recovery state, and the owned keeper are all ready.
+    let gate = match hyperhub_runtime::attachment::windows_inject::hold_suspended_process_at_entry(
         process.process.0,
-        null(),
-        byte_count,
-        MEM_RESERVE | MEM_COMMIT,
-        PAGE_READWRITE,
-    );
-    if remote.is_null() {
-        return Err(last_error("cannot allocate agent path in target process"));
-    }
-    let remote = RemoteMemory {
-        process: process.process.0,
-        address: remote,
+        process.thread.0,
+        Path::new(target),
+        Duration::from_secs(30),
+    ) {
+        Ok(gate) => gate,
+        Err(error) => {
+            let error = error.to_string();
+            if let Some(execution) = owned_execution.as_ref() {
+                return Err(process.fail_owned_pre_entry(execution, &error));
+            }
+            return Err(error);
+        }
     };
-    if WriteProcessMemory(
-        process.process.0,
-        remote.address,
-        library.as_ptr().cast::<c_void>(),
-        byte_count,
-        null_mut(),
-    ) == 0
-    {
-        return Err(last_error("cannot write agent path into target process"));
+
+    if let Some(execution) = owned_execution {
+        let keeper = match attachment::start_owned_reversible(&execution, runtime) {
+            Ok(keeper) => keeper,
+            Err(error) => return Err(process.fail_owned_pre_entry(&execution, &error)),
+        };
+        if let Err(error) = gate.release() {
+            drop(keeper);
+            return Err(process.fail_owned_pre_entry(&execution, &error.to_string()));
+        }
+        process.resumed = true;
+        process.finished = true;
+        if let Err(error) = keeper.release_after_entry() {
+            eprintln!(
+                "hyperhub: target entry was released with protection ready, but keeper activation is pending: {error}"
+            );
+        }
+        if WaitForSingleObject(process.process.0, INFINITE) == WAIT_FAILED {
+            return Err(last_error("waiting for reversible target failed"));
+        }
+        let mut status = 0;
+        if GetExitCodeProcess(process.process.0, &mut status) == 0 {
+            return Err(last_error("cannot read reversible target exit status"));
+        }
+        return Ok(status as i32);
     }
 
-    let kernel32 = wide_null(OsStr::new("kernel32.dll"))?;
-    let kernel = GetModuleHandleW(kernel32.as_ptr());
-    if kernel.is_null() {
-        return Err(last_error("cannot locate kernel32.dll"));
-    }
-    let load_library = GetProcAddress(kernel, b"LoadLibraryW\0".as_ptr());
-    let Some(load_library) = load_library else {
-        return Err(last_error("cannot locate LoadLibraryW"));
-    };
-    let start_routine = std::mem::transmute(load_library);
-    let remote_thread = CreateRemoteThread(
+    let module = hyperhub_runtime::attachment::windows_inject::load(
         process.process.0,
-        null(),
-        0,
-        Some(start_routine),
-        remote.address,
-        0,
-        null_mut(),
-    );
-    if remote_thread.is_null() {
-        return Err(last_error("cannot start agent loader in target process"));
-    }
-    let remote_thread = OwnedHandle(remote_thread);
-    if WaitForSingleObject(remote_thread.0, INFINITE) == WAIT_FAILED {
-        return Err(last_error("waiting for agent loader failed"));
-    }
-    let mut loader_status = 0;
-    if GetExitCodeThread(remote_thread.0, &mut loader_status) == 0 {
-        return Err(last_error("cannot read agent loader status"));
+        info.dwProcessId,
+        runtime,
+    )
+    .map_err(|error| error.to_string())?;
+    let entry = module
+        .base
+        .checked_add(
+            hyperhub_runtime::attachment::windows_inject::export_rva(
+                runtime,
+                "hyperhub_agent_legacy_start",
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .ok_or("legacy initialization address overflow")?;
+    let status = hyperhub_runtime::attachment::windows_inject::call(process.process.0, entry, &[0])
+        .map_err(|error| error.to_string())?;
+    if status != 0 {
+        return Err(format!(
+            "explicit legacy Agent initialization failed: 0x{status:08x}"
+        ));
     }
     match WaitForSingleObject(loaded_event, 5_000) {
-        WAIT_OBJECT_0 => {}
-        WAIT_TIMEOUT => {
-            return Err(format!("agent DLL did not report initialization before timeout (loader_status=0x{loader_status:08x})"));
-        }
-        WAIT_FAILED => return Err(last_error("waiting for Gum Agent loaded event failed")),
-        status => return Err(format!("unexpected Gum Agent loaded wait status {status}")),
+        WAIT_OBJECT_0 => (),
+        WAIT_TIMEOUT => return Err("explicit Agent did not acknowledge loaded state".into()),
+        _ => return Err(last_error("cannot confirm explicit Agent loaded state")),
     }
-    drop(remote);
-    drop(remote_thread);
 
-    if ResumeThread(process.thread.0) == u32::MAX {
-        return Err(last_error("cannot resume target main thread"));
-    }
-    process.resumed = true;
     match WaitForSingleObject(ready_event, 30_000) {
         WAIT_OBJECT_0 => {}
         WAIT_TIMEOUT => return Err("timed out waiting for Gum Agent hooks to become ready".into()),
         WAIT_FAILED => return Err(last_error("waiting for Gum Agent ready event failed")),
         status => return Err(format!("unexpected Gum Agent ready wait status {status}")),
     }
+    gate.release().map_err(|error| error.to_string())?;
+    process.resumed = true;
+    process.finished = true;
     if WaitForSingleObject(process.process.0, INFINITE) == WAIT_FAILED {
         return Err(last_error("waiting for target process failed"));
     }
@@ -512,7 +523,11 @@ fn build_environment_block(overrides: &[(OsString, OsString)]) -> Result<Vec<u16
     let mut variables: BTreeMap<String, (OsString, OsString)> = BTreeMap::new();
     for (key, value) in std::env::vars_os().chain(overrides.iter().cloned()) {
         let normalized = key.to_string_lossy().to_uppercase();
-        if normalized == "HYPERHUB_CONFIG_PASSWORD" || normalized.starts_with('=') {
+        if matches!(
+            normalized.as_str(),
+            "HYPERHUB_CONFIG_PASSWORD" | "HYPERHUB_ATTACHMENT_DIAGNOSTICS"
+        ) || normalized.starts_with('=')
+        {
             // `=C:` 等是 Windows 隐藏的驱动器当前目录变量，不属于子进程环境。
             continue;
         }
@@ -577,6 +592,49 @@ impl SuspendedProcess {
             finished: false,
         }
     }
+
+    unsafe fn terminate_and_confirm(&mut self) -> Result<(), String> {
+        if unsafe { TerminateProcess(self.process.0, 1) } == 0 {
+            let terminate_error = last_error("cannot terminate failed pre-entry target");
+            if unsafe { WaitForSingleObject(self.process.0, 0) } == WAIT_OBJECT_0 {
+                self.finished = true;
+                return Ok(());
+            }
+            return Err(terminate_error);
+        }
+        match unsafe { WaitForSingleObject(self.process.0, 5_000) } {
+            WAIT_OBJECT_0 => {
+                self.finished = true;
+                Ok(())
+            }
+            WAIT_TIMEOUT => {
+                Err("failed pre-entry target did not terminate within 5 seconds".into())
+            }
+            WAIT_FAILED => Err(last_error("waiting for failed pre-entry target failed")),
+            status => Err(format!(
+                "unexpected failed pre-entry target wait status {status}"
+            )),
+        }
+    }
+
+    unsafe fn fail_owned_pre_entry(
+        &mut self,
+        execution: &hyperhub_core::attachments::Execution,
+        error: &str,
+    ) -> String {
+        match unsafe { self.terminate_and_confirm() } {
+            Ok(()) => match crate::attachment::record_owned_run_pre_entry_failure(execution, error)
+            {
+                Ok(()) => error.to_owned(),
+                Err(record_error) => {
+                    format!("{error}; target terminated but failure state was not persisted: {record_error}")
+                }
+            },
+            Err(termination_error) => {
+                format!("{error}; pre-entry target termination is unconfirmed: {termination_error}")
+            }
+        }
+    }
 }
 
 impl Drop for SuspendedProcess {
@@ -588,19 +646,6 @@ impl Drop for SuspendedProcess {
                     WaitForSingleObject(self.process.0, 5_000);
                 }
             }
-        }
-    }
-}
-
-struct RemoteMemory {
-    process: HANDLE,
-    address: *mut c_void,
-}
-
-impl Drop for RemoteMemory {
-    fn drop(&mut self) {
-        unsafe {
-            VirtualFreeEx(self.process, self.address, 0, MEM_RELEASE);
         }
     }
 }
@@ -734,5 +779,25 @@ mod tests {
         let text = String::from_utf16_lossy(&block);
         assert!(!text.contains("=C:=C:"));
         assert!(!text.contains("=D:=D:"));
+    }
+    #[test]
+    fn cli_attachment_diagnostics_do_not_enter_the_target_environment() {
+        let block = build_environment_block(&[
+            (
+                OsString::from("hyperhub_attachment_diagnostics"),
+                OsString::from("dummy-cli-only"),
+            ),
+            (
+                OsString::from("HYPERHUB_FIXTURE_BUSINESS_VALUE"),
+                OsString::from("retained"),
+            ),
+        ])
+        .unwrap();
+        let text = String::from_utf16_lossy(&block);
+        assert!(!text
+            .to_ascii_uppercase()
+            .contains("HYPERHUB_ATTACHMENT_DIAGNOSTICS="));
+        assert!(!text.contains("dummy-cli-only"));
+        assert!(text.contains("HYPERHUB_FIXTURE_BUSINESS_VALUE=retained"));
     }
 }

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/torvalds/linux",
+  "revision": "c9c3395d5e3dcc6daee66c6908354d47bf98cb0c",
+  "version": "v6.2",
+  "directory": "tools/include/nolibc",
+  "headers": {
+    "arch-aarch64.h": "b8ae3003f6964e9a43ecf357f176b6c986eef3ebbce67bddd3476c48c7a5dce0",
+    "arch-arm.h": "9aea6d4abe2c20c7007d998dabfe83907e2332f1d7af1b2f0cda84640a072259",
+    "arch-i386.h": "d4d88cce2feab1421f9220cdc6b6e8273026c8fc83ae564bda9ee34513dd46e6",
+    "arch-mips.h": "4fb6d6c456b4fda8604deea8e0551549679c3004576c29e129aac089205f4417",
+    "arch-riscv.h": "ec6540bed09f8354de98e6fe8c942e1fce1bdf662209fc043bae7e4a7f8a568f",
+    "arch-x86_64.h": "bb7937e6403ad46a731beedc9068eb26eb19c7064c175600703dd31e0c5dc0c1",
+    "arch.h": "0dd02044f8f4d15a8c801a3c667090a4d5084d1329e191ac830f7c3cf5472bf3",
+    "ctype.h": "fdea9fd64d88fd4af22868ee9453d2668794c2cb2dd1188b5ea1d385d74f7341",
+    "errno.h": "2b23dcb64302e2994394a3696813143e73b946e9490e1a5f3ac558ac8fe5a7b9",
+    "nolibc.h": "ff40a0390137346f1ed99d11d74f777253ae5489ff1d1d2518545e8eb3c380a5",
+    "signal.h": "ecaafa4657ba64df35acc0ca4b387b268b290cf3bfb39d1c46d7f2bbbb5f2514",
+    "std.h": "6fee71731a4e986df4e7127828ffbde493503d88514a7e1816f5d209633e6452",
+    "stdio.h": "98d392dfae167cf80a8d0c3f4ae99f9de66aa36a826e341f8ea3258b6776ff77",
+    "stdlib.h": "ce25ddf1ca37569ef03c612a14da78db9a1bb414d5a0254e5c0ddc2c115975ee",
+    "string.h": "6654f797b202033002b5861b9b38c0f06d1abe2f1305f8b731179f9780b8bc39",
+    "sys.h": "509e86d0107d99730c9da0ab034273941978f299ea59ade142f95fec596b9c88",
+    "time.h": "7666692bcd126f10292310e19b9732523036c01f1b5e8c0fcd7b71ff1d1f5dee",
+    "types.h": "67b88e171b10149080ddf5977f1244fe000d3020ec083e04c51af38428df625b",
+    "unistd.h": "fa3b6f65f598225741d47bd9a74226666326200d8c95852a88c15a7a96f12f4a"
+  },
+  "tweaks_sha256": "3d73f3e21abc47d89786942fbc4e2567a751c9d9db2ad1ad21800cd4f2533782",
+  "compatibility_patch_sha256": "1d277ff44f0c7d5f2d4e66273c1bfc2188b6e0969a73da6f32f203a93bd1d15d",
+  "license": "LGPL-2.1 OR MIT"
+}

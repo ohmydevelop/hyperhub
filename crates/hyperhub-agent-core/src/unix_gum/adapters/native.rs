@@ -9,14 +9,15 @@ use libc::{
 use std::cell::Cell;
 use std::ffi::{CStr, CString, OsStr};
 use std::mem::size_of;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Once, OnceLock};
 
 thread_local! { static INSIDE_HOOK: Cell<bool> = const { Cell::new(false) }; }
 
-static HOOK_HITS: [AtomicU64; 42] = [const { AtomicU64::new(0) }; 42];
+static HOOK_HITS: [AtomicU64; 44] = [const { AtomicU64::new(0) }; 44];
 static HOOK_REPORT_ENABLED: AtomicBool = AtomicBool::new(false);
 static INSTALL_HOOK_REPORT: Once = Once::new();
 
@@ -39,6 +40,8 @@ const HOOK_REPORT_NAMES: &[(usize, &str)] = &[
     (18, "file.rename"),
     (19, "file.renameat"),
     (20, "process.execve"),
+    (42, "process.fexecve"),
+    (43, "process.execveat"),
     (21, "process.posix_spawn"),
     (22, "process.posix_spawnp"),
     (23, "file.mmap"),
@@ -209,6 +212,9 @@ extern "C" fn write_hook_report() {
 // policy decisions fail without entering copied locks; existing raw FD IO stays
 // available. The early native fork listener opens only Frida's recovery scope.
 unsafe fn child_policy_denied() -> bool {
+    if crate::attachment::managed() && !crate::attachment::local_owner() {
+        return false;
+    }
     if super::super::fork::new_policy_blocked() {
         *libc::__errno_location() = libc::EACCES;
         true
@@ -219,10 +225,15 @@ unsafe fn child_policy_denied() -> bool {
 
 pub(in crate::unix_gum) struct HookGuard {
     _engine: Option<crate::engine_call::EngineCallGuard>,
+    _attachment: crate::attachment::CallGuard,
 }
 impl HookGuard {
     pub(in crate::unix_gum) fn enter() -> Option<Self> {
-        if super::super::fork::awaiting_rebuild() || crate::engine_call::host_background() {
+        if (crate::attachment::managed() && !crate::attachment::local_owner())
+            || !crate::attachment::startup::runtime_available()
+            || super::super::fork::awaiting_rebuild()
+            || crate::engine_call::host_background()
+        {
             return None;
         }
         INSIDE_HOOK.with(|inside| {
@@ -235,6 +246,7 @@ impl HookGuard {
                 } else {
                     Some(Self {
                         _engine: crate::engine_call::EngineCallGuard::enter(),
+                        _attachment: crate::attachment::enter(),
                     })
                 }
             }
@@ -264,7 +276,13 @@ pub(crate) fn warm_originals() {
     let _ = unlink_fn();
     let _ = rename_fn();
     let _ = execve_fn();
+    let _ = fexecve_fn();
+    if gum::original("execveat").is_some() {
+        let _ = execveat_fn();
+    }
     let _ = mmap_fn();
+    let _ = mprotect_fn();
+    let _ = munmap_fn();
     let _ = readv_fn();
     let _ = writev_fn();
     let _ = pread_fn();
@@ -339,12 +357,195 @@ fn free_fn() -> FreeAddrInfoFn {
     *F.get_or_init(|| symbol(c"freeaddrinfo"))
 }
 
+/// Called only after the DNS-stage policy accepts the original lookup. Resolve
+/// before publishing a synthetic alias, never from a later connect operation.
+pub(in crate::unix_gum) fn resolve_native_addresses(
+    hostname: &str,
+    family: u32,
+) -> Result<Vec<crate::NativeDnsAddress>, i32> {
+    let hostname = CString::new(hostname).map_err(|_| crate::HH_ERR_INVALID)?;
+    let native_family = match family {
+        0 => libc::AF_UNSPEC,
+        4 => AF_INET,
+        6 => AF_INET6,
+        _ => return Err(crate::HH_ERR_INVALID),
+    };
+    crate::engine_call::background(|| unsafe {
+        struct PreserveErrno(c_int);
+        impl Drop for PreserveErrno {
+            fn drop(&mut self) {
+                unsafe { *libc::__errno_location() = self.0 };
+            }
+        }
+        let _errno = PreserveErrno(*libc::__errno_location());
+        let mut hints: addrinfo = std::mem::zeroed();
+        hints.ai_family = native_family;
+        hints.ai_socktype = libc::SOCK_STREAM;
+        let mut result = std::ptr::null_mut();
+        let status = gai_fn()(hostname.as_ptr(), std::ptr::null(), &hints, &mut result);
+        if status != 0 {
+            return Err(status);
+        }
+        let mut addresses = Vec::new();
+        let mut cursor = result;
+        while !cursor.is_null() {
+            let entry = &*cursor;
+            if !entry.ai_addr.is_null() {
+                let address = match entry.ai_family {
+                    AF_INET if entry.ai_addrlen as usize >= size_of::<sockaddr_in>() => {
+                        let address = &*(entry.ai_addr as *const sockaddr_in);
+                        Some(crate::NativeDnsAddress {
+                            ip: IpAddr::V4(Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr))),
+                            scope_id: 0,
+                            flowinfo: 0,
+                        })
+                    }
+                    AF_INET6 if entry.ai_addrlen as usize >= size_of::<sockaddr_in6>() => {
+                        let address = &*(entry.ai_addr as *const sockaddr_in6);
+                        Some(crate::NativeDnsAddress {
+                            ip: IpAddr::V6(Ipv6Addr::from(address.sin6_addr.s6_addr)),
+                            scope_id: address.sin6_scope_id,
+                            flowinfo: address.sin6_flowinfo,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(address) = address {
+                    addresses.push(address);
+                }
+            }
+            cursor = entry.ai_next;
+        }
+        if !result.is_null() {
+            free_fn()(result);
+        }
+        Ok(addresses)
+    })
+}
+
+unsafe fn connect_plan(original: ConnectFn, fd: c_int, plan: &crate::HhConnectPlan) -> c_int {
+    let mut destination: sockaddr_storage = std::mem::zeroed();
+    if plan.proxy_family == AF_INET {
+        let target = &mut *(&mut destination as *mut _ as *mut sockaddr_in);
+        target.sin_family = AF_INET as u16;
+        target.sin_port = plan.proxy_port.to_be();
+        target.sin_addr.s_addr = u32::from_ne_bytes(plan.proxy_address[..4].try_into().unwrap());
+        original(
+            fd,
+            &destination as *const _ as *const sockaddr,
+            size_of::<sockaddr_in>() as socklen_t,
+        )
+    } else {
+        let target = &mut *(&mut destination as *mut _ as *mut sockaddr_in6);
+        target.sin6_family = AF_INET6 as u16;
+        target.sin6_port = plan.proxy_port.to_be();
+        target.sin6_addr.s6_addr = plan.proxy_address;
+        if plan.reserved & crate::HH_CONNECT_NATIVE_COMPAT != 0 {
+            target.sin6_scope_id = plan.connection_id as u32;
+            target.sin6_flowinfo = (plan.connection_id >> 32) as u32;
+        }
+        original(
+            fd,
+            &destination as *const _ as *const sockaddr,
+            size_of::<sockaddr_in6>() as socklen_t,
+        )
+    }
+}
+
+unsafe fn unmanaged_connect(
+    original: ConnectFn,
+    fd: c_int,
+    address: *const sockaddr,
+    length: socklen_t,
+) -> c_int {
+    if address.is_null() || (length as usize) < size_of::<libc::sa_family_t>() {
+        return original(fd, address, length);
+    }
+    let saved_errno = *libc::__errno_location();
+    let mut native: sockaddr_storage = std::mem::zeroed();
+    let count = (length as usize).min(size_of::<sockaddr_storage>());
+    let local = libc::iovec {
+        iov_base: (&mut native as *mut sockaddr_storage).cast(),
+        iov_len: count,
+    };
+    let remote = libc::iovec {
+        iov_base: address.cast_mut().cast(),
+        iov_len: count,
+    };
+    let copied = libc::syscall(
+        libc::SYS_process_vm_readv,
+        libc::getpid(),
+        &local,
+        1usize,
+        &remote,
+        1usize,
+        0usize,
+    );
+    *libc::__errno_location() = saved_errno;
+    if copied != count as libc::c_long {
+        return original(fd, address, length);
+    }
+    // Let the kernel preserve native bad-fd/not-a-socket error precedence,
+    // including when the supplied destination is an ambiguous known alias.
+    let mut socket_type: c_int = 0;
+    let mut socket_size = size_of::<c_int>() as socklen_t;
+    let socket_ok = libc::syscall(
+        libc::SYS_getsockopt,
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_TYPE,
+        &mut socket_type,
+        &mut socket_size,
+    ) == 0;
+    *libc::__errno_location() = saved_errno;
+    if !socket_ok {
+        return original(fd, address, length);
+    }
+    let (ip, port) = match native.ss_family as c_int {
+        AF_INET if length as usize >= size_of::<sockaddr_in>() => {
+            let a = &*((&native as *const sockaddr_storage).cast::<sockaddr_in>());
+            (
+                IpAddr::V4(Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr))),
+                u16::from_be(a.sin_port),
+            )
+        }
+        AF_INET6 if length as usize >= size_of::<sockaddr_in6>() => {
+            let a = &*((&native as *const sockaddr_storage).cast::<sockaddr_in6>());
+            (
+                IpAddr::V6(Ipv6Addr::from(a.sin6_addr.s6_addr)),
+                u16::from_be(a.sin6_port),
+            )
+        }
+        _ => return original(fd, address, length),
+    };
+    match super::super::fork::native_alias_plan(ip, port) {
+        Ok(Some(plan)) => connect_plan(original, fd, &plan),
+        Ok(None) => original(fd, address, length),
+        Err(code) => {
+            *libc::__errno_location() = if code == crate::HH_ERR_NATIVE_ALIAS_UNAVAILABLE {
+                libc::EHOSTUNREACH
+            } else {
+                libc::EACCES
+            };
+            -1
+        }
+    }
+}
+
 pub unsafe extern "C" fn connect(fd: c_int, address: *const sockaddr, length: socklen_t) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
     hook_hit(3);
     let original = connect_fn();
+    if (crate::attachment::managed() && !crate::attachment::local_owner())
+        || crate::attachment::startup::native_only()
+    {
+        // The policy Runtime and its mutexes belong to the vanished parent.
+        // Only the immutable inherited native alias pin can be consulted.
+        return unmanaged_connect(original, fd, address, length);
+    }
     let Some(_guard) = HookGuard::enter() else {
         return original(fd, address, length);
     };
@@ -402,40 +603,34 @@ pub unsafe extern "C" fn connect(fd: c_int, address: *const sockaddr, length: so
             return -1;
         }
     }
-    if crate::hh_agent_prepare_connect(
+    let prepared = crate::hh_agent_prepare_connect(
         fd as u64,
         family,
         bytes.as_ptr(),
         bytes.len(),
         port,
         &mut plan,
-    ) != crate::HH_OK
-        || plan.should_intercept == 0
-    {
+    );
+    if matches!(
+        prepared,
+        crate::HH_ERR_ALIAS_CONFLICT | crate::HH_ERR_NATIVE_ALIAS_UNAVAILABLE
+    ) {
+        *libc::__errno_location() = if prepared == crate::HH_ERR_ALIAS_CONFLICT {
+            libc::EACCES
+        } else {
+            libc::EHOSTUNREACH
+        };
+        return -1;
+    }
+    if prepared != crate::HH_OK || plan.should_intercept == 0 {
         return original(fd, address, length);
     }
-    let mut proxy: sockaddr_storage = std::mem::zeroed();
-    let result = if plan.proxy_family == 2 {
-        let p = &mut *(&mut proxy as *mut _ as *mut sockaddr_in);
-        p.sin_family = AF_INET as u16;
-        p.sin_port = plan.proxy_port.to_be();
-        p.sin_addr.s_addr = u32::from_ne_bytes(plan.proxy_address[..4].try_into().unwrap());
-        original(
-            fd,
-            &proxy as *const _ as *const sockaddr,
-            size_of::<sockaddr_in>() as socklen_t,
-        )
-    } else {
-        let p = &mut *(&mut proxy as *mut _ as *mut sockaddr_in6);
-        p.sin6_family = AF_INET6 as u16;
-        p.sin6_port = plan.proxy_port.to_be();
-        p.sin6_addr.s6_addr = plan.proxy_address;
-        original(
-            fd,
-            &proxy as *const _ as *const sockaddr,
-            size_of::<sockaddr_in6>() as socklen_t,
-        )
-    };
+    let result = connect_plan(original, fd, &plan);
+    // Compatibility plans contain a native destination, not a proxy endpoint.
+    // Preserve native EINPROGRESS and do not create a SOCKS/Engine socket lease.
+    if plan.reserved & crate::HH_CONNECT_NATIVE_COMPAT != 0 {
+        return result;
+    }
     if result < 0 {
         let error = *libc::__errno_location();
         if matches!(
@@ -560,19 +755,30 @@ unsafe fn send_all(fd: c_int, mut data: &[u8]) -> bool {
     true
 }
 
-unsafe fn file_allowed_for_io(fd: c_int, operation: crate::FileSandboxOperation) -> bool {
+fn file_allowed(
+    reader: &crate::FilePolicyReader,
+    path: &str,
+    operation: crate::FileSandboxOperation,
+) -> bool {
+    reader
+        .evaluate(|| crate::file_decision_with_reader(reader, path, operation))
+        .0
+        != crate::SandboxAction::Deny
+}
+
+unsafe fn file_allowed_for_io(
+    reader: &crate::FilePolicyReader,
+    fd: c_int,
+    operation: crate::FileSandboxOperation,
+) -> bool {
     std::fs::read_link(format!("/proc/self/fd/{fd}"))
-        .map(|path| crate::file_allows(&path.to_string_lossy(), operation))
+        .map(|path| file_allowed(reader, &path.to_string_lossy(), operation))
         .unwrap_or(true)
 }
 
-unsafe fn audit_io_denial(fd: c_int, operation: &str) {
+unsafe fn audit_io_denial(reader: &crate::FilePolicyReader, fd: c_int, operation: &str) {
     if let Ok(path) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
-        audit(
-            crate::SandboxAuditKind::File,
-            operation,
-            &path.to_string_lossy(),
-        );
+        audit_file(reader, operation, &path.to_string_lossy());
     }
 }
 
@@ -597,6 +803,7 @@ pub unsafe extern "C" fn send(
     length: usize,
     flags: c_int,
 ) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(4);
     let original = send_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -616,6 +823,7 @@ pub unsafe extern "C" fn recv(
     length: usize,
     flags: c_int,
 ) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(5);
     let original = recv_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -638,6 +846,7 @@ pub unsafe extern "C" fn sendto(
     address: *const sockaddr,
     address_length: socklen_t,
 ) -> isize {
+    let _attachment_call = crate::attachment::enter();
     if !address.is_null() && child_policy_denied() {
         return -1;
     }
@@ -667,6 +876,7 @@ pub unsafe extern "C" fn recvfrom(
     address: *mut sockaddr,
     address_length: *mut socklen_t,
 ) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(30);
     let original = recvfrom_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -682,6 +892,7 @@ pub unsafe extern "C" fn recvfrom(
 }
 
 pub unsafe extern "C" fn sendmsg(fd: c_int, message: *const libc::msghdr, flags: c_int) -> isize {
+    let _attachment_call = crate::attachment::enter();
     if !message.is_null() && !(*message).msg_name.is_null() && child_policy_denied() {
         return -1;
     }
@@ -704,6 +915,7 @@ pub unsafe extern "C" fn sendmsg(fd: c_int, message: *const libc::msghdr, flags:
 }
 
 pub unsafe extern "C" fn recvmsg(fd: c_int, message: *mut libc::msghdr, flags: c_int) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(32);
     let original = recvmsg_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -719,6 +931,7 @@ pub unsafe extern "C" fn recvmsg(fd: c_int, message: *mut libc::msghdr, flags: c
 }
 
 pub unsafe extern "C" fn readv(fd: c_int, iov: *const libc::iovec, count: c_int) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(33);
     let original = readv_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -728,8 +941,9 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const libc::iovec, count: c_int)
         *libc::__errno_location() = libc::ECONNRESET;
         return -1;
     }
-    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Read) {
-        audit_io_denial(fd, "read");
+    let reader = crate::file_policy_reader();
+    if !file_allowed_for_io(&reader, fd, crate::FileSandboxOperation::Read) {
+        audit_io_denial(&reader, fd, "read");
         *libc::__errno_location() = libc::EACCES;
         return -1;
     }
@@ -737,6 +951,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const libc::iovec, count: c_int)
 }
 
 pub unsafe extern "C" fn writev(fd: c_int, iov: *const libc::iovec, count: c_int) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(34);
     let original = writev_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -746,8 +961,9 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const libc::iovec, count: c_int
         *libc::__errno_location() = libc::ECONNRESET;
         return -1;
     }
-    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Write) {
-        audit_io_denial(fd, "write");
+    let reader = crate::file_policy_reader();
+    if !file_allowed_for_io(&reader, fd, crate::FileSandboxOperation::Write) {
+        audit_io_denial(&reader, fd, "write");
         *libc::__errno_location() = libc::EACCES;
         return -1;
     }
@@ -760,13 +976,15 @@ pub unsafe extern "C" fn pread(
     length: usize,
     offset: libc::off_t,
 ) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(35);
     let original = pread_fn();
     let Some(_guard) = HookGuard::enter() else {
         return original(fd, buffer, length, offset);
     };
-    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Read) {
-        audit_io_denial(fd, "read");
+    let reader = crate::file_policy_reader();
+    if !file_allowed_for_io(&reader, fd, crate::FileSandboxOperation::Read) {
+        audit_io_denial(&reader, fd, "read");
         *libc::__errno_location() = libc::EACCES;
         return -1;
     }
@@ -779,13 +997,15 @@ pub unsafe extern "C" fn pwrite(
     length: usize,
     offset: libc::off_t,
 ) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(36);
     let original = pwrite_fn();
     let Some(_guard) = HookGuard::enter() else {
         return original(fd, buffer, length, offset);
     };
-    if !file_allowed_for_io(fd, crate::FileSandboxOperation::Write) {
-        audit_io_denial(fd, "write");
+    let reader = crate::file_policy_reader();
+    if !file_allowed_for_io(&reader, fd, crate::FileSandboxOperation::Write) {
+        audit_io_denial(&reader, fd, "write");
         *libc::__errno_location() = libc::EACCES;
         return -1;
     }
@@ -797,6 +1017,7 @@ pub unsafe extern "C" fn getaddrinfo(
     hints: *const addrinfo,
     result: *mut *mut addrinfo,
 ) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         if !result.is_null() {
             result.write(std::ptr::null_mut());
@@ -805,28 +1026,52 @@ pub unsafe extern "C" fn getaddrinfo(
     }
     hook_hit(1);
     let original = gai_fn();
-    let Some(_guard) = HookGuard::enter() else {
-        return original(node, service, hints, result);
+    let unmanaged = (crate::attachment::managed() && !crate::attachment::local_owner())
+        || crate::attachment::startup::native_only();
+    let _guard = if unmanaged {
+        None
+    } else {
+        match HookGuard::enter() {
+            Some(guard) => Some(guard),
+            None => return original(node, service, hints, result),
+        }
+    };
+    let record = |host: &str, family: i32, bytes: &[u8]| -> i32 {
+        if unmanaged {
+            match crate::parse_ip(bytes)
+                .and_then(|ip| super::super::fork::check_native_alias(ip, host))
+            {
+                Ok(()) => crate::HH_OK,
+                Err(code) => code,
+            }
+        } else {
+            let host = CString::new(host).unwrap();
+            crate::hh_agent_record_dns(host.as_ptr(), family, bytes.as_ptr(), bytes.len())
+        }
     };
     let out = original(node, service, hints, result);
     if out == 0 && !node.is_null() && !result.is_null() {
         let host = CStr::from_ptr(node).to_bytes();
         if let Ok(host) = std::str::from_utf8(host) {
             let mut cur = *result;
+            let mut conflict = false;
             while !cur.is_null() {
                 let ai = &*cur;
                 if ai.ai_family == AF_INET {
                     let a = &*(ai.ai_addr as *const sockaddr_in);
                     let b = u32::from_be(a.sin_addr.s_addr).to_be_bytes();
-                    let c = CString::new(host).unwrap();
-                    let _ = crate::hh_agent_record_dns(c.as_ptr(), 4, b.as_ptr(), 4);
+                    conflict |= record(host, 4, &b) == crate::HH_ERR_ALIAS_CONFLICT;
                 } else if ai.ai_family == AF_INET6 {
                     let a = &*(ai.ai_addr as *const sockaddr_in6);
-                    let c = CString::new(host).unwrap();
-                    let _ =
-                        crate::hh_agent_record_dns(c.as_ptr(), 6, a.sin6_addr.s6_addr.as_ptr(), 16);
+                    conflict |=
+                        record(host, 6, &a.sin6_addr.s6_addr) == crate::HH_ERR_ALIAS_CONFLICT;
                 }
                 cur = ai.ai_next;
+            }
+            if conflict {
+                free_fn()(*result);
+                result.write(std::ptr::null_mut());
+                return libc::EAI_FAIL;
             }
         }
     }
@@ -872,8 +1117,26 @@ fn renameat2_fn() -> RenameAt2Fn {
     *F.get_or_init(|| symbol(c"renameat2"))
 }
 fn execve_fn() -> ExecveFn {
-    static F: OnceLock<ExecveFn> = OnceLock::new();
-    *F.get_or_init(|| symbol(c"execve"))
+    // A new-image startup handshake can replace this owned bridge after Core
+    // retires its old monitor. Never retain the prior original trampoline.
+    symbol(c"execve")
+}
+type FexecveFn =
+    unsafe extern "C" fn(c_int, *const *const libc::c_char, *const *const libc::c_char) -> c_int;
+type ExecveatFn = unsafe extern "C" fn(
+    c_int,
+    *const libc::c_char,
+    *const *const libc::c_char,
+    *const *const libc::c_char,
+    c_int,
+) -> c_int;
+fn fexecve_fn() -> FexecveFn {
+    static F: OnceLock<FexecveFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"fexecve"))
+}
+fn execveat_fn() -> ExecveatFn {
+    static F: OnceLock<ExecveatFn> = OnceLock::new();
+    *F.get_or_init(|| symbol(c"execveat"))
 }
 fn mmap_fn() -> MmapFn {
     static F: OnceLock<MmapFn> = OnceLock::new();
@@ -896,6 +1159,24 @@ fn pwrite_fn() -> PwriteFn {
     *F.get_or_init(|| symbol(c"pwrite"))
 }
 fn audit(kind: crate::SandboxAuditKind, operation: &str, target: &str) {
+    audit_with_version(kind, operation, target, crate::sandbox_version());
+}
+
+fn audit_file(reader: &crate::FilePolicyReader, operation: &str, target: &str) {
+    audit_with_version(
+        crate::SandboxAuditKind::File,
+        operation,
+        target,
+        reader.version,
+    );
+}
+
+fn audit_with_version(
+    kind: crate::SandboxAuditKind,
+    operation: &str,
+    target: &str,
+    snapshot_version: u64,
+) {
     let event = crate::SandboxAuditEvent {
         kind,
         decision: crate::SandboxAction::Deny,
@@ -908,7 +1189,7 @@ fn audit(kind: crate::SandboxAuditKind, operation: &str, target: &str) {
         reason: None,
         process_pid: unsafe { libc::getpid() as u32 },
         process_tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
-        snapshot_version: crate::sandbox_version(),
+        snapshot_version,
     };
     let _ = crate::report_sandbox_audit(&event);
 }
@@ -1103,9 +1384,10 @@ unsafe fn inspect_open(
     } else {
         cpath_string(raw)
     };
+    let reader = crate::file_policy_reader();
     for operation in file_operations_for_flags(flags) {
-        if !crate::file_allows(&path, operation) {
-            audit(crate::SandboxAuditKind::File, "open", &path);
+        if !file_allowed(&reader, &path, operation) {
+            audit_file(&reader, "open", &path);
             (*state).denied = 1;
             gum::replace_argument(
                 context,
@@ -1141,6 +1423,7 @@ unsafe fn inspect_ioctl(context: *mut gum::GumInvocationContext, state: *mut Lis
 }
 
 pub unsafe extern "C" fn creat(path: *const libc::c_char, mode: libc::mode_t) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1150,13 +1433,14 @@ pub unsafe extern "C" fn creat(path: *const libc::c_char, mode: libc::mode_t) ->
     let Some(_guard) = HookGuard::enter() else {
         return original(path, mode);
     };
+    let reader = crate::file_policy_reader();
     if let Some(path) = cpath(path) {
         for operation in [
             crate::FileSandboxOperation::Create,
             crate::FileSandboxOperation::Write,
         ] {
-            if !crate::file_allows(&path, operation) {
-                audit(crate::SandboxAuditKind::File, "open", &path);
+            if !file_allowed(&reader, &path, operation) {
+                audit_file(&reader, "open", &path);
                 *libc::__errno_location() = libc::EACCES;
                 return -1;
             }
@@ -1166,6 +1450,7 @@ pub unsafe extern "C" fn creat(path: *const libc::c_char, mode: libc::mode_t) ->
 }
 
 pub unsafe extern "C" fn read(fd: c_int, b: *mut c_void, n: usize) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(14);
     let original = read_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -1175,8 +1460,13 @@ pub unsafe extern "C" fn read(fd: c_int, b: *mut c_void, n: usize) -> isize {
         *libc::__errno_location() = libc::ECONNRESET;
         return -1;
     }
+    let reader = crate::file_policy_reader();
     if let Ok(p) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
-        if !crate::file_allows(&p.to_string_lossy(), crate::FileSandboxOperation::Read) {
+        if !file_allowed(
+            &reader,
+            &p.to_string_lossy(),
+            crate::FileSandboxOperation::Read,
+        ) {
             *libc::__errno_location() = libc::EACCES;
             return -1;
         }
@@ -1184,6 +1474,7 @@ pub unsafe extern "C" fn read(fd: c_int, b: *mut c_void, n: usize) -> isize {
     original(fd, b, n)
 }
 pub unsafe extern "C" fn write(fd: c_int, b: *const c_void, n: usize) -> isize {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(15);
     let original = write_fn();
     let Some(_guard) = HookGuard::enter() else {
@@ -1193,8 +1484,13 @@ pub unsafe extern "C" fn write(fd: c_int, b: *const c_void, n: usize) -> isize {
         *libc::__errno_location() = libc::ECONNRESET;
         return -1;
     }
+    let reader = crate::file_policy_reader();
     if let Ok(p) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
-        if !crate::file_allows(&p.to_string_lossy(), crate::FileSandboxOperation::Write) {
+        if !file_allowed(
+            &reader,
+            &p.to_string_lossy(),
+            crate::FileSandboxOperation::Write,
+        ) {
             *libc::__errno_location() = libc::EACCES;
             return -1;
         }
@@ -1202,6 +1498,7 @@ pub unsafe extern "C" fn write(fd: c_int, b: *const c_void, n: usize) -> isize {
     original(fd, b, n)
 }
 pub unsafe extern "C" fn unlink(path: *const libc::c_char) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1210,9 +1507,10 @@ pub unsafe extern "C" fn unlink(path: *const libc::c_char) -> c_int {
     let Some(_guard) = HookGuard::enter() else {
         return original(path);
     };
+    let reader = crate::file_policy_reader();
     if let Some(p) = cpath(path) {
-        if !crate::file_allows(&p, crate::FileSandboxOperation::Delete) {
-            audit(crate::SandboxAuditKind::File, "delete", &p);
+        if !file_allowed(&reader, &p, crate::FileSandboxOperation::Delete) {
+            audit_file(&reader, "delete", &p);
             *libc::__errno_location() = libc::EACCES;
             return -1;
         }
@@ -1221,30 +1519,35 @@ pub unsafe extern "C" fn unlink(path: *const libc::c_char) -> c_int {
 }
 // Resolve each endpoint independently: an unknown name must not discard a
 // denial already available for the other endpoint.
-fn namespace_path_allowed(path: Option<&str>, check: impl FnOnce(&str) -> bool) -> bool {
+fn namespace_path_allowed(
+    reader: &crate::FilePolicyReader,
+    path: Option<&str>,
+    check: impl FnOnce(&str) -> bool,
+) -> bool {
     match path {
         Some(path) => check(path),
-        None => crate::file_sandbox_snapshot()
-            .is_none_or(|snapshot| snapshot.error_action != crate::SandboxAction::Deny),
+        None => reader.error_action() != crate::SandboxAction::Deny,
     }
 }
 fn namespace_allowed(
+    reader: &crate::FilePolicyReader,
     source: Option<&str>,
     destination: Option<&str>,
     follow: bool,
     rename: bool,
     exchange: bool,
 ) -> bool {
-    namespace_path_allowed(source, |path| {
-        crate::file_link_source_allows(path, follow)
-            && (!exchange || crate::file_allows(path, crate::FileSandboxOperation::Create))
-    }) && namespace_path_allowed(destination, |path| {
-        crate::file_allows(path, crate::FileSandboxOperation::Create)
-            && (!rename || crate::file_allows(path, crate::FileSandboxOperation::Rename))
-            && (!exchange || crate::file_link_source_allows(path, false))
+    namespace_path_allowed(reader, source, |path| {
+        crate::file_link_source_allows_reader(reader, path, follow)
+            && (!exchange || file_allowed(reader, path, crate::FileSandboxOperation::Create))
+    }) && namespace_path_allowed(reader, destination, |path| {
+        file_allowed(reader, path, crate::FileSandboxOperation::Create)
+            && (!rename || file_allowed(reader, path, crate::FileSandboxOperation::Rename))
+            && (!exchange || crate::file_link_source_allows_reader(reader, path, false))
     })
 }
 pub unsafe extern "C" fn link(old: *const libc::c_char, new: *const libc::c_char) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1255,20 +1558,18 @@ pub unsafe extern "C" fn link(old: *const libc::c_char, new: *const libc::c_char
         return original(old, new);
     };
     let saved_errno = *libc::__errno_location();
+    let reader = crate::file_policy_reader();
     let source = cpath(old);
     let destination = cpath(new);
     if !namespace_allowed(
+        &reader,
         source.as_deref(),
         destination.as_deref(),
         false,
         false,
         false,
     ) {
-        audit(
-            crate::SandboxAuditKind::File,
-            "link",
-            source.as_deref().unwrap_or("<unresolved>"),
-        );
+        audit_file(&reader, "link", source.as_deref().unwrap_or("<unresolved>"));
         *libc::__errno_location() = libc::EACCES;
         return -1;
     }
@@ -1282,6 +1583,7 @@ pub unsafe extern "C" fn linkat(
     new: *const libc::c_char,
     flags: c_int,
 ) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1297,6 +1599,7 @@ pub unsafe extern "C" fn linkat(
         return original(od, old, nd, new, flags);
     };
     let saved_errno = *libc::__errno_location();
+    let reader = crate::file_policy_reader();
     // Read raw names before resolving dirfds. cpath() would incorrectly turn a
     // relative name into an absolute cwd path before applying its dirfd.
     let old_raw = if old.is_null() {
@@ -1320,14 +1623,15 @@ pub unsafe extern "C" fn linkat(
     });
     let destination = new_raw.map(|raw| relative_path(nd, raw));
     if !namespace_allowed(
+        &reader,
         source.as_deref(),
         destination.as_deref(),
         old_raw.is_some_and(|raw| !raw.is_empty()) && flags & libc::AT_SYMLINK_FOLLOW != 0,
         false,
         false,
     ) {
-        audit(
-            crate::SandboxAuditKind::File,
+        audit_file(
+            &reader,
             "linkat",
             source.as_deref().unwrap_or("<unresolved>"),
         );
@@ -1338,6 +1642,7 @@ pub unsafe extern "C" fn linkat(
     original(od, old, nd, new, flags)
 }
 pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_char) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1347,17 +1652,19 @@ pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_ch
         return original(old, new);
     };
     let saved_errno = *libc::__errno_location();
+    let reader = crate::file_policy_reader();
     let source = cpath(old);
     let destination = cpath(new);
     if !namespace_allowed(
+        &reader,
         source.as_deref(),
         destination.as_deref(),
         false,
         true,
         false,
     ) {
-        audit(
-            crate::SandboxAuditKind::File,
+        audit_file(
+            &reader,
             "rename",
             source.as_deref().unwrap_or("<unresolved>"),
         );
@@ -1368,6 +1675,7 @@ pub unsafe extern "C" fn rename(old: *const libc::c_char, new: *const libc::c_ch
     original(old, new)
 }
 pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const libc::c_char, flags: c_int) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1376,10 +1684,11 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const libc::c_char, flags
     let Some(_guard) = HookGuard::enter() else {
         return f(dirfd, path, flags);
     };
+    let reader = crate::file_policy_reader();
     if let Some(raw) = cpath(path) {
         let p = relative_path(dirfd, &raw);
-        if !crate::file_allows(&p, crate::FileSandboxOperation::Delete) {
-            audit(crate::SandboxAuditKind::File, "delete", &p);
+        if !file_allowed(&reader, &p, crate::FileSandboxOperation::Delete) {
+            audit_file(&reader, "delete", &p);
             *libc::__errno_location() = libc::EACCES;
             return -1;
         }
@@ -1392,6 +1701,7 @@ pub unsafe extern "C" fn renameat(
     nd: c_int,
     new: *const libc::c_char,
 ) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1402,6 +1712,7 @@ pub unsafe extern "C" fn renameat(
         return f(od, old, nd, new);
     };
     let saved_errno = *libc::__errno_location();
+    let reader = crate::file_policy_reader();
     let source = (!old.is_null())
         .then(|| CStr::from_ptr(old).to_str().ok())
         .flatten()
@@ -1411,14 +1722,15 @@ pub unsafe extern "C" fn renameat(
         .flatten()
         .map(|raw| relative_path(nd, raw));
     if !namespace_allowed(
+        &reader,
         source.as_deref(),
         destination.as_deref(),
         false,
         true,
         false,
     ) {
-        audit(
-            crate::SandboxAuditKind::File,
+        audit_file(
+            &reader,
             "rename",
             source.as_deref().unwrap_or("<unresolved>"),
         );
@@ -1436,6 +1748,7 @@ pub unsafe extern "C" fn renameat2(
     new: *const libc::c_char,
     flags: libc::c_uint,
 ) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     if child_policy_denied() {
         return -1;
     }
@@ -1445,6 +1758,7 @@ pub unsafe extern "C" fn renameat2(
         return original(od, old, nd, new, flags);
     };
     let saved_errno = *libc::__errno_location();
+    let reader = crate::file_policy_reader();
     let source = (!old.is_null())
         .then(|| CStr::from_ptr(old).to_str().ok())
         .flatten()
@@ -1454,14 +1768,15 @@ pub unsafe extern "C" fn renameat2(
         .flatten()
         .map(|raw| relative_path(nd, raw));
     if !namespace_allowed(
+        &reader,
         source.as_deref(),
         destination.as_deref(),
         false,
         true,
         flags & libc::RENAME_EXCHANGE != 0,
     ) {
-        audit(
-            crate::SandboxAuditKind::File,
+        audit_file(
+            &reader,
             "rename",
             source.as_deref().unwrap_or("<unresolved>"),
         );
@@ -1472,11 +1787,13 @@ pub unsafe extern "C" fn renameat2(
     original(od, old, nd, new, flags)
 }
 fn housekeeping_allowed() -> bool {
-    !super::super::fork::awaiting_rebuild()
+    crate::attachment::startup::runtime_available()
+        && !super::super::fork::awaiting_rebuild()
         && !crate::engine_call::host_background()
         && INSIDE_HOOK.with(|inside| !inside.get())
 }
 pub unsafe extern "C" fn close(fd: c_int) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(6);
     if housekeeping_allowed() {
         let _ = crate::hh_agent_close_socket(fd as u64);
@@ -1486,6 +1803,7 @@ pub unsafe extern "C" fn close(fd: c_int) -> c_int {
 }
 
 pub unsafe extern "C" fn dup(fd: c_int) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(26);
     let f: unsafe extern "C" fn(c_int) -> c_int = symbol(c"dup");
     let result = f(fd);
@@ -1496,6 +1814,7 @@ pub unsafe extern "C" fn dup(fd: c_int) -> c_int {
 }
 
 pub unsafe extern "C" fn dup2(fd: c_int, destination: c_int) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(27);
     let f: unsafe extern "C" fn(c_int, c_int) -> c_int = symbol(c"dup2");
     let result = f(fd, destination);
@@ -1506,6 +1825,7 @@ pub unsafe extern "C" fn dup2(fd: c_int, destination: c_int) -> c_int {
 }
 
 pub unsafe extern "C" fn dup3(fd: c_int, destination: c_int, flags: c_int) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(28);
     let f: unsafe extern "C" fn(c_int, c_int, c_int) -> c_int = symbol(c"dup3");
     let result = f(fd, destination, flags);
@@ -1525,45 +1845,97 @@ fn mapping_operations(prot: c_int) -> Vec<crate::FileSandboxOperation> {
     operations
 }
 
+type ProtectFn = unsafe extern "C" fn(*mut c_void, usize, c_int) -> c_int;
+fn mprotect_fn() -> ProtectFn {
+    static ORIGINAL: OnceLock<ProtectFn> = OnceLock::new();
+    *ORIGINAL.get_or_init(|| symbol(c"mprotect"))
+}
+type UnmapFn = unsafe extern "C" fn(*mut c_void, usize) -> c_int;
+fn munmap_fn() -> UnmapFn {
+    static ORIGINAL: OnceLock<UnmapFn> = OnceLock::new();
+    *ORIGINAL.get_or_init(|| symbol(c"munmap"))
+}
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
-    if prot != libc::PROT_NONE && child_policy_denied() {
-        return -1;
-    }
+    let _attachment_call = crate::attachment::enter_allocator();
     hook_hit(24);
-    let f: unsafe extern "C" fn(*mut c_void, usize, c_int) -> c_int = symbol(c"mprotect");
-    if prot & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) == 0 {
+    let f = mprotect_fn();
+    if len == 0
+        || !crate::attachment::enforcing()
+        || prot & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) == 0
+    {
         return f(addr, len, prot);
     }
-    let Some(_guard) = HookGuard::enter() else {
+    let Some(error_action) = super::super::mappings::error_action() else {
         return f(addr, len, prot);
     };
-    for path in mapped_file_paths(addr as usize, len) {
-        for operation in mapping_operations(prot) {
-            if !crate::file_allows(&path, operation) {
-                audit(crate::SandboxAuditKind::File, "protect", &path);
+    let saved_errno = *libc::__errno_location();
+    let regions = match super::super::mappings::file_regions(addr as usize, len) {
+        Ok(regions) => regions,
+        Err(_) => {
+            if error_action == crate::SandboxAction::Deny {
                 *libc::__errno_location() = libc::EACCES;
                 return -1;
             }
+            *libc::__errno_location() = saved_errno;
+            return f(addr, len, prot);
+        }
+    };
+    // No TLS/heap/Engine entry is permitted before this anonymous fast path:
+    // libc can call mprotect while holding its own malloc arena lock.
+    if regions.is_empty() {
+        *libc::__errno_location() = saved_errno;
+        return f(addr, len, prot);
+    }
+    if child_policy_denied() {
+        return -1;
+    }
+    let Some(_guard) = HookGuard::enter() else {
+        drop(regions);
+        *libc::__errno_location() = saved_errno;
+        return f(addr, len, prot);
+    };
+    let reader = crate::file_policy_reader();
+    for region in regions.iter().copied() {
+        let paths = match super::super::mappings::paths(region) {
+            Ok(paths) => paths,
+            Err(_) => {
+                if reader.error_action() == crate::SandboxAction::Deny {
+                    *libc::__errno_location() = libc::EACCES;
+                    return -1;
+                }
+                continue;
+            }
+        };
+        for path in paths {
+            for operation in mapping_operations(prot) {
+                if !file_allowed(&reader, &path, operation) {
+                    audit_file(&reader, "protect", &path);
+                    *libc::__errno_location() = libc::EACCES;
+                    return -1;
+                }
+            }
         }
     }
+    drop(regions);
+    *libc::__errno_location() = saved_errno;
     f(addr, len, prot)
 }
 pub unsafe extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
+    let _attachment_call = crate::attachment::enter_allocator();
     hook_hit(25);
-    let f: unsafe extern "C" fn(*mut c_void, usize) -> c_int = symbol(c"munmap");
-    f(addr, len)
+    munmap_fn()(addr, len)
 }
 
 unsafe fn inherited_environment(
     envp: *const *const libc::c_char,
     should_hook: bool,
-) -> (Vec<CString>, Vec<*const libc::c_char>) {
+) -> Option<(Vec<CString>, Vec<*const libc::c_char>)> {
     let mut values = Vec::<CString>::new();
     let mut keys = std::collections::HashSet::<Vec<u8>>::new();
     if !envp.is_null() {
-        let mut index = 0;
-        while !(*envp.add(index)).is_null() {
-            let bytes = CStr::from_ptr(*envp.add(index)).to_bytes().to_vec();
+        let metadata = super::super::exec_bridge::vector(envp)?;
+        for value in metadata.values() {
+            let bytes = value.to_bytes().to_vec();
             let key = bytes
                 .split(|b| *b == b'=')
                 .next()
@@ -1573,7 +1945,6 @@ unsafe fn inherited_environment(
             if let Ok(value) = CString::new(bytes) {
                 values.push(value)
             }
-            index += 1
         }
     }
     for (key, value) in std::env::vars_os() {
@@ -1610,22 +1981,17 @@ unsafe fn inherited_environment(
         .map(|value| value.as_ptr())
         .collect::<Vec<_>>();
     pointers.push(std::ptr::null());
-    (values, pointers)
+    Some((values, pointers))
 }
-unsafe fn command_line(argv: *const *const libc::c_char) -> String {
+fn command_line(argv: Option<&super::super::exec_bridge::Vector>) -> String {
     let mut result = String::new();
-    if argv.is_null() {
-        return result;
-    }
-    let mut i = 0;
-    while !(*argv.add(i)).is_null() {
-        if let Ok(value) = CStr::from_ptr(*argv.add(i)).to_str() {
+    for value in argv.into_iter().flat_map(|argv| argv.values()) {
+        if let Ok(value) = value.to_str() {
             if !result.is_empty() {
                 result.push(' ')
             }
             result.push_str(value)
         }
-        i += 1
     }
     result
 }
@@ -1653,11 +2019,27 @@ unsafe fn process_target(
     path: *const libc::c_char,
     argv: *const *const libc::c_char,
 ) -> Option<(String, String)> {
-    let path = CStr::from_ptr(path).to_str().ok()?;
-    Some((normalize_executable(path), command_line(argv)))
+    let path = super::super::exec_bridge::string(path, 4096)?;
+    let arguments = super::super::exec_bridge::argv(argv)?;
+    Some((
+        normalize_executable(path.to_str().ok()?),
+        command_line(Some(&arguments)),
+    ))
 }
 
 fn process_hook_enabled(executable: &str) -> bool {
+    if !crate::attachment::propagating() {
+        return false;
+    }
+    if let Some(bootstrap) = crate::attachment::bootstrap() {
+        return crate::control::decide_process_hook(
+            &bootstrap.control_endpoint,
+            &bootstrap.session_id,
+            &bootstrap.token,
+            executable,
+        )
+        .hook;
+    }
     let endpoint = std::env::var("HYPERHUB_CONTROL_ENDPOINT").ok();
     let session_id = std::env::var("HYPERHUB_SESSION_ID").ok();
     let token = std::env::var("HYPERHUB_SESSION_TOKEN").ok();
@@ -1674,32 +2056,205 @@ pub unsafe extern "C" fn execve(
     argv: *const *const libc::c_char,
     envp: *const *const libc::c_char,
 ) -> c_int {
+    let errno = super::super::exec_bridge::ErrnoRestore::new();
+    let _attachment_call = crate::attachment::enter();
+    if let Some(call) = super::super::exec_bridge::dispatch(path, argv, envp) {
+        let result = match call {
+            super::super::exec_bridge::Call::Fd { fd, argv, envp } => fexecve_fn()(fd, argv, envp),
+            super::super::exec_bridge::Call::At {
+                fd,
+                path,
+                argv,
+                envp,
+                flags,
+            } => execveat_fn()(fd, path, argv, envp, flags),
+        };
+        return errno.finish(result);
+    }
     if child_policy_denied() {
-        return -1;
+        return errno.finish(-1);
     }
     hook_hit(20);
     let original = execve_fn();
     let Some(_guard) = HookGuard::enter() else {
-        return original(path, argv, envp);
+        return errno.finish(original(path, argv, envp));
     };
+    if !crate::attachment::enforcing() {
+        return errno.finish(original(path, argv, envp));
+    }
     let target = process_target(path, argv);
-    if target
-        .as_ref()
-        .is_some_and(|(executable, command)| !crate::process_allows(executable, command))
-    {
-        audit(
-            crate::SandboxAuditKind::Process,
-            "create",
-            &target.as_ref().unwrap().0,
-        );
+    if !process_target_allowed(&target) {
+        if let Some((path, _)) = &target {
+            audit(crate::SandboxAuditKind::Process, "create", path);
+        }
         *libc::__errno_location() = libc::EACCES;
-        return -1;
+        return errno.finish(-1);
     }
     let should_hook = target
         .as_ref()
         .is_none_or(|(executable, _)| process_hook_enabled(executable));
-    let (_values, pointers) = inherited_environment(envp, should_hook);
-    original(path, argv, pointers.as_ptr())
+    // Explicit attachment propagates through private IPC, so envp remains
+    // application data. Legacy launches retain their environment merge only
+    // after a complete safe copy; unavailable metadata is never substituted.
+    let environment = if crate::attachment::is_explicit() || target.is_none() {
+        None
+    } else {
+        inherited_environment(envp, should_hook)
+    };
+    let environment_pointer = environment
+        .as_ref()
+        .map_or(envp, |(_, pointers)| pointers.as_ptr());
+    errno.finish(original(path, argv, environment_pointer))
+}
+// FD execution has no pathname substitute: process-policy metadata may be
+// resolved separately, but the actual libc call always receives original FD,
+// pathname, flags and environment semantics.
+unsafe fn fd_exec_target(
+    fd: c_int,
+    path: Option<&CStr>,
+    argv: &super::super::exec_bridge::Vector,
+) -> Option<(String, String)> {
+    let executable = match path {
+        Some(path) if !path.to_bytes().is_empty() => {
+            let path = PathBuf::from(OsStr::from_bytes(path.to_bytes()));
+            if path.is_absolute() || fd == libc::AT_FDCWD {
+                path
+            } else {
+                std::fs::read_link(format!("/proc/self/fd/{fd}"))
+                    .ok()?
+                    .join(path)
+            }
+        }
+        _ => std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()?,
+    };
+    Some((
+        normalize_executable(executable.to_str()?),
+        command_line(Some(argv)),
+    ))
+}
+fn process_metadata_error_allows(error_action: Option<crate::SandboxAction>) -> bool {
+    error_action != Some(crate::SandboxAction::Deny)
+}
+unsafe fn process_target_allowed(target: &Option<(String, String)>) -> bool {
+    match target {
+        Some((executable, command)) => crate::process_allows(executable, command),
+        // An unreadable/oversized snapshot is an observation error, not proof
+        // that exec must fail. Apply the configured policy error action.
+        None => process_metadata_error_allows(
+            crate::process_sandbox_snapshot().map(|snapshot| snapshot.error_action),
+        ),
+    }
+}
+pub unsafe extern "C" fn fexecve(
+    fd: c_int,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+) -> c_int {
+    let errno = super::super::exec_bridge::ErrnoRestore::new();
+    let _call = crate::attachment::enter();
+    let original = fexecve_fn();
+    hook_hit(42);
+    if super::super::exec_bridge::executing() || fd < 0 || argv.is_null() || envp.is_null() {
+        return errno.finish(original(fd, argv, envp));
+    }
+    if child_policy_denied() {
+        return errno.finish(-1);
+    }
+    let Some(_guard) = HookGuard::enter() else {
+        return errno.finish(original(fd, argv, envp));
+    };
+    if !crate::attachment::enforcing() {
+        return errno.finish(original(fd, argv, envp));
+    }
+    let metadata_argv = super::super::exec_bridge::argv(argv);
+    let metadata_envp = super::super::exec_bridge::vector(envp);
+    let target = metadata_argv
+        .as_ref()
+        .and_then(|args| fd_exec_target(fd, None, args));
+    if !process_target_allowed(&target) {
+        if let Some((path, _)) = &target {
+            audit(crate::SandboxAuditKind::Process, "create", path);
+        }
+        *libc::__errno_location() = libc::EACCES;
+        return errno.finish(-1);
+    }
+    if !super::super::exec_bridge::confirmed() {
+        *libc::__errno_location() = libc::EIO;
+        return errno.finish(-1);
+    }
+    let result = super::super::exec_bridge::invoke(
+        super::super::exec_bridge::Call::Fd { fd, argv, envp },
+        metadata_argv
+            .as_ref()
+            .map_or(std::ptr::null(), |v| v.pointer()),
+        metadata_envp
+            .as_ref()
+            .map_or(std::ptr::null(), |v| v.pointer()),
+    );
+    errno.finish(result)
+}
+pub unsafe extern "C" fn execveat(
+    fd: c_int,
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+    flags: c_int,
+) -> c_int {
+    let errno = super::super::exec_bridge::ErrnoRestore::new();
+    let _call = crate::attachment::enter();
+    let original = execveat_fn();
+    hook_hit(43);
+    // Invalid flag bits can never replace an image. Preserve the kernel's own
+    // choice of error/precedence without parsing any application pointers.
+    if super::super::exec_bridge::executing()
+        || flags & !(libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW) != 0
+    {
+        return errno.finish(original(fd, path, argv, envp, flags));
+    }
+    if child_policy_denied() {
+        return errno.finish(-1);
+    }
+    let Some(_guard) = HookGuard::enter() else {
+        return errno.finish(original(fd, path, argv, envp, flags));
+    };
+    if !crate::attachment::enforcing() {
+        return errno.finish(original(fd, path, argv, envp, flags));
+    }
+    let metadata_path = super::super::exec_bridge::string(path, 4096);
+    let metadata_argv = super::super::exec_bridge::argv(argv);
+    let metadata_envp = super::super::exec_bridge::vector(envp);
+    let target = metadata_path.as_ref().and_then(|path| {
+        metadata_argv
+            .as_ref()
+            .and_then(|args| fd_exec_target(fd, Some(path), args))
+    });
+    if !process_target_allowed(&target) {
+        if let Some((path, _)) = &target {
+            audit(crate::SandboxAuditKind::Process, "create", path);
+        }
+        *libc::__errno_location() = libc::EACCES;
+        return errno.finish(-1);
+    }
+    if !super::super::exec_bridge::confirmed() {
+        *libc::__errno_location() = libc::EIO;
+        return errno.finish(-1);
+    }
+    let result = super::super::exec_bridge::invoke(
+        super::super::exec_bridge::Call::At {
+            fd,
+            path,
+            argv,
+            envp,
+            flags,
+        },
+        metadata_argv
+            .as_ref()
+            .map_or(std::ptr::null(), |v| v.pointer()),
+        metadata_envp
+            .as_ref()
+            .map_or(std::ptr::null(), |v| v.pointer()),
+    );
+    errno.finish(result)
 }
 type SpawnFn = unsafe extern "C" fn(
     *mut libc::pid_t,
@@ -1727,23 +2282,27 @@ unsafe fn spawn_impl(
     let Some(_guard) = HookGuard::enter() else {
         return original(pid, path, actions, attributes, argv, envp);
     };
+    if !crate::attachment::enforcing() {
+        return original(pid, path, actions, attributes, argv, envp);
+    }
     let target = process_target(path, argv as *const *const libc::c_char);
-    if target
-        .as_ref()
-        .is_some_and(|(executable, command)| !crate::process_allows(executable, command))
-    {
-        audit(
-            crate::SandboxAuditKind::Process,
-            "create",
-            &target.as_ref().unwrap().0,
-        );
+    if !process_target_allowed(&target) {
+        if let Some((path, _)) = &target {
+            audit(crate::SandboxAuditKind::Process, "create", path);
+        }
         return libc::EACCES;
     }
     let should_hook = target
         .as_ref()
         .is_none_or(|(executable, _)| process_hook_enabled(executable));
-    let (_values, pointers) =
-        inherited_environment(envp as *const *const libc::c_char, should_hook);
+    let environment = if crate::attachment::is_explicit() || target.is_none() {
+        None
+    } else {
+        inherited_environment(envp as *const *const libc::c_char, should_hook)
+    };
+    let environment_pointer = environment.as_ref().map_or(envp, |(_, pointers)| {
+        pointers.as_ptr() as *const *mut libc::c_char
+    });
     let mut child_pid = 0;
     // Linux also accepts a null PID output. Obtain a private output in that
     // case without changing what the caller supplied or receives.
@@ -1758,7 +2317,7 @@ unsafe fn spawn_impl(
         actions,
         attributes,
         argv,
-        pointers.as_ptr() as *const *mut libc::c_char,
+        environment_pointer,
     );
     let saved_errno = *libc::__errno_location();
     if result == 0 && should_hook {
@@ -1769,8 +2328,7 @@ unsafe fn spawn_impl(
             eprintln!("hyperhub-gum: posix_spawn registration was not acknowledged pid={child_pid}; retaining the original spawn result");
         }
     }
-    drop(pointers);
-    drop(_values);
+    drop(environment);
     drop(_guard);
     *libc::__errno_location() = saved_errno;
     result
@@ -1783,6 +2341,7 @@ pub unsafe extern "C" fn posix_spawn(
     argv: *const *mut libc::c_char,
     envp: *const *mut libc::c_char,
 ) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     spawn_impl(
         c"posix_spawn",
         21,
@@ -1802,6 +2361,7 @@ pub unsafe extern "C" fn posix_spawnp(
     argv: *const *mut libc::c_char,
     envp: *const *mut libc::c_char,
 ) -> c_int {
+    let _attachment_call = crate::attachment::enter();
     spawn_impl(
         c"posix_spawnp",
         22,
@@ -1822,6 +2382,7 @@ pub unsafe extern "C" fn mmap(
     fd: c_int,
     off: libc::off_t,
 ) -> *mut c_void {
+    let _attachment_call = crate::attachment::enter_allocator();
     if fd >= 0 && flags & libc::MAP_ANONYMOUS == 0 && child_policy_denied() {
         return libc::MAP_FAILED;
     }
@@ -1836,15 +2397,12 @@ pub unsafe extern "C" fn mmap(
     let Some(_guard) = HookGuard::enter() else {
         return original(addr, len, prot, flags, fd, off);
     };
+    let reader = crate::file_policy_reader();
     if fd >= 0 && flags & libc::MAP_ANONYMOUS == 0 {
         if let Ok(path) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
             for operation in mapping_operations(prot) {
-                if !crate::file_allows(&path.to_string_lossy(), operation) {
-                    audit(
-                        crate::SandboxAuditKind::File,
-                        "map",
-                        &path.to_string_lossy(),
-                    );
+                if !file_allowed(&reader, &path.to_string_lossy(), operation) {
+                    audit_file(&reader, "map", &path.to_string_lossy());
                     *libc::__errno_location() = libc::EACCES;
                     return libc::MAP_FAILED;
                 }
@@ -1855,46 +2413,210 @@ pub unsafe extern "C" fn mmap(
 }
 
 pub unsafe extern "C" fn freeaddrinfo(result: *mut addrinfo) {
+    let _attachment_call = crate::attachment::enter();
     hook_hit(2);
     free_fn()(result)
-}
-
-fn mapped_file_paths(address: usize, length: usize) -> Vec<String> {
-    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
-        return Vec::new();
-    };
-    let requested_end = address.saturating_add(length);
-    let mut paths = std::collections::BTreeSet::new();
-    for line in maps.lines() {
-        let mut fields = line.split_whitespace();
-        let Some((start, end)) = fields
-            .next()
-            .and_then(|range| range.split_once('-'))
-            .and_then(|(start, end)| {
-                Some((
-                    usize::from_str_radix(start, 16).ok()?,
-                    usize::from_str_radix(end, 16).ok()?,
-                ))
-            })
-        else {
-            continue;
-        };
-        if start >= requested_end || end <= address {
-            continue;
-        }
-        let Some(path) = fields.nth(4) else {
-            continue;
-        };
-        if path.starts_with('/') {
-            paths.insert(path.strip_suffix(" (deleted)").unwrap_or(path).to_owned());
-        }
-    }
-    paths.into_iter().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_exit_callback_records_status_and_process_birth() {
+        const MARKER: &str = "HH_TEST_OWNED_EXIT_REPORT_CHILD";
+        if let Some(directory) = std::env::var_os(MARKER) {
+            let directory = std::path::PathBuf::from(directory);
+            install_hook_report();
+            assert_eq!(EXIT_STATUS_DIRECTORY.get(), Some(&directory));
+            let identity =
+                hyperhub_runtime::attachment::process_incarnation(std::process::id()).unwrap();
+            std::fs::write(
+                directory.join(format!("{}.expected", identity.pid)),
+                identity.birth.to_string(),
+            )
+            .unwrap();
+            unsafe { libc::exit(37) };
+        }
+        let directory = std::env::temp_dir().join(format!("hh-exit-unit-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let test = format!(
+            "{}::owned_exit_callback_records_status_and_process_birth",
+            module_path!().split_once("::").unwrap().1
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(MARKER, &directory)
+            .env("HYPERHUB_GUM_EXIT_DIRECTORY", &directory)
+            .env_remove("HYPERHUB_DYNAMIC_HOOK_REPORT")
+            .args(["--exact", &test, "--test-threads=1"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert_eq!(child.wait().unwrap().code(), Some(37));
+        let path = directory.join(format!("{pid}.exit"));
+        let expected = directory.join(format!("{pid}.expected"));
+        let report = std::fs::read_to_string(&path).unwrap();
+        let birth = std::fs::read_to_string(&expected).unwrap();
+        assert_eq!(report, format!("37 {birth}"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(expected).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn approved_unrebuilt_cleanup_keeps_hook_paths_out_of_copied_runtime() {
+        const MARKER: &str = "HH_TEST_NATIVE_ONLY_UNREBUILT_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let test = format!(
+                "{}::approved_unrebuilt_cleanup_keeps_hook_paths_out_of_copied_runtime",
+                module_path!().split_once("::").unwrap().1
+            );
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .env(MARKER, "1")
+                .args(["--exact", &test, "--test-threads=1"])
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        let worker = crate::attachment::startup::begin_for_test(true);
+        let copied_runtime = crate::state().lock().unwrap();
+        assert!(!crate::attachment::startup::native_only());
+        assert!(HookGuard::enter().is_none());
+        assert!(!housekeeping_allowed());
+        crate::attachment::startup::cancel_for_test();
+        assert!(
+            !crate::attachment::startup::native_only(),
+            "worker still owns native initialization"
+        );
+        worker.finish(false);
+        assert!(crate::attachment::startup::native_only());
+        assert!(HookGuard::enter().is_none());
+        assert!(!housekeeping_allowed());
+        drop(copied_runtime);
+    }
+
+    #[test]
+    fn fd_exec_metadata_treats_null_argv_as_known_empty() {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            let executable = std::fs::File::open("/proc/self/exe").unwrap();
+            let arguments = super::super::super::exec_bridge::argv(std::ptr::null()).unwrap();
+            let null = fd_exec_target(executable.as_raw_fd(), Some(c""), &arguments).unwrap();
+            assert_eq!(null.1, "");
+            assert!(!null.0.is_empty());
+        }
+    }
+
+    #[test]
+    fn exec_metadata_preserves_null_and_empty_vectors_and_owned_arguments() {
+        unsafe {
+            let path =
+                CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes()).unwrap();
+            assert!(process_target(std::ptr::null(), std::ptr::null()).is_none());
+            let null = process_target(path.as_ptr(), std::ptr::null()).unwrap();
+            let empty = [std::ptr::null()];
+            assert_eq!(
+                process_target(path.as_ptr(), empty.as_ptr()),
+                Some(null.clone())
+            );
+            assert_eq!(null.1, "");
+            let arguments = [
+                c"".as_ptr(),
+                c"first".as_ptr(),
+                c"".as_ptr(),
+                c"last".as_ptr(),
+                std::ptr::null(),
+            ];
+            assert_eq!(
+                process_target(path.as_ptr(), arguments.as_ptr()).unwrap().1,
+                "first  last"
+            );
+            assert!(process_target(path.as_ptr(), 1usize as *const *const libc::c_char).is_none());
+            let bad = [1usize as *const libc::c_char, std::ptr::null()];
+            assert!(process_target(path.as_ptr(), bad.as_ptr()).is_none());
+        }
+    }
+
+    #[test]
+    fn exec_metadata_and_environment_reject_guarded_tables_and_strings() {
+        unsafe {
+            let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let memory = libc::mmap(
+                std::ptr::null_mut(),
+                page_size * 2,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            assert_ne!(memory, libc::MAP_FAILED);
+            let guard = memory.cast::<u8>().add(page_size);
+            assert_eq!(libc::mprotect(guard.cast(), page_size, libc::PROT_NONE), 0);
+            let text = guard.sub(16);
+            std::ptr::write_bytes(text, b'x', 16);
+            assert!(process_target(text.cast(), std::ptr::null()).is_none());
+            let path = c"/missing/exec-metadata-regression";
+            let table = guard.sub(size_of::<usize>()).cast::<*const libc::c_char>();
+            table.write(c"readable".as_ptr());
+            assert!(process_target(path.as_ptr(), table).is_none());
+            assert!(inherited_environment(table, true).is_none());
+            // The pointer-table probe overlaps the unterminated string and
+            // writes NUL bytes. Restore the string before testing it again.
+            std::ptr::write_bytes(text, b'x', 16);
+            let bad_string = [
+                text.cast::<libc::c_char>() as *const libc::c_char,
+                std::ptr::null(),
+            ];
+            assert!(inherited_environment(bad_string.as_ptr(), true).is_none());
+            assert_eq!(libc::munmap(memory, page_size * 2), 0);
+        }
+    }
+
+    #[test]
+    fn legacy_environment_merges_only_complete_safe_copies() {
+        unsafe {
+            assert!(inherited_environment(1usize as *const *const libc::c_char, true).is_none());
+            let bad = [1usize as *const libc::c_char, std::ptr::null()];
+            assert!(inherited_environment(bad.as_ptr(), true).is_none());
+            let supplied = [
+                c"LOCAL_EXEC_VALUE=kept".as_ptr(),
+                c"HYPERHUB_SKIP_AGENT=old".as_ptr(),
+                std::ptr::null(),
+            ];
+            let (values, pointers) = inherited_environment(supplied.as_ptr(), false).unwrap();
+            assert!(values
+                .iter()
+                .any(|value| value.as_bytes() == b"LOCAL_EXEC_VALUE=kept"));
+            assert_eq!(
+                values
+                    .iter()
+                    .filter(|value| value.as_bytes().starts_with(b"HYPERHUB_SKIP_AGENT="))
+                    .count(),
+                1
+            );
+            assert!(values
+                .iter()
+                .any(|value| value.as_bytes() == b"HYPERHUB_SKIP_AGENT=1"));
+            assert_eq!(pointers.last(), Some(&std::ptr::null()));
+        }
+    }
+
+    #[test]
+    fn unavailable_exec_metadata_uses_policy_error_action() {
+        assert!(!process_metadata_error_allows(Some(
+            crate::SandboxAction::Deny
+        )));
+        assert!(process_metadata_error_allows(Some(
+            crate::SandboxAction::Pass
+        )));
+        assert!(process_metadata_error_allows(None));
+    }
 
     #[test]
     fn open_access_modes_preserve_all_requested_content_permissions() {

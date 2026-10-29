@@ -1,11 +1,16 @@
-use super::{take_error, unref, ChildOrigin, Command, FridaCore, PendingChild, Process};
+use super::{
+    take_error, unref, ChildOrigin, CleanupKey, Command, FridaCore, FridaRequestError,
+    PendingChild, Process,
+};
 use crate::platform::linux::frida_core::context::Context;
 use std::ffi::CStr;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::time::Duration;
 
 impl Context {
     fn retire_detached_sessions(&mut self) {
-        self.child_sessions.retain(|session| unsafe {
+        self.child_sessions.retain(|(_, session)| unsafe {
             if frida_sys::frida_session_is_detached(session.as_ptr()) == 0 {
                 true
             } else {
@@ -15,18 +20,28 @@ impl Context {
         });
     }
 
-    pub(super) fn enable_child_gating(&mut self, process: Process) -> Result<(), String> {
+    pub(super) fn enable_child_gating(
+        &mut self,
+        process: Process,
+        cancellation: Option<&super::Cancellable>,
+    ) -> Result<(), String> {
         self.retire_detached_sessions();
+        if self.child_sessions.iter().any(|(pid, _)| *pid == process) {
+            return Ok(());
+        }
         unsafe {
-            let session = attach(self.device.as_ptr(), process)?;
+            let session = attach(self.device.as_ptr(), process, cancellation)?;
+            let cancellable = cancellation
+                .map(super::Cancellable::as_ptr)
+                .unwrap_or(std::ptr::null_mut());
             let mut error = std::ptr::null_mut();
             frida_sys::frida_session_enable_child_gating_sync(
                 session.as_ptr(),
-                std::ptr::null_mut(),
+                cancellable,
                 &mut error,
             );
             if error.is_null() {
-                self.child_sessions.push(session);
+                self.child_sessions.push((process, session));
                 Ok(())
             } else {
                 unref(session.as_ptr().cast());
@@ -35,13 +50,69 @@ impl Context {
         }
     }
 
-    pub(super) fn pending_children(&mut self) -> Result<Vec<PendingChild>, String> {
+    pub(super) fn disable_child_gating(
+        &mut self,
+        process: Process,
+        cancellation: Option<&super::Cancellable>,
+    ) -> Result<(), String> {
+        self.retire_detached_sessions();
+        let Some(index) = self
+            .child_sessions
+            .iter()
+            .position(|(pid, _)| *pid == process)
+        else {
+            return Ok(());
+        };
+        let (_, session) = self.child_sessions[index];
+        unsafe {
+            let cancellable = cancellation
+                .map(super::Cancellable::as_ptr)
+                .unwrap_or(std::ptr::null_mut());
+            super::diagnostic_stage("disable_child_gating", Some(process.pid()), "disable_begin");
+            let mut error = std::ptr::null_mut();
+            frida_sys::frida_session_disable_child_gating_sync(
+                session.as_ptr(),
+                cancellable,
+                &mut error,
+            );
+            if !error.is_null() {
+                return Err(take_error(error));
+            }
+            super::diagnostic_stage(
+                "disable_child_gating",
+                Some(process.pid()),
+                "disable_complete",
+            );
+            let mut detach_error = std::ptr::null_mut();
+            super::diagnostic_stage("disable_child_gating", Some(process.pid()), "detach_begin");
+            frida_sys::frida_session_detach_sync(session.as_ptr(), cancellable, &mut detach_error);
+            if !detach_error.is_null() {
+                return Err(take_error(detach_error));
+            }
+            super::diagnostic_stage(
+                "disable_child_gating",
+                Some(process.pid()),
+                "detach_complete",
+            );
+            self.child_sessions.remove(index);
+            unref(session.as_ptr().cast());
+        }
+        Ok(())
+    }
+
+    pub(super) fn pending_children(
+        &mut self,
+        cancellation: Option<&super::Cancellable>,
+    ) -> Result<Vec<PendingChild>, String> {
         self.retire_detached_sessions();
         unsafe {
+            let cancellable = cancellation
+                .map(super::Cancellable::as_ptr)
+                .unwrap_or(std::ptr::null_mut());
             let mut error = std::ptr::null_mut();
             let list = frida_sys::frida_device_enumerate_pending_children_sync(
                 self.device.as_ptr(),
-                std::ptr::null_mut(),
+                cancellable,
                 &mut error,
             );
             if !error.is_null() {
@@ -84,11 +155,93 @@ impl Context {
 
 impl FridaCore {
     pub fn enable_child_gating(&self, process: Process) -> Result<(), String> {
-        self.request(|reply| Command::EnableChildGating { process, reply })
+        self.request(|reply| Command::EnableChildGating {
+            process,
+            cancellation: None,
+            reply,
+        })
+    }
+
+    pub fn disable_child_gating(&self, process: Process) -> Result<(), String> {
+        self.request(|reply| Command::DisableChildGating {
+            process,
+            cancellation: None,
+            reply,
+        })
     }
 
     pub fn pending_children(&self) -> Result<Vec<PendingChild>, String> {
-        self.request(|reply| Command::PendingChildren { reply })
+        self.request(|reply| Command::PendingChildren {
+            cancellation: None,
+            reply,
+        })
+    }
+
+    pub fn enable_child_gating_with_timeout(
+        &self,
+        process: Process,
+        timeout: Duration,
+    ) -> Result<(), FridaRequestError> {
+        let cancellation = Arc::new(super::Cancellable::new()?);
+        let command_cancellation = cancellation.clone();
+        let timeout_cancellation = cancellation.clone();
+        self.request_with_timeout(
+            timeout,
+            move || timeout_cancellation.cancel(),
+            move |reply| Command::EnableChildGating {
+                process,
+                cancellation: Some(command_cancellation),
+                reply,
+            },
+        )
+    }
+
+    pub fn disable_child_gating_with_timeout(
+        &self,
+        process: Process,
+        timeout: Duration,
+    ) -> Result<(), FridaRequestError> {
+        let cancellation = Arc::new(super::Cancellable::new()?);
+        let command_cancellation = cancellation.clone();
+        let timeout_cancellation = cancellation.clone();
+        self.request_with_timeout(
+            timeout,
+            move || timeout_cancellation.cancel(),
+            move |reply| Command::DisableChildGating {
+                process,
+                cancellation: Some(command_cancellation),
+                reply,
+            },
+        )
+    }
+
+    pub fn pending_children_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<PendingChild>, FridaRequestError> {
+        let cancellation = Arc::new(super::Cancellable::new()?);
+        let command_cancellation = cancellation.clone();
+        let timeout_cancellation = cancellation.clone();
+        self.request_with_timeout(
+            timeout,
+            move || timeout_cancellation.cancel(),
+            move |reply| Command::PendingChildren {
+                cancellation: Some(command_cancellation),
+                reply,
+            },
+        )
+    }
+
+    pub fn disable_child_gating_cleanup(&self, process: Process) -> Result<(), String> {
+        self.cleanup_request(CleanupKey::DisableChildGating(process.pid()), |reply| {
+            Command::CleanupDisableChildGating { process, reply }
+        })
+    }
+
+    pub fn pending_children_cleanup(&self) -> Result<Vec<PendingChild>, String> {
+        self.cleanup_request(CleanupKey::PendingChildren, |reply| {
+            Command::CleanupPendingChildren { reply }
+        })
     }
 }
 
@@ -99,15 +252,26 @@ fn is_skip_agent_entry(value: &CStr) -> bool {
 pub(super) unsafe fn attach(
     device: *mut frida_sys::_FridaDevice,
     process: Process,
+    cancellation: Option<&super::Cancellable>,
 ) -> Result<NonNull<frida_sys::_FridaSession>, String> {
     let options = frida_sys::frida_session_options_new();
     let options = NonNull::new(options).ok_or("frida_session_options_new returned null")?;
+    // Core is our injector and fork/exec observer, not an application exit
+    // barrier. A resumed native-only child can enter libc _exit while its
+    // inherited Core main context is retiring; ExitMonitor then waits for an
+    // async preparation that cannot finish. Preserve the application's exit
+    // operation. HyperHub observes its lifetime through the OS/owned launcher,
+    // independently of Core's optional user-script pre-exit flush monitor.
+    frida_sys::frida_session_options_set_exit_monitor(options.as_ptr(), 0);
     let mut error = std::ptr::null_mut();
+    let cancellable = cancellation
+        .map(super::Cancellable::as_ptr)
+        .unwrap_or(std::ptr::null_mut());
     let session = frida_sys::frida_device_attach_sync(
         device,
         process.pid() as u32,
         options.as_ptr(),
-        std::ptr::null_mut(),
+        cancellable,
         &mut error,
     );
     unref(options.as_ptr().cast());

@@ -36,9 +36,16 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Cache pinned Linux Frida source build
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .cache/frida-native
+          key: frida-native-${{ runner.os }}-${{ github.job }}-${{ hashFiles('third_party/frida/**', 'scripts/frida-native-deps.py', 'scripts/native-deps/*.py', 'tests/fixtures/frida-native/*.c', 'tests/fixtures/linux_execve_error_probe.c') }}
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config git ca-certificates python3 clang libclang-dev
 
       - name: Check isolated CI permission setup
         if: runner.os == 'Linux'
@@ -47,6 +54,14 @@ jobs:
       - name: Prepare unrestricted Gum environment in disposable test VM
         if: runner.os == 'Linux'
         run: bash scripts/ci-linux-gum-environment.sh prepare
+
+      - name: Test pinned Frida dependency setup contract
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s tests -p test_frida_native_dependencies.py
+
+      - name: Test dynamic attach driver evidence bounds
+        if: runner.os == 'Linux'
+        run: python3 -W error::ResourceWarning -m unittest discover -s tests -p test_dynamic_attach_driver.py
 
       - name: Prepare Linux Frida devkits
         if: runner.os == 'Linux'
@@ -61,8 +76,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check terminal fixture formatting
+        run: cargo fmt --manifest-path tests/fixtures/dynamic-attach-terminal/Cargo.toml -- --check
+
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked
+
+      - name: Check standalone Windows runtime features
+        if: runner.os == 'Windows'
+        run: cargo check -p hyperhub-runtime --all-targets --locked
 
       - name: Check HyperHub Skill benchmark contract
         run: ./scripts/benchmark-skill-subagent.sh --contract-only
@@ -122,13 +144,20 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Cache pinned Linux Frida source build
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .cache/frida-native
+          key: frida-native-${{ runner.os }}-${{ github.job }}-${{ hashFiles('third_party/frida/**', 'scripts/frida-native-deps.py', 'scripts/native-deps/*.py', 'tests/fixtures/frida-native/*.c', 'tests/fixtures/linux_execve_error_probe.c') }}
+
       - name: Install Go
         uses: actions/setup-go@v5
         with:
           go-version: stable
 
       - name: Install Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang gcc-aarch64-linux-gnu libclang-dev musl-tools busybox-static openssh-server openssl
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config git ca-certificates python3 clang gcc-aarch64-linux-gnu libclang-dev musl-tools busybox-static openssh-server openssl
 
       - name: Prepare unrestricted Gum environment in disposable test VM
         run: bash scripts/ci-linux-gum-environment.sh prepare
@@ -227,7 +256,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build embedded candidate
         shell: pwsh
-        run: .\scripts\build.ps1 -SkipTests
+        run: |
+          .\scripts\build.ps1 -SkipTests
+          if ($LASTEXITCODE -ne 0) { throw 'Windows embedded candidate build failed' }
+          cargo build --release --locked -p hyperhub-runtime --example attachment_init_failure
+          if ($LASTEXITCODE -ne 0) { throw 'Windows initialization regression probe build failed' }
       - name: Exercise attachment lifecycle for two hours
         shell: pwsh
         run: |

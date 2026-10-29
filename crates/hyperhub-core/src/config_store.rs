@@ -67,12 +67,25 @@ pub struct KdfDescriptor {
 pub struct ConfigKeyring {
     descriptor: KdfDescriptor,
     master: Zeroizing<Vec<u8>>,
+    approval_public_key: Option<[u8; 32]>,
+    approval_continuity: Option<Vec<hyperhub_runtime::attachment::SignedApprovalRootTransition>>,
 }
 
 impl ConfigKeyring {
     pub fn derive(password: &[u8], descriptor: KdfDescriptor) -> Result<Self, StoreError> {
         let master = derive_master(password, &descriptor)?;
-        Ok(Self { descriptor, master })
+        let seed = derive_password_approval_seed(password, &descriptor)?;
+        let key = ed25519_dalek::SigningKey::from_bytes(
+            seed.as_slice()
+                .try_into()
+                .map_err(|_| StoreError::Authentication)?,
+        );
+        Ok(Self {
+            descriptor,
+            master,
+            approval_public_key: Some(key.verifying_key().to_bytes()),
+            approval_continuity: None,
+        })
     }
 
     pub fn descriptor(&self) -> &KdfDescriptor {
@@ -96,7 +109,12 @@ impl ConfigKeyring {
                 "runtime configuration key is invalid".into(),
             ));
         }
-        Ok(Self { descriptor, master })
+        Ok(Self {
+            descriptor,
+            master,
+            approval_public_key: None,
+            approval_continuity: None,
+        })
     }
 
     fn subkey(&self, label: &[u8]) -> Result<Zeroizing<Vec<u8>>, StoreError> {
@@ -109,6 +127,9 @@ pub struct UnlockedConfig {
     pub config: Config,
     pub descriptor: KdfDescriptor,
     pub session_auth_key: Zeroizing<Vec<u8>>,
+    /// Authenticated configuration TCB anchor; this does not enroll Core.
+    pub approval_public_key: Option<[u8; 32]>,
+    pub approval_continuity: Vec<hyperhub_runtime::attachment::SignedApprovalRootTransition>,
 }
 
 pub struct UnlockedApprovalState {
@@ -316,12 +337,25 @@ pub fn load_encrypted_with_keyring(
     }
     ensure_keyring_descriptor(keyring, &header.descriptor)?;
     let plaintext = decrypt_payload_with_keyring(&bytes, keyring, CONFIG_LABEL)?;
-    let config = parse_document_toml(&plaintext, path)?;
+    let (document, approval_continuity) = continuity::decode(&plaintext)?;
+    let config = parse_document_toml(&document, path)?;
+    if !approval_continuity.is_empty() {
+        let (key, _, id) = hyperhub_runtime::attachment::verify_approval_root_chain(
+            &crate::attachments::instance_id(path, &header.descriptor),
+            &approval_continuity,
+        )
+        .map_err(|e| StoreError::Format(e.to_string()))?;
+        if key != header.digest || id != header.descriptor.config_id {
+            return Err(StoreError::Authentication);
+        }
+    }
     let session_auth_key = keyring.session_auth_key()?;
     Ok(UnlockedConfig {
         config,
         descriptor: header.descriptor,
         session_auth_key,
+        approval_public_key: (header.digest != [0; 32]).then_some(header.digest),
+        approval_continuity,
     })
 }
 
@@ -412,7 +446,8 @@ pub fn import(path: &Path, password: Option<&[u8]>) -> Result<Config, StoreError
         } else {
             Zeroizing::new(verify_plain_payload(&bytes, &header)?)
         };
-        parse_document_toml(&plaintext, path)
+        let (document, _) = continuity::decode(&plaintext)?;
+        parse_document_toml(&document, path)
     } else {
         parse_document_toml(&bytes, path)
     }
@@ -437,11 +472,65 @@ pub fn save_encrypted_with_keyring(
     config: &Config,
     keyring: &ConfigKeyring,
 ) -> Result<(), StoreError> {
-    let document = ConfigDocument::from_config(config);
-    let plaintext = Zeroizing::new(toml::to_string_pretty(&document)?.into_bytes());
-    let bytes = encrypt_payload_with_keyring(&plaintext, keyring, CONFIG_LABEL)?;
-    atomic_write(path, &bytes)?;
+    save_encrypted_content_with_keyring(path, config, keyring, None)?;
     save_redacted_json(path, config)
+}
+
+pub fn save_encrypted_with_keyring_guarded(
+    path: &Path,
+    config: &Config,
+    keyring: &ConfigKeyring,
+    guard: &crate::attachments::OperationGuard,
+) -> Result<Option<String>, StoreError> {
+    save_encrypted_content_with_keyring(path, config, keyring, Some(guard))?;
+    Ok(save_redacted_json(path, config)
+        .err()
+        .map(|error| error.to_string()))
+}
+
+/// Commit the authoritative ciphertext separately from its derived display
+/// view. A failed display write must not conceal an already committed config.
+pub(crate) fn save_encrypted_content_with_keyring(
+    path: &Path,
+    config: &Config,
+    keyring: &ConfigKeyring,
+    guard: Option<&crate::attachments::OperationGuard>,
+) -> Result<(), StoreError> {
+    let document = ConfigDocument::from_config(config);
+    let mut effective = keyring.clone();
+    if effective.approval_continuity.is_none() && path.is_file() {
+        let header = parse_header(&read(path)?)?;
+        // Preserve history for the same password root and runtime-only saves.
+        // An explicit replacement root cannot decrypt the previous ciphertext;
+        // only with_password_rotation can carry its authenticated history over.
+        if header.descriptor == effective.descriptor
+            && (effective.approval_public_key.is_none()
+                || effective.approval_public_key == Some(header.digest))
+        {
+            effective.approval_continuity =
+                Some(load_encrypted_with_keyring(path, keyring)?.approval_continuity);
+        }
+    }
+    let plaintext = continuity::encode(
+        &document,
+        effective.approval_continuity.as_deref().unwrap_or_default(),
+    )?;
+    if effective.approval_public_key.is_none() && path.exists() {
+        let previous = read(path)?;
+        let header = parse_header(&previous)?;
+        if header.encrypted && header.descriptor == effective.descriptor && header.digest != [0; 32]
+        {
+            // Runtime-only saves preserve the already authenticated anchor; they
+            // never derive or choose a new password authority.
+            load_encrypted_with_keyring(path, keyring)?;
+            effective.approval_public_key = Some(header.digest);
+        }
+    }
+    let bytes = encrypt_payload_with_keyring(&plaintext, &effective, CONFIG_LABEL)?;
+    let _approval_rotation =
+        crate::attachments::invalidate_authority_for_config_write_guarded(path, keyring, guard)
+            .map_err(StoreError::Format)?;
+    atomic_write(path, &bytes)
 }
 
 pub fn export(
@@ -484,7 +573,12 @@ fn encrypt_payload_with_keyring(
     let mut nonce = [0u8; 24];
     rand::fill(&mut nonce);
     let payload_len = plaintext.len() as u64 + 16;
-    let header = build_header(true, keyring.descriptor(), nonce, payload_len, [0; 32]);
+    let anchor = if label == CONFIG_LABEL {
+        keyring.approval_public_key.unwrap_or([0; 32])
+    } else {
+        [0; 32]
+    };
+    let header = build_header(true, keyring.descriptor(), nonce, payload_len, anchor);
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| StoreError::Authentication)?;
     let ciphertext = cipher
         .encrypt(
@@ -616,6 +710,20 @@ fn derive_master(
         .hash_password_into(password, &descriptor.salt, &mut output)
         .map_err(|error| StoreError::Format(error.to_string()))?;
     Ok(output)
+}
+
+/// Independent password domain. The runtime/API master does not determine it.
+pub(crate) fn derive_password_approval_seed(
+    password: &[u8],
+    descriptor: &KdfDescriptor,
+) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+    let mut separated = descriptor.clone();
+    let mut hash = Sha256::new();
+    hash.update(b"hyperhub/runtime-attachment-approval/v1\0");
+    hash.update(descriptor.salt);
+    hash.update(descriptor.config_id);
+    separated.salt.copy_from_slice(&hash.finalize()[..16]);
+    derive_master(password, &separated)
 }
 
 fn derive_subkey(
@@ -986,6 +1094,13 @@ pub fn reencrypt_root_certificates(
     new_password: &[u8],
     new_descriptor: &KdfDescriptor,
 ) -> Result<(), StoreError> {
+    crate::attachments::prepare_runtime_key_rotation(
+        config_path,
+        old_password,
+        new_password,
+        new_descriptor,
+    )
+    .map_err(StoreError::Format)?;
     let directory = root_certificates_dir(config_path);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -1371,3 +1486,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[path = "config_continuity.rs"]
+mod continuity;
+pub use continuity::approval_rotation_certificate;

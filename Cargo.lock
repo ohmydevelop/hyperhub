@@ -1344,6 +1344,8 @@ name = "hyperhub-agent-core"
 version = "0.3.0-alpha.1"
 dependencies = [
  "base64",
+ "ed25519-dalek",
+ "hyperhub-core",
  "hyperhub-engine",
  "hyperhub-runtime",
  "ipnet",
@@ -1363,6 +1365,7 @@ dependencies = [
  "argon2 0.5.3",
  "base64",
  "chacha20poly1305",
+ "ed25519-dalek",
  "flate2",
  "hkdf 0.12.4",
  "hmac 0.12.1",
@@ -1418,6 +1421,7 @@ dependencies = [
 name = "hyperhub-runtime"
 version = "0.3.0-alpha.1"
 dependencies = [
+ "ed25519-dalek",
  "libc",
  "libloading",
  "serde",

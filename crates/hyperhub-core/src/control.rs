@@ -1,3 +1,12 @@
+#[path = "attachments/alias_control.rs"]
+mod alias_control;
+#[path = "attachments/control.rs"]
+mod attachment_control;
+#[cfg(test)]
+#[path = "config_persistence_tests.rs"]
+mod config_persistence_tests;
+#[path = "successor/control.rs"]
+mod successor_control;
 use crate::audit::AuditWriter;
 use crate::config::Config;
 use crate::config_document::ConfigDocument;
@@ -142,6 +151,8 @@ pub struct ControlService {
     debug_forced: bool,
     socks_listener: Option<SocksListenerController>,
     config_update: Arc<tokio::sync::Mutex<()>>,
+    configuration_store: Option<Arc<crate::config_persistence::ConfigurationStore>>,
+    configuration_startup_guard: Arc<std::sync::Mutex<Option<crate::attachments::OperationGuard>>>,
     shutdown: Option<tokio::sync::watch::Sender<bool>>,
     session_state_path: Option<PathBuf>,
     session_state_key: Option<Zeroizing<Vec<u8>>>,
@@ -150,6 +161,24 @@ pub struct ControlService {
     engine_upgrades: Option<crate::upgrade::Coordinator>,
     release_upgrades: Option<crate::release::Coordinator>,
     forward_workers: Option<crate::socks::WorkerManager>,
+    attachment_directory: Option<PathBuf>,
+    approval_config_path: Option<PathBuf>,
+    alias_histories: alias_control::AliasHistories,
+    operation_challenges: Arc<crate::attachments::OperationChallengeBook>,
+    successor_admission: crate::successor::Admission,
+    successor_freeze: Arc<std::sync::Mutex<Option<crate::successor::Freeze>>>,
+    owned_attachment_handoffs: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, attachment_control::OwnedRunHandoff>>,
+    >,
+}
+
+/// File hooks bind the smart-protection request to the same immutable reader
+/// used for path matching. Legacy clients omit this optional context field.
+fn file_protection_version_matches(stage: &str, context: &serde_json::Value, version: u64) -> bool {
+    !stage.starts_with("file_")
+        || context
+            .get("expected_sandbox_version")
+            .is_none_or(|value| value.as_u64() == Some(version))
 }
 
 impl ControlService {
@@ -173,6 +202,8 @@ impl ControlService {
             debug_forced: false,
             socks_listener: None,
             config_update: Arc::new(tokio::sync::Mutex::new(())),
+            configuration_store: None,
+            configuration_startup_guard: Default::default(),
             shutdown: None,
             session_state_path: None,
             session_state_key: None,
@@ -180,7 +211,148 @@ impl ControlService {
             engine_upgrades: None,
             release_upgrades: None,
             forward_workers: None,
+            attachment_directory: None,
+            approval_config_path: None,
+            alias_histories: Default::default(),
+            operation_challenges: Default::default(),
+            successor_admission: Default::default(),
+            successor_freeze: Default::default(),
+            owned_attachment_handoffs: Default::default(),
         }
+    }
+
+    pub fn with_attachment_directory(mut self, directory: PathBuf) -> Self {
+        self.attachment_directory =
+            crate::attachments::process_attachment_identity_available().then_some(directory);
+        self
+    }
+
+    pub fn with_configuration_store(
+        mut self,
+        path: PathBuf,
+        keyring: crate::config_store::ConfigKeyring,
+    ) -> Result<Self, String> {
+        let store = crate::config_persistence::ConfigurationStore::new(path, keyring)?;
+        if store
+            .keyring
+            .session_auth_key()
+            .map_err(|e| e.to_string())?
+            .as_slice()
+            != self.session_auth_key.as_slice()
+        {
+            return Err("configuration store key differs from the running Core".into());
+        }
+        self.configuration_store = Some(Arc::new(store));
+        Ok(self)
+    }
+
+    pub fn with_configuration_startup_guard(
+        self,
+        guard: crate::attachments::OperationGuard,
+    ) -> Result<Self, String> {
+        let store = self
+            .configuration_store
+            .as_ref()
+            .ok_or("startup guard needs a configuration store")?;
+        let directory = crate::attachments::configuration_attachment_directory(&store.path)?;
+        guard.protects(&directory)?;
+        if store.persisted_digest()?
+            != crate::config_persistence::configuration_digest(&self.runtime.snapshot().config)?
+        {
+            return Err("configuration changed during Core startup".into());
+        }
+        *self
+            .configuration_startup_guard
+            .lock()
+            .map_err(|_| "configuration startup guard unavailable")? = Some(guard);
+        Ok(self)
+    }
+
+    fn take_configuration_startup_guard(
+        &self,
+    ) -> io::Result<Option<crate::attachments::OperationGuard>> {
+        let guard = self
+            .configuration_startup_guard
+            .lock()
+            .map_err(|_| io::Error::other("configuration startup guard unavailable"))
+            .map(|mut guard| guard.take())?;
+        if self.configuration_store.is_some() && guard.is_none() {
+            return Err(io::Error::other(
+                "persistent Core startup requires its configuration operation guard",
+            ));
+        }
+        Ok(guard)
+    }
+
+    pub fn with_approval_anchor(
+        self,
+        config: &std::path::Path,
+        descriptor: &crate::config_store::KdfDescriptor,
+        anchor: Option<[u8; 32]>,
+    ) -> Result<Self, String> {
+        self.with_approval_anchor_generation(config, descriptor, anchor, 0)
+    }
+
+    pub fn with_approval_anchor_generation(
+        mut self,
+        config: &std::path::Path,
+        descriptor: &crate::config_store::KdfDescriptor,
+        anchor: Option<[u8; 32]>,
+        generation: u64,
+    ) -> Result<Self, String> {
+        self.approval_config_path = Some(if config.is_absolute() {
+            config.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(config)
+        });
+        if let (Some(directory), Some(public_key)) = (&self.attachment_directory, anchor) {
+            crate::attachments::pin_expected_approval_anchor(
+                directory,
+                crate::attachments::ApprovalAuthority {
+                    instance_id: crate::attachments::instance_id(config, descriptor),
+                    config_id: descriptor.config_id,
+                    public_key,
+                    generation,
+                },
+            )?;
+        }
+        Ok(self)
+    }
+
+    /// Install only the continuity metadata from the authenticated config load.
+    pub fn with_approval_continuity(
+        self,
+        chain: Vec<hyperhub_runtime::attachment::SignedApprovalRootTransition>,
+    ) -> Result<Self, String> {
+        if let Some(directory) = &self.attachment_directory {
+            crate::attachments::pin_approval_continuity(directory, chain)?;
+        } else if !chain.is_empty() {
+            return Err("approval history requires attachment storage".into());
+        }
+        Ok(self)
+    }
+
+    fn acquire_serve_lease(
+        &self,
+        endpoint: &str,
+    ) -> io::Result<Option<crate::serve_lease::ServeLease>> {
+        if !crate::attachments::process_attachment_identity_available() {
+            return Ok(None);
+        }
+        let path = if let Some(config) = &self.approval_config_path {
+            Some(crate::serve_lease::path_for_config(config).map_err(io::Error::other)?)
+        } else {
+            self.attachment_directory
+                .as_ref()
+                .and_then(|directory| directory.parent())
+                .map(|runtime| runtime.join("core-lease").join("serve.json"))
+        };
+        path.map(|path| {
+            crate::serve_lease::ServeLease::acquire(path, endpoint).map_err(io::Error::other)
+        })
+        .transpose()
     }
 
     pub fn with_forced_debug(mut self, forced: bool) -> Self {
@@ -342,39 +514,137 @@ impl ControlService {
     }
 
     async fn update_config(&self, config: Config) -> ControlResponse {
+        self.apply_configuration(config, None).await
+    }
+
+    async fn apply_configuration(
+        &self,
+        config: Config,
+        persistence: Option<&crate::config_persistence::ConfigWriteAuthorization>,
+    ) -> ControlResponse {
+        let _attachment_operation = match self.attachment_configuration_guard(&config) {
+            Ok(guard) => guard,
+            Err(message) => return ControlResponse::Error { message },
+        };
         let _update = self.config_update.lock().await;
         let previous = self.runtime.snapshot();
+        if let Some(authorization) = persistence {
+            let Some(store) = &self.configuration_store else {
+                return ControlResponse::Error {
+                    message: "this Core cannot persist configuration".into(),
+                };
+            };
+            if let Err(message) = store.consume(authorization, &config, unix_timestamp_ms()) {
+                return ControlResponse::Error { message };
+            }
+            let digests = crate::config_persistence::configuration_digest(&previous.config)
+                .and_then(|runtime| store.persisted_digest().map(|disk| (runtime, disk)));
+            match digests {
+                Ok((runtime, disk)) if runtime == authorization.config_digest && disk == authorization.config_digest => {
+                    let publication_error = store.publication_warning(&runtime);
+                    return ControlResponse::ConfigurationPersisted { config_digest: runtime, redacted_view_error: None, publication_error };
+                }
+                Ok((runtime, disk)) if runtime == authorization.expected_digest && disk == authorization.expected_digest => {}
+                Ok(_) => return ControlResponse::Error { message: "configuration changed before persistence; reload and review the current configuration".into() },
+                Err(message) => return ControlResponse::Error { message },
+            }
+        }
         let debug = self.debug_forced || config.debug;
         let prepared = match self.runtime.prepare_update(Arc::new(config)) {
             Ok(prepared) => prepared,
             Err(message) => return ControlResponse::Error { message },
         };
+        if let Err(message) = compile_agent_snapshots(&prepared.config, prepared.updated_at_ms) {
+            return ControlResponse::Error {
+                message: format!("cannot compile agent snapshots: {message}"),
+            };
+        }
         let socks_listener_changed =
             previous.config.listener.socks_listen != prepared.config.listener.socks_listen;
-        if socks_listener_changed {
+        let prepared_listener = if socks_listener_changed {
             let Some(listener) = &self.socks_listener else {
                 return ControlResponse::Error {
                     message: "SOCKS5 listener hot update is unavailable".into(),
                 };
             };
-            if let Err(error) = listener
-                .ensure_listener(&prepared.config.listener.socks_listen)
+            match listener
+                .prepare_listener(&prepared.config.listener.socks_listen)
                 .await
             {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    return ControlResponse::Error {
+                        message: format!(
+                            "cannot bind SOCKS5 listener {}: {error}",
+                            prepared.config.listener.socks_listen
+                        ),
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        let prepared_debug = match self.audit.prepare_debug(debug) {
+            Ok(prepared) => prepared,
+            Err(error) => {
                 return ControlResponse::Error {
-                    message: format!(
-                        "cannot bind SOCKS5 listener {}: {error}",
-                        prepared.config.listener.socks_listen
-                    ),
+                    message: format!("cannot update debug output: {error}"),
+                }
+            }
+        };
+        let persisted = if persistence.is_some() {
+            let store = self
+                .configuration_store
+                .as_ref()
+                .expect("persistence store checked above");
+            if let Err(error) = crate::config_store::save_encrypted_content_with_keyring(
+                &store.path,
+                &prepared.config,
+                &store.keyring,
+                _attachment_operation.as_ref(),
+            ) {
+                return ControlResponse::Error {
+                    message: format!("configuration was not persisted: {error}"),
+                };
+            }
+            let redacted_view_error =
+                crate::config_store::save_redacted_json(&store.path, &prepared.config)
+                    .err()
+                    .map(|e| e.to_string());
+            Some((
+                crate::config_persistence::configuration_digest(&prepared.config)
+                    .expect("prepared serializable configuration"),
+                redacted_view_error,
+            ))
+        } else {
+            None
+        };
+        let publication_error = if let Some(listener) = prepared_listener {
+            self.socks_listener
+                .as_ref()
+                .expect("prepared listener has its controller")
+                .commit_listener(listener)
+                .await
+                .err()
+                .map(|error| format!("configuration listener publication failed: {error}"))
+        } else {
+            None
+        };
+        if persisted.is_none() {
+            if let Some(message) = publication_error.as_ref() {
+                return ControlResponse::Error {
+                    message: message.clone(),
                 };
             }
         }
-        if let Err(error) = self.audit.set_debug(debug) {
-            return ControlResponse::Error {
-                message: format!("cannot update debug output: {error}"),
-            };
-        }
+        self.audit.commit_debug(prepared_debug);
         let socks_listen = self.socks_address(&prepared);
+        if let Some((digest, _)) = &persisted {
+            self.configuration_store
+                .as_ref()
+                .expect("persisted configuration store")
+                .record_publication(digest, publication_error.as_deref());
+        }
         self.runtime.commit_update(prepared);
         self.audit.system_event(
             "config_reloaded",
@@ -385,7 +655,14 @@ impl ControlService {
                 "socks_listener_changed": socks_listener_changed,
             }),
         );
-        ControlResponse::Ok
+        match persisted {
+            Some((config_digest, redacted_view_error)) => ControlResponse::ConfigurationPersisted {
+                config_digest,
+                redacted_view_error,
+                publication_error,
+            },
+            None => ControlResponse::Ok,
+        }
     }
 
     async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
@@ -394,6 +671,83 @@ impl ControlService {
         peer_pid: Option<u32>,
     ) -> io::Result<()> {
         let request: ControlRequest = read_frame(&mut stream).await?;
+        if let ControlRequest::RestartServe { debug } = request {
+            return self.restart_serve(stream, peer_pid, debug).await;
+        }
+        let permit = match self.successor_admission.enter() {
+            Ok(permit) => permit,
+            Err(message) => {
+                return write_frame(&mut stream, &ControlResponse::Error { message }).await
+            }
+        };
+
+        if matches!(request, ControlRequest::BeginApprovalEnrollment) {
+            let challenge = self.approval_control(true, peer_pid);
+            let issued = match &challenge {
+                ControlResponse::ApprovalEnrollmentChallenge { challenge } => {
+                    Some(challenge.nonce.clone())
+                }
+                _ => None,
+            };
+            if let Err(error) = write_frame(&mut stream, &challenge).await {
+                if let (Some(directory), Some(nonce)) =
+                    (&self.attachment_directory, issued.as_deref())
+                {
+                    crate::attachments::cancel_approval_challenge(directory, nonce);
+                }
+                return Err(error);
+            }
+            let Some(issued) = issued else {
+                return Ok(());
+            };
+            let response = match tokio::time::timeout(
+                Duration::from_secs(60),
+                read_approval_password(&mut stream),
+            )
+            .await
+            {
+                Ok(Ok((nonce, password))) if nonce == issued => {
+                    self.approval_password(nonce, password, peer_pid)
+                }
+                _ => ControlResponse::Error {
+                    message: "approval enrollment requires this connection's fresh challenge"
+                        .into(),
+                },
+            };
+            if let Some(directory) = &self.attachment_directory {
+                crate::attachments::cancel_approval_challenge(directory, &issued);
+            }
+            return write_frame(&mut stream, &response).await;
+        }
+
+        let fenced = match &request {
+            ControlRequest::GetEngineBootstrap {
+                session_id, token, ..
+            }
+            | ControlRequest::SubscribeEngineHost {
+                session_id, token, ..
+            }
+            | ControlRequest::SubscribeSandbox {
+                session_id, token, ..
+            }
+            | ControlRequest::DecideProcessHook {
+                session_id, token, ..
+            } => self.sessions.cleanup_fenced(session_id, token),
+            ControlRequest::RegisterAliasHost { bootstrap, .. } => self
+                .sessions
+                .cleanup_fenced(&bootstrap.session_id, &bootstrap.token),
+            _ => false,
+        };
+        if fenced {
+            return write_frame(
+                &mut stream,
+                &ControlResponse::Error {
+                    message: "attachment cleanup has fenced new native policy admission".into(),
+                },
+            )
+            .await;
+        }
+
         if let ControlRequest::SubscribeEngineHost {
             session_id,
             native_base_sha256,
@@ -415,6 +769,7 @@ impl ControlService {
                     backend,
                     snapshot,
                     nonce,
+                    permit,
                 )
                 .await;
         }
@@ -424,13 +779,234 @@ impl ControlService {
             current_version,
         } = request
         {
+            drop(permit); // Subscriber heartbeats do not confer new membership.
             return self
                 .subscribe_sandbox(stream, peer_pid, session_id, token, current_version)
                 .await;
         }
+        let _permit = permit;
         let runtime = self.runtime.snapshot();
         let mut shutdown_requested = false;
         let response = match request {
+            ControlRequest::GetApprovalRootCertificate {
+                bootstrap,
+                challenge,
+            } => self.approval_host_certificate(bootstrap, challenge, peer_pid),
+            ControlRequest::GetApprovalTrust => self.approval_control(false, peer_pid),
+            ControlRequest::BeginApprovalEnrollment => self.approval_control(true, peer_pid),
+            ControlRequest::EnrollApprovalAuthority { .. } => ControlResponse::Error {
+                message: "approval enrollment requires a fresh same-connection handshake".into(),
+            },
+            ControlRequest::BeginAttachmentConsumption {
+                authorization,
+                manager,
+                bootstrap,
+            } => self.begin_attachment_consumption(authorization, manager, bootstrap, peer_pid),
+            ControlRequest::ConsumeAttachmentAuthorization {
+                authorization,
+                manager,
+                bootstrap,
+                nonce,
+                possession,
+            } => self.consume_attachment_authorization(
+                authorization,
+                manager,
+                bootstrap,
+                nonce,
+                possession,
+                peer_pid,
+            ),
+            ControlRequest::AttachmentPreparation {
+                authorization,
+                bootstrap,
+                manager,
+                accepted,
+                proof,
+            } => self.attachment_preparation(
+                authorization,
+                bootstrap,
+                manager,
+                accepted,
+                proof,
+                peer_pid,
+            ),
+            ControlRequest::ActivateAttachment {
+                authorization,
+                session_id,
+                token,
+                manager,
+                members,
+                hosts,
+            } => {
+                self.activate_attachment(
+                    authorization,
+                    session_id,
+                    token.into_inner(),
+                    manager,
+                    members,
+                    hosts,
+                    peer_pid,
+                )
+                .await
+            }
+            ControlRequest::PrepareAttachmentDetach {
+                authorization,
+                session_id,
+                token,
+                manager,
+            } => {
+                let service = self.clone();
+                tokio::task::spawn_blocking(move || {
+                    service.prepare_attachment_detach(
+                        authorization,
+                        session_id,
+                        token.into_inner(),
+                        manager,
+                        peer_pid,
+                    )
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+            ControlRequest::CancelAttachmentDetach {
+                authorization,
+                session_id,
+                token,
+                manager,
+            } => {
+                let service = self.clone();
+                tokio::task::spawn_blocking(move || {
+                    service.cancel_attachment_detach(
+                        authorization,
+                        session_id,
+                        token.into_inner(),
+                        manager,
+                        peer_pid,
+                    )
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+            ControlRequest::FinishAttachmentDetach {
+                authorization,
+                session_id,
+                token,
+                manager,
+            } => {
+                let service = self.clone();
+                tokio::task::spawn_blocking(move || {
+                    service.finish_attachment_detach(
+                        authorization,
+                        session_id,
+                        token.into_inner(),
+                        manager,
+                        peer_pid,
+                    )
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+            ControlRequest::ReportAttachmentExec {
+                attachment_id,
+                session_id,
+                token,
+                manager,
+                previous,
+                current,
+                transition_nonce,
+            } => self.report_attachment_exec(
+                attachment_id,
+                session_id,
+                token.into_inner(),
+                manager,
+                previous,
+                current,
+                transition_nonce,
+                peer_pid,
+            ),
+            ControlRequest::InitializeOwnedAttachmentImage {
+                bootstrap,
+                manager,
+                target,
+            } => self.initialize_owned_attachment_image(bootstrap, manager, target, peer_pid),
+            ControlRequest::GetAttachmentImage { attachment_id } => {
+                self.attachment_image_view(attachment_id, peer_pid)
+            }
+            ControlRequest::GetAttachmentProfile { bootstrap } => {
+                self.attachment_profile_view(bootstrap, peer_pid)
+            }
+            ControlRequest::RecoverAttachment {
+                authorization,
+                session_id,
+                token,
+                manager,
+                members,
+                startup_hosts,
+                unstarted,
+                unstarted_proof,
+            } => {
+                self.recover_attachment_with_unstarted(
+                    authorization,
+                    session_id,
+                    token.into_inner(),
+                    manager,
+                    members,
+                    startup_hosts,
+                    unstarted,
+                    unstarted_proof,
+                    peer_pid,
+                )
+                .await
+            }
+            ControlRequest::RegisterOwnedAttachmentKeeper {
+                session_id,
+                token,
+                attachment_id,
+                target,
+                keeper,
+                execution_digest,
+                secret_digest,
+            } => self.register_owned_attachment_keeper(
+                session_id,
+                token.into_inner(),
+                attachment_id,
+                target,
+                keeper,
+                execution_digest,
+                secret_digest,
+                peer_pid,
+            ),
+            ControlRequest::CancelOwnedAttachmentKeeper {
+                session_id,
+                token,
+                attachment_id,
+                secret,
+            } => self.cancel_owned_attachment_keeper(
+                session_id,
+                token.into_inner(),
+                attachment_id,
+                secret.into_inner(),
+                peer_pid,
+            ),
+            ControlRequest::ClaimOwnedAttachmentKeeper {
+                session_id,
+                token,
+                attachment_id,
+                execution_digest,
+                secret,
+            } => self.claim_owned_attachment_keeper(
+                session_id,
+                token.into_inner(),
+                attachment_id,
+                execution_digest,
+                secret.into_inner(),
+                peer_pid,
+            ),
+            ControlRequest::CompleteAttachment {
+                authorization,
+                session_id,
+                token,
+            } => self.complete_attachment(authorization, session_id, token.into_inner(), peer_pid),
             ControlRequest::RetainEngineTree {
                 session_id,
                 token,
@@ -489,20 +1065,8 @@ impl ControlService {
                     ControlResponse::Error {
                         message: "invalid release upgrade owner proof".into(),
                     }
-                } else if let Some(coordinator) = &self.release_upgrades {
-                    match coordinator.submit(request).await {
-                        Ok(record) => {
-                            coordinator.spawn();
-                            ControlResponse::ReleaseUpgrade { record }
-                        }
-                        Err(error) => ControlResponse::Error {
-                            message: error.to_string(),
-                        },
-                    }
                 } else {
-                    ControlResponse::Error {
-                        message: "release coordinator unavailable; requires_restart".into(),
-                    }
+                    self.submit_attachment_guarded_release(request).await
                 }
             }
             ControlRequest::GetReleaseUpgrades { id } => ControlResponse::ReleaseUpgrades {
@@ -565,6 +1129,8 @@ impl ControlService {
                         message: "invalid Engine bootstrap member".into(),
                     }
                 } else {
+                    self.sessions
+                        .note_native_observed(&session_id, &token, root_pid);
                     let selected = if let Some(coordinator) = self.engine_upgrades.clone() {
                         let session = session_id.clone();
                         let manifest = host.clone();
@@ -634,25 +1200,8 @@ impl ControlService {
                     ControlResponse::Error {
                         message: "invalid upgrade owner proof".into(),
                     }
-                } else if let Some(coordinator) = &self.engine_upgrades {
-                    let recovery = matches!(request.action, crate::upgrade::Action::Recover);
-                    match coordinator.submit(request).await {
-                        Ok(record) => {
-                            if recovery {
-                                let _ = coordinator.spawn();
-                            }
-                            ControlResponse::EngineUpgrade {
-                                record: crate::upgrade::RecordView::from_record(&record, true),
-                            }
-                        }
-                        Err(error) => ControlResponse::Error {
-                            message: error.to_string(),
-                        },
-                    }
                 } else {
-                    ControlResponse::Error {
-                        message: "durable upgrade coordinator unavailable; requires_restart".into(),
-                    }
+                    self.submit_attachment_guarded_engine(request).await
                 }
             }
             ControlRequest::GetEngineUpgrades { id } => ControlResponse::EngineUpgrades {
@@ -1053,6 +1602,14 @@ impl ControlService {
             } => match self.sessions.pending_executable(&session_id, &token) {
                 Some(expected)
                     if same_requested_executable(&expected, &executable)
+                        && peer_pid.is_some_and(|peer| {
+                            validate_child_process(
+                                peer,
+                                root_pid,
+                                root_executable.as_deref().unwrap_or(&expected),
+                            )
+                            .is_ok()
+                        })
                         && root_executable.as_deref().is_none_or(|root| {
                             peer_pid.is_some_and(|peer_pid| {
                                 validate_process_path(peer_pid, root).is_ok()
@@ -1134,6 +1691,19 @@ impl ControlService {
                         .engine_manager_start(&session_id, &token, peer)
                         .filter(|start| {
                             process_traced_by(child_pid, peer)
+                                || (self.sessions.attachment_manager_scope(
+                                    &session_id,
+                                    &token,
+                                    peer,
+                                    *start,
+                                ) == Some(crate::attachments::Scope::Tree)
+                                    && self.sessions.authenticate_member(
+                                        &session_id,
+                                        &token,
+                                        parent_pid,
+                                    )
+                                    && validate_child_process(parent_pid, child_pid, &executable)
+                                        .is_ok())
                                 || self.engine_hosts.owns_gum_parent(
                                     &session_id,
                                     parent_pid,
@@ -1542,23 +2112,48 @@ impl ControlService {
                 }
             }
             ControlRequest::Ping => ControlResponse::Ok,
+            ControlRequest::RegisterAliasHost {
+                identity,
+                bootstrap,
+                sequence,
+                head,
+                root_image_challenge,
+            } => {
+                let service = self.clone();
+                tokio::task::spawn_blocking(move || {
+                    service.register_alias_host(
+                        identity,
+                        bootstrap,
+                        sequence,
+                        head,
+                        root_image_challenge,
+                        peer_pid,
+                    )
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
             ControlRequest::ResolveName {
                 session_id,
                 token,
                 hostname,
                 family,
-            } => match self
-                .sessions
-                .resolve_fake(&session_id, &token, &hostname, family)
-            {
-                Some(address) => ControlResponse::ResolvedName {
-                    address: address.to_string(),
-                    ttl_secs: 60,
-                },
-                None => ControlResponse::Error {
-                    message: "invalid session, hostname, or address family".into(),
-                },
-            },
+                native_fallback,
+            } => {
+                let service = self.clone();
+                tokio::task::spawn_blocking(move || {
+                    service.resolve_session_alias(
+                        session_id,
+                        token,
+                        hostname,
+                        family,
+                        native_fallback,
+                        peer_pid,
+                    )
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
             ControlRequest::GetTrust { session_id, token } => {
                 if self.sessions.authenticate_control(&session_id, &token) {
                     let executable = peer_pid.and_then(|pid| {
@@ -1883,6 +2478,11 @@ impl ControlService {
                     ControlResponse::Error {
                         message: "invalid static smart protection reporter".into(),
                     }
+                } else if !file_protection_version_matches(&stage, &context, runtime.updated_at_ms)
+                {
+                    ControlResponse::Error {
+                        message: "stale or invalid file smart-protection policy version".into(),
+                    }
                 } else {
                     let outcome = runtime
                         .protection
@@ -1945,6 +2545,11 @@ impl ControlService {
                     ControlResponse::Error {
                         message: "invalid smart protection reporter".into(),
                     }
+                } else if !file_protection_version_matches(&stage, &context, runtime.updated_at_ms)
+                {
+                    ControlResponse::Error {
+                        message: "stale or invalid file smart-protection policy version".into(),
+                    }
                 } else {
                     let reporter_pid = peer_pid.unwrap();
                     let outcome = runtime
@@ -2003,29 +2608,77 @@ impl ControlService {
                     }
                 }
             }
-            ControlRequest::GetStatus => ControlResponse::Status {
-                pid: std::process::id(),
-                socks_address: self.socks_address(&self.runtime.snapshot()),
-                started_at_ms: self.started_at_ms,
-                generated_at_ms: unix_timestamp_ms(),
-                sessions: self.sessions.snapshot(),
-                connections: self.connections.snapshot(),
-                engine_hosts: self.engine_hosts.hosts(),
-                engine_upgrades: self
-                    .engine_upgrades
-                    .as_ref()
-                    .map(|coordinator| coordinator.status(None)),
-                release_upgrades: self
-                    .release_upgrades
-                    .as_ref()
-                    .map(|coordinator| coordinator.status(None)),
-                forward_workers: self
-                    .forward_workers
-                    .as_ref()
-                    .map(|workers| workers.status()),
-            },
+            ControlRequest::PersistConfig {
+                authorization,
+                config_json,
+            } => {
+                match serde_json::from_str::<ConfigDocument>(&config_json)
+                    .map_err(|e| e.to_string())
+                    .and_then(|document| document.into_config())
+                {
+                    Ok(config) => self.apply_configuration(config, Some(&authorization)).await,
+                    Err(error) => ControlResponse::Error {
+                        message: format!("invalid config: {error}"),
+                    },
+                }
+            }
+            ControlRequest::GetConfigurationRevision => {
+                match crate::config_persistence::configuration_digest(
+                    &self.runtime.snapshot().config,
+                ) {
+                    Ok(runtime_digest) => ControlResponse::ConfigurationRevision {
+                        publication_error: self
+                            .configuration_store
+                            .as_ref()
+                            .and_then(|store| store.publication_warning(&runtime_digest)),
+                        runtime_digest,
+                        core_epoch: self
+                            .configuration_store
+                            .as_ref()
+                            .map(|store| store.core_epoch),
+                        persisted_digest: self
+                            .configuration_store
+                            .as_ref()
+                            .and_then(|store| store.persisted_digest().ok()),
+                    },
+                    Err(message) => ControlResponse::Error { message },
+                }
+            }
+            ControlRequest::GetStatus => {
+                let (attachments, attachment_state_error, sessions) = self.attachment_status();
+                ControlResponse::Status {
+                    approval_trust: self
+                        .attachment_directory
+                        .as_ref()
+                        .and_then(|directory| crate::attachments::approval_status(directory).ok()),
+                    attachments,
+                    attachment_state_error,
+                    pid: std::process::id(),
+                    socks_address: self.socks_address(&self.runtime.snapshot()),
+                    started_at_ms: self.started_at_ms,
+                    generated_at_ms: unix_timestamp_ms(),
+                    sessions,
+                    connections: self.connections.snapshot(),
+                    engine_hosts: self.engine_hosts.hosts(),
+                    engine_upgrades: self
+                        .engine_upgrades
+                        .as_ref()
+                        .map(|coordinator| coordinator.status(None)),
+                    release_upgrades: self
+                        .release_upgrades
+                        .as_ref()
+                        .map(|coordinator| coordinator.status(None)),
+                    forward_workers: self
+                        .forward_workers
+                        .as_ref()
+                        .map(|workers| workers.status()),
+                }
+            }
             ControlRequest::SubscribeSandbox { .. } => {
                 unreachable!("subscription handled before request dispatch")
+            }
+            ControlRequest::RestartServe { .. } => {
+                unreachable!("succession handled before dispatch")
             }
             ControlRequest::Shutdown { preserve_sessions } => {
                 if self.shutdown.is_some() {
@@ -2085,6 +2738,7 @@ impl ControlService {
         backend: hyperhub_engine::host::Backend,
         snapshot: hyperhub_runtime::Snapshot,
         nonce: [u8; 32],
+        permit: crate::successor::RequestPermit,
     ) -> io::Result<()> {
         use hyperhub_engine::host::{Acknowledgement, Backend, Delivery};
         use hyperhub_engine::management::Command;
@@ -2129,6 +2783,8 @@ impl ControlService {
             )
             .await;
         }
+        self.sessions
+            .note_native_observed(&session_id, &token, root_pid);
         if backend == Backend::LinuxPtrace
             && !self.sessions.retain_engine_manager(
                 &session_id,
@@ -2167,7 +2823,8 @@ impl ControlService {
         // replacing a live subscriber or rejecting the new image prematurely.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         let valid = || {
-            peer_pid.and_then(crate::session::process_start_time) == host_start_time
+            !self.sessions.cleanup_fenced(&session_id, &token)
+                && peer_pid.and_then(crate::session::process_start_time) == host_start_time
                 && if backend == Backend::LinuxPtrace {
                     self.sessions.authenticate_control(&session_id, &token)
                 } else {
@@ -2226,6 +2883,7 @@ impl ControlService {
                     .authorize_exit_reporter(&registration.id, reporter, start)?;
             }
         }
+        drop(permit); // Retain only registration, never the long-lived heartbeat stream.
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
         let mut admission = tokio::time::interval(Duration::from_millis(25));
         let mut admitted = false;
@@ -2319,6 +2977,15 @@ impl ControlService {
         let mut updates = self.runtime.subscribe();
         let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
         loop {
+            if self.sessions.cleanup_fenced(&session_id, &token) {
+                return write_frame(
+                    &mut stream,
+                    &ControlResponse::Error {
+                        message: "attachment cleanup has fenced sandbox updates".into(),
+                    },
+                )
+                .await;
+            }
             let runtime = self.runtime.snapshot();
             let changed = runtime.updated_at_ms > current_version;
             let sandbox = if changed {
@@ -2794,7 +3461,7 @@ fn validate_child_process(_parent_pid: u32, _child_pid: u32, _executable: &str) 
 }
 
 #[cfg(windows)]
-fn process_ancestors(client_pid: u32) -> Vec<u32> {
+pub(crate) fn process_ancestors(client_pid: u32) -> Vec<u32> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -2854,7 +3521,7 @@ pub(crate) fn process_traced_by(child: u32, manager: u32) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn process_ancestors(client_pid: u32) -> Vec<u32> {
+pub(crate) fn process_ancestors(client_pid: u32) -> Vec<u32> {
     let mut ancestors = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut current = client_pid;
@@ -2872,7 +3539,7 @@ fn process_ancestors(client_pid: u32) -> Vec<u32> {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn process_ancestors(_client_pid: u32) -> Vec<u32> {
+pub(crate) fn process_ancestors(_client_pid: u32) -> Vec<u32> {
     Vec::new()
 }
 
@@ -3001,10 +3668,20 @@ fn same_requested_executable(left: &str, right: &str) -> bool {
 
 #[cfg(windows)]
 pub async fn run_control_server(endpoint: String, service: ControlService) -> io::Result<()> {
+    let mut startup_guard = service.take_configuration_startup_guard()?;
+    let lease = service.acquire_serve_lease(&endpoint)?;
     let mut first = true;
     service.start_engine_upgrades();
     loop {
         let server = create_current_user_pipe(&endpoint, first)?;
+        if first {
+            if let Some(lease) = &lease {
+                lease.publish(&endpoint).map_err(io::Error::other)?;
+            }
+        }
+        if first {
+            drop(startup_guard.take());
+        }
         first = false;
         server.connect().await?;
         let peer_pid = named_pipe_client_pid(&server).ok();
@@ -3084,6 +3761,8 @@ fn create_current_user_pipe(
 #[cfg(unix)]
 pub async fn run_control_server(endpoint: String, service: ControlService) -> io::Result<()> {
     use tokio::net::UnixListener;
+    let startup_guard = service.take_configuration_startup_guard()?;
+    let lease = service.acquire_serve_lease(&endpoint)?;
     service.start_engine_upgrades();
     let path = std::path::Path::new(&endpoint);
     if let Some(parent) = path.parent() {
@@ -3100,8 +3779,12 @@ pub async fn run_control_server(endpoint: String, service: ControlService) -> io
         std::fs::remove_file(path)?;
     }
     let listener = UnixListener::bind(path)?;
+    if let Some(lease) = &lease {
+        lease.publish(&endpoint).map_err(io::Error::other)?;
+    }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    drop(startup_guard);
     loop {
         let (stream, _) = listener.accept().await?;
         let peer_pid = stream
@@ -3194,6 +3877,277 @@ async fn open_control(endpoint: &str) -> io::Result<tokio::net::UnixStream> {
     ))
 }
 
+/// Authenticate the actual IPC server before sending enrollment or approvals.
+/// Trust code identity, never a PID/key obtained from a discovery file.
+#[cfg(unix)]
+type TrustedControlStream = tokio::net::UnixStream;
+#[cfg(windows)]
+type TrustedControlStream = tokio::net::windows::named_pipe::NamedPipeClient;
+async fn trusted_control_stream(
+    endpoint: &str,
+) -> io::Result<(TrustedControlStream, crate::attachments::ProcessIdentity)> {
+    let config = crate::config_store::default_config_path().map_err(io::Error::other)?;
+    trusted_control_stream_for_config(endpoint, &config).await
+}
+async fn trusted_control_stream_for_config(
+    endpoint: &str,
+    config: &std::path::Path,
+) -> io::Result<(TrustedControlStream, crate::attachments::ProcessIdentity)> {
+    let stream = open_control(endpoint).await?;
+    #[cfg(unix)]
+    let pid = stream
+        .peer_cred()?
+        .pid()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "cannot authenticate Core peer",
+            )
+        })?;
+    #[cfg(windows)]
+    let pid = {
+        use std::os::windows::io::AsRawHandle;
+        let mut pid = 0;
+        let result = unsafe {
+            windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId(
+                stream.as_raw_handle() as _,
+                &mut pid,
+            )
+        };
+        if result == 0 || pid == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        pid
+    };
+    let own = crate::attachments::inspect_process(std::process::id()).map_err(io::Error::other)?;
+    let lease_path = crate::serve_lease::path_for_config(config).map_err(io::Error::other)?;
+    crate::serve_lease::reject_different_image(&lease_path, endpoint, &own.executable_sha256)
+        .map_err(io::Error::other)?;
+    let peer = crate::attachments::inspect_process(pid).map_err(io::Error::other)?;
+    if peer.owner != own.owner || peer.executable_sha256 != own.executable_sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Core IPC peer is not the trusted HyperHub executable",
+        ));
+    }
+    crate::serve_lease::verify(&lease_path, endpoint, &peer).map_err(io::Error::other)?;
+    Ok((stream, peer))
+}
+pub async fn trusted_control_request(
+    endpoint: &str,
+    request: &ControlRequest,
+) -> io::Result<ControlResponse> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut stream, peer) = trusted_control_stream(endpoint).await?;
+        write_frame(&mut stream, request).await?;
+        let reply: ControlResponse = read_frame(&mut stream).await?;
+        if let ControlResponse::ApprovalTrust { trust } = &reply {
+            if trust.core_pid != peer.pid || trust.core_birth != peer.birth {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Core trust incarnation differs from OS peer",
+                ));
+            }
+        }
+        Ok(reply)
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "trusted Core request timed out"))?
+}
+
+/// Configuration contents can contain secrets. Unsupported OS-peer identity
+/// must fail before opening an endpoint; it never selects a plain transport.
+pub async fn configuration_control_request(
+    endpoint: &str,
+    config_path: &std::path::Path,
+    request: &ControlRequest,
+) -> io::Result<ControlResponse> {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        trusted_control_request_for_config(endpoint, config_path, request).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (endpoint, config_path, request);
+        Err(io::Error::new(io::ErrorKind::Unsupported,
+            "live configuration persistence cannot authenticate the Core peer on this platform; stop Serve and save the configuration offline"))
+    }
+}
+
+pub async fn configuration_revision(
+    endpoint: &str,
+    config_path: &std::path::Path,
+) -> Result<(String, Option<String>, [u8; 32]), String> {
+    let response = configuration_control_request(
+        endpoint,
+        config_path,
+        &ControlRequest::GetConfigurationRevision,
+    )
+    .await;
+    match response.map_err(|e| e.to_string())? {
+        ControlResponse::ConfigurationRevision {
+            runtime_digest,
+            persisted_digest,
+            core_epoch: Some(core_epoch),
+            ..
+        } if core_epoch != [0; 32] => Ok((runtime_digest, persisted_digest, core_epoch)),
+        ControlResponse::Error { message } => Err(message),
+        _ => Err("Core did not publish a configuration persistence epoch".into()),
+    }
+}
+
+/// A lost commit reply is ambiguous. Confirm the exact disk and runtime
+/// revision on a newly authenticated connection instead of repeating a write.
+pub async fn persist_configuration(
+    endpoint: &str,
+    config_path: &std::path::Path,
+    authorization: crate::config_persistence::ConfigWriteAuthorization,
+    config_json: String,
+) -> Result<Option<String>, String> {
+    let desired = authorization.config_digest.clone();
+    let request = ControlRequest::PersistConfig {
+        authorization,
+        config_json,
+    };
+    let exchange = configuration_control_request(endpoint, config_path, &request).await;
+    match exchange {
+        Ok(ControlResponse::ConfigurationPersisted {
+            config_digest,
+            redacted_view_error,
+            publication_error,
+        }) if config_digest == desired => Ok(match (redacted_view_error, publication_error) {
+            (None, None) => None,
+            (Some(message), None) | (None, Some(message)) => Some(message),
+            (Some(display), Some(publication)) => Some(format!("{display}; {publication}")),
+        }),
+        Ok(ControlResponse::Error { message }) => Err(message),
+        Ok(_) => Err("Core returned an unexpected configuration persistence response".into()),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Err(error.to_string()),
+        Err(error) => {
+            let retry = configuration_control_request(
+                endpoint,
+                config_path,
+                &ControlRequest::GetConfigurationRevision,
+            )
+            .await;
+            match retry {
+                Ok(ControlResponse::ConfigurationRevision { runtime_digest, persisted_digest, publication_error, .. }) if runtime_digest == desired && persisted_digest.as_deref() == Some(desired.as_str()) => Ok(publication_error),
+                _ => Err(format!("configuration persistence reply was lost and the committed revision could not be confirmed: {error}; reload before retrying")),
+            }
+        }
+    }
+}
+/// Password approval keeps the fresh challenge and response on one verified
+/// connection. The generic control API cannot submit an enrollment certificate.
+pub(crate) async fn trusted_control_request_for_config(
+    endpoint: &str,
+    config: &std::path::Path,
+    request: &ControlRequest,
+) -> io::Result<ControlResponse> {
+    let (mut stream, _) = trusted_control_stream_for_config(endpoint, config).await?;
+    write_frame(&mut stream, request).await?;
+    read_frame(&mut stream).await
+}
+pub async fn password_approval_enrollment(
+    endpoint: &str,
+    config: &std::path::Path,
+    password: &[u8],
+) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (mut stream, peer) = trusted_control_stream_for_config(endpoint, config)
+            .await
+            .map_err(|e| e.to_string())?;
+        write_frame(&mut stream, &ControlRequest::BeginApprovalEnrollment)
+            .await
+            .map_err(|e| e.to_string())?;
+        let challenge = match read_frame::<_, ControlResponse>(&mut stream)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            ControlResponse::ApprovalEnrollmentChallenge { challenge } => challenge,
+            ControlResponse::Error { message } => return Err(message),
+            _ => return Err("Core refused approval enrollment challenge".into()),
+        };
+        if challenge.peer.pid != std::process::id()
+            || Some(challenge.peer.birth) != crate::attachments::process_birth(std::process::id())
+        {
+            return Err("enrollment challenge belongs to another CLI incarnation".into());
+        }
+        let actual = crate::attachments::inspect_process(std::process::id())?;
+        if actual != challenge.peer {
+            return Err("administrator CLI identity changed during enrollment".into());
+        }
+        let descriptor = crate::config_store::read_descriptor(config).map_err(|e| e.to_string())?;
+        if descriptor != challenge.descriptor
+            || crate::attachments::instance_id(config, &descriptor) != challenge.instance_id
+        {
+            return Err(
+                "approval challenge belongs to another configuration instance or generation".into(),
+            );
+        }
+        if crate::attachments::digest(&std::fs::read(config).map_err(|e| e.to_string())?)
+            != challenge.config_digest
+        {
+            return Err("configuration changed during enrollment".into());
+        }
+        crate::attachments::verify_process(&peer)?;
+        write_approval_password(&mut stream, &challenge.nonce, password)
+            .await
+            .map_err(|e| e.to_string())?;
+        match read_frame::<_, ControlResponse>(&mut stream)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            ControlResponse::Ok => Ok(()),
+            ControlResponse::Error { message } => Err(message),
+            _ => Err("unexpected enrollment reply".into()),
+        }
+    })
+    .await
+    .map_err(|_| "approval enrollment handshake timed out")?
+}
+
+// This is deliberately not a ControlRequest variant: no derived Debug, JSON
+// serializer or ordinary framing buffer can retain the administrator password.
+async fn write_approval_password<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    nonce: &str,
+    password: &[u8],
+) -> io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if nonce.len() != 64 || password.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid approval credential frame length",
+        ));
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(64 + password.len()));
+    bytes.extend_from_slice(nonce.as_bytes());
+    bytes.extend_from_slice(password);
+    writer.write_u32(bytes.len() as u32).await?;
+    writer.write_all(&bytes).await?;
+    writer.flush().await
+}
+async fn read_approval_password<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> io::Result<(String, Zeroizing<Vec<u8>>)> {
+    use tokio::io::AsyncReadExt;
+    let len = reader.read_u32().await? as usize;
+    if !(64..=64 + 16 * 1024).contains(&len) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid approval credential frame length",
+        ));
+    }
+    let mut bytes = Zeroizing::new(vec![0; len]);
+    reader.read_exact(&mut bytes).await?;
+    let nonce = std::str::from_utf8(&bytes[..64])
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid approval nonce"))?
+        .to_owned();
+    Ok((nonce, Zeroizing::new(bytes[64..].to_vec())))
+}
+
 pub async fn control_request(
     endpoint: &str,
     request: &ControlRequest,
@@ -3206,6 +4160,29 @@ pub async fn control_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn private_password_frame_is_bounded_and_round_trips_without_json() {
+        let (mut left, mut right) = tokio::io::duplex(1024);
+        let nonce = "ab".repeat(32);
+        let sent_nonce = nonce.clone();
+        let writer = tokio::spawn(async move {
+            write_approval_password(&mut left, &sent_nonce, b"dummy approval password")
+                .await
+                .unwrap();
+        });
+        let (actual, password) = read_approval_password(&mut right).await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(actual, nonce);
+        assert_eq!(&*password, b"dummy approval password");
+        let (mut left, mut right) = tokio::io::duplex(16);
+        use tokio::io::AsyncWriteExt;
+        left.write_u32((64 + 16 * 1024 + 1) as u32).await.unwrap();
+        assert_eq!(
+            read_approval_password(&mut right).await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3580,8 +4557,9 @@ mod tests {
         #[cfg(unix)]
         let endpoint = endpoint_root.join("control.sock").display().to_string();
         let runtime = RuntimeState::new(Arc::new(config)).unwrap();
+        let sessions = SessionRegistry::default();
         let service = ControlService::new(
-            SessionRegistry::default(),
+            sessions.clone(),
             ConnectionRegistry::default(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n".into(),
             crate::audit::AuditWriter::open(None).unwrap(),
@@ -3681,7 +4659,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(response, ControlResponse::Ok));
+        // A process cannot declare itself to be its launcher's new child.
+        // Real child activation is covered by owned_child_activation_round_trip.
+        assert!(matches!(response, ControlResponse::Error { .. }));
+        assert!(sessions.activate("test", &token, std::process::id()));
         let response = control_request(
             &endpoint,
             &ControlRequest::RefreshSandbox {
@@ -3771,17 +4752,16 @@ mod tests {
                 token: token.clone(),
                 hostname: "api.example.test".into(),
                 family: 4,
+                native_fallback: None,
             },
         )
         .await
         .unwrap();
-        assert!(matches!(
-            response,
-            ControlResponse::ResolvedName {
-                ref address,
-                ..
-            } if address == "198.18.0.1"
-        ));
+        assert!(matches!(response, ControlResponse::Error { ref message }
+            if message.contains("synthetic DNS requires explicit native provenance") || message.contains("alias publisher is not a live session member")));
+        // Registered, OS-authenticated positive publication is covered by
+        // alias_control::tests::registered_alias_publication_requires_signed_host_ack.
+
         let response = control_request(
             &endpoint,
             &ControlRequest::GetTrust {
@@ -3968,6 +4948,95 @@ mod tests {
         #[cfg(unix)]
         {
             std::fs::remove_dir_all(endpoint_root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn file_protection_uses_the_captured_policy_version() {
+        let runtime = RuntimeState::new(Arc::new(Config::default())).unwrap();
+        let first_version = runtime.snapshot().updated_at_ms;
+        let sessions = SessionRegistry::default();
+        let challenge = sessions
+            .begin_auth("file-reader".into(), "fixture".into(), [5; 32])
+            .unwrap();
+        let proof = crate::session::session_proof(&[0; 32], &challenge).unwrap();
+        let pending = sessions
+            .finish_auth(&challenge.challenge_id, &proof, Duration::from_secs(60))
+            .unwrap();
+        let pid = std::process::id();
+        assert!(sessions.activate("file-reader", &pending.token, pid));
+        let service = ControlService::new(
+            sessions,
+            ConnectionRegistry::default(),
+            String::new(),
+            crate::audit::AuditWriter::open(None).unwrap(),
+            runtime.clone(),
+            Zeroizing::new(vec![0; 32]),
+        );
+        runtime.apply(Arc::new(Config::default())).unwrap();
+        let current_version = runtime.snapshot().updated_at_ms;
+        assert_ne!(first_version, current_version);
+        for (stage, context, allowed) in [
+            (
+                "file_read",
+                serde_json::json!({"expected_sandbox_version":first_version}),
+                false,
+            ),
+            (
+                "file_rename",
+                serde_json::json!({"expected_sandbox_version":current_version}),
+                true,
+            ),
+            (
+                "file_write",
+                serde_json::json!({"expected_sandbox_version":"invalid"}),
+                false,
+            ),
+            (
+                "file_create",
+                serde_json::json!({"expected_sandbox_version":null}),
+                false,
+            ),
+            ("file_delete", serde_json::json!({}), true),
+            (
+                "process_create",
+                serde_json::json!({"expected_sandbox_version":first_version}),
+                true,
+            ),
+        ] {
+            let (mut client, server) = tokio::io::duplex(64 * 1024);
+            let service = service.clone();
+            let handler = tokio::spawn(async move { service.handle(server, Some(pid)).await });
+            write_frame(
+                &mut client,
+                &ControlRequest::SmartProtectionCheck {
+                    session_id: "file-reader".into(),
+                    token: pending.token.clone(),
+                    protection_id: "missing-profile".into(),
+                    rule_id: None,
+                    stage: stage.into(),
+                    executable: "fixture".into(),
+                    argv: vec![],
+                    features: vec![],
+                    context,
+                },
+            )
+            .await
+            .unwrap();
+            let response: ControlResponse = read_frame(&mut client).await.unwrap();
+            if allowed {
+                assert!(
+                    matches!(response, ControlResponse::SmartProtectionDecision { .. }),
+                    "{stage}: {response:?}"
+                );
+            } else {
+                assert!(
+                    matches!(response, ControlResponse::Error {ref message} if message == "stale or invalid file smart-protection policy version"),
+                    "{stage}: {response:?}"
+                );
+            }
+            drop(client);
+            handler.await.unwrap().unwrap();
         }
     }
 

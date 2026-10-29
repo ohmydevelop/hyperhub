@@ -1,0 +1,30 @@
+diff --git a/src/meson.build b/src/meson.build
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -379,6 +379,13 @@
+     bpf_arch = bpf_arch_map.get(host_abi, host_abi)
+     helpers_artifacts_dir = 'linux' / 'helpers' / 'artifacts'
+     helpers_native_dir = helpers_artifacts_dir / 'native' / host_lowlevel_abi
++    helpers_native_root = get_option('linux_helper_artifacts_root')
++    if helpers_native_root != ''
++      if not fs.is_absolute(helpers_native_root)
++        error('linux_helper_artifacts_root must be an absolute path')
++      endif
++      helpers_native_dir = helpers_native_root / 'native' / host_lowlevel_abi
++    endif
+     helpers_bpf_noarch_dir = helpers_artifacts_dir / 'bpf' / ('noarch-' + host_machine.endian())
+     helpers_bpf_arch_dir = helpers_artifacts_dir / 'bpf' / bpf_arch
+     helper_backend_data = custom_target('frida-data-helper-backend',
+diff --git a/meson.options b/meson.options
+--- a/meson.options
++++ b/meson.options
+@@ -176,3 +176,9 @@
+   value: 'auto',
+   description: 'Build tests'
+ )
++
++option('linux_helper_artifacts_root',
++  type: 'string',
++  value: '',
++  description: 'External Linux injection helper artifacts root (containing native/<abi>); empty uses bundled artifacts',
++)

@@ -5,10 +5,10 @@ use hyperhub_core::config::Config;
 use hyperhub_core::config_document::ConfigDocument;
 use hyperhub_core::config_store::{
     self, default_config_path, load_approval_state_with_keyring, load_encrypted_with_keyring,
-    read_descriptor, read_redacted_json, save_approval_state_with_keyring,
-    save_encrypted_with_keyring, save_private_bytes, ConfigKeyring, KdfDescriptor, StoreError,
+    read_descriptor, read_redacted_json, save_approval_state_with_keyring, save_private_bytes,
+    ConfigKeyring, KdfDescriptor, StoreError,
 };
-use hyperhub_core::control::{control_request, discovery_control_endpoint};
+use hyperhub_core::control::{configuration_control_request, discovery_control_endpoint};
 use hyperhub_core::session::{config_update_proof, ControlRequest, ControlResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -25,6 +25,7 @@ pub(crate) enum Command {
         patch: PathBuf,
     },
     Approve {
+        request_id: Option<String>,
         password_file: Option<PathBuf>,
         editor: Option<PathBuf>,
     },
@@ -34,6 +35,7 @@ struct ActiveConfig {
     config: Config,
     keyring: ConfigKeyring,
     initialized: bool,
+    persistence_signer: hyperhub_core::config_persistence::ConfigPersistenceSigner,
 }
 
 struct PreparedPatch {
@@ -134,12 +136,20 @@ pub(crate) fn parse_show(args: &[OsString]) -> Result<Command, String> {
 }
 
 pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
+    let mut request_id = None;
     let mut password_file = None;
     let mut editor = None;
     let mut index = 0;
     while index < args.len() {
         let option = args[index].to_string_lossy();
         index += 1;
+        if !option.starts_with('-') {
+            if request_id.is_some() || !hyperhub_core::attachments::valid_id(&option) {
+                return Err("approve accepts at most one runtime request id".into());
+            }
+            request_id = Some(option.into_owned());
+            continue;
+        }
         let value = args
             .get(index)
             .ok_or_else(|| format!("{option} requires a value"))?
@@ -156,6 +166,7 @@ pub(crate) fn parse_approve(args: &[OsString]) -> Result<Command, String> {
         index += 1;
     }
     Ok(Command::Approve {
+        request_id,
         password_file,
         editor,
     })
@@ -186,9 +197,19 @@ pub(crate) fn run(command: Command) -> Result<i32, String> {
         Command::Show => show(),
         Command::Patch { patch } => patch_config(&patch),
         Command::Approve {
+            request_id,
             password_file,
             editor,
-        } => approve_config(password_file.as_deref(), editor.as_deref()),
+        } => {
+            match crate::attachment::approve(
+                request_id.as_deref(),
+                password_file.as_deref(),
+                editor.as_deref(),
+            )? {
+                Some(code) => Ok(code),
+                None => approve_config(password_file.as_deref(), editor.as_deref()),
+            }
+        }
     }
 }
 
@@ -474,8 +495,14 @@ fn persist_prepared(
     active: &mut ActiveConfig,
     prepared: &PreparedPatch,
 ) -> Result<ApplyOutcome, String> {
-    save_encrypted_with_keyring(path, &prepared.config, &active.keyring)
-        .map_err(|error| error.to_string())?;
+    let live_update = crate::config_persistence::save(
+        path,
+        Some(&active.config),
+        &prepared.config,
+        &active.keyring,
+        Some(&active.persistence_signer),
+        crate::serve_is_running(),
+    )?;
     crate::password::save_runtime_keyring(&active.keyring)?;
     let _ = config_store::reconcile_root_certificates(
         path,
@@ -485,19 +512,11 @@ fn persist_prepared(
             .iter()
             .map(|certificate| certificate.fingerprint.as_str()),
     );
-    let (live_update, live_update_error) = if crate::serve_is_running() {
-        match push_live_update(&prepared.config, &active.keyring) {
-            Ok(()) => (true, None),
-            Err(error) => (false, Some(error)),
-        }
-    } else {
-        (false, None)
-    };
     active.config = prepared.config.clone();
     active.initialized = true;
     Ok(ApplyOutcome {
         live_update,
-        live_update_error,
+        live_update_error: None,
     })
 }
 
@@ -514,6 +533,11 @@ fn load_active_with_password(
     };
     let keyring = ConfigKeyring::derive(password.as_bytes(), descriptor)
         .map_err(|error| error.to_string())?;
+    let persistence_signer =
+        hyperhub_core::config_persistence::ConfigPersistenceSigner::from_password(
+            password.as_bytes(),
+            keyring.descriptor(),
+        )?;
     drop(password);
     if initialized {
         let unlocked =
@@ -522,6 +546,7 @@ fn load_active_with_password(
             config: unlocked.config,
             keyring,
             initialized,
+            persistence_signer,
         })
     } else {
         let mut config = Config::default();
@@ -531,6 +556,7 @@ fn load_active_with_password(
             config,
             keyring,
             initialized,
+            persistence_signer,
         })
     }
 }
@@ -942,7 +968,7 @@ fn recover_in_flight(
     } else if current_digest == in_flight.result_config_digest {
         let serve_running = crate::serve_is_running();
         let live_update_error = if serve_running {
-            push_live_update(&active.config, &active.keyring).err()
+            push_live_update(path, &active.config, &active.keyring).err()
         } else {
             None
         };
@@ -1896,7 +1922,7 @@ fn escape_pointer(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
 
-fn push_live_update(config: &Config, keyring: &ConfigKeyring) -> Result<(), String> {
+fn push_live_update(path: &Path, config: &Config, keyring: &ConfigKeyring) -> Result<(), String> {
     let key = keyring
         .session_auth_key()
         .map_err(|error| error.to_string())?;
@@ -1905,8 +1931,9 @@ fn push_live_update(config: &Config, keyring: &ConfigKeyring) -> Result<(), Stri
     let proof = config_update_proof(&key, &config_json)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     match runtime
-        .block_on(control_request(
+        .block_on(configuration_control_request(
             &discovery_control_endpoint(),
+            path,
             &ControlRequest::UpdateConfig { proof, config_json },
         ))
         .map_err(|error| format!("cannot update running Serve: {error}"))?

@@ -171,8 +171,20 @@ pub fn target_backend(target: &Path, requested: Option<&str>) -> Result<TargetBa
 pub fn doctor_target(target: &Path) -> Result<String, String> {
     let elf = read_elf(target)?;
     let backend = TargetBackend::PtraceSyscall;
+    let gum = if elf.has_interpreter {
+        match super::validate_attachment_backend(
+            0,
+            hyperhub_core::attachments::Scope::Tree,
+            hyperhub_core::attachments::Backend::Gum,
+        ) {
+            Ok(()) => "available".to_string(),
+            Err(reason) => format!("unavailable ({reason})"),
+        }
+    } else {
+        "unavailable (ELF has no interpreter)".to_string()
+    };
     Ok(format!(
-        "ELF64 little-endian {} {}; default-backend={}; gum={}; agent-runtime={}",
+        "ELF64 little-endian {} {}; default-backend={}; gum={}; gum-elf={}; agent-runtime={}",
         machine_name(elf.machine),
         if elf.has_interpreter {
             "dynamically linked"
@@ -180,10 +192,11 @@ pub fn doctor_target(target: &Path) -> Result<String, String> {
             "static/no interpreter"
         },
         backend.name(),
+        gum,
         if elf.has_interpreter {
-            "available"
+            "compatible"
         } else {
-            "unavailable"
+            "incompatible"
         },
         "not-used-by-default"
     ))
@@ -286,6 +299,13 @@ fn run_injected_inner<F>(
 where
     F: FnOnce(u32, &std::ffi::OsStr) -> Result<bool, String>,
 {
+    if backend == TargetBackend::GumInterceptor {
+        super::validate_attachment_backend(
+            0,
+            hyperhub_core::attachments::Scope::Tree,
+            hyperhub_core::attachments::Backend::Gum,
+        )?;
+    }
     let mut environment = merged_environment(env);
     if backend == TargetBackend::PtraceSyscall {
         return super::syscall_supervisor::run(
@@ -356,6 +376,29 @@ where
     if !activated {
         terminate_process(pid);
         return Err("serve rejected Linux root process activation".into());
+    }
+    if let Some(execution) =
+        crate::attachment::owned_run_execution(env).inspect_err(|_| terminate_process(pid))?
+    {
+        super::engine_control::retain_tree(
+            &execution.bootstrap.control_endpoint,
+            &execution.bootstrap.session_id,
+            &execution.bootstrap.token,
+            pid,
+        )
+        .inspect_err(|_| terminate_process(pid))?;
+        let monitor =
+            super::attachment::OwnedGumMonitor::start(execution, frida.clone(), runtime.clone())
+                .inspect_err(|_| terminate_process(pid))?;
+        let result = match pty.as_mut() {
+            Some(pty) => pty.relay(pid, birth),
+            None => wait_for_process(pid, Some(birth), &exit_directory.0),
+        };
+        if let Ok(status) = &result {
+            let _ = crate::attachment::notify_owned_run_root_exit(*status);
+        }
+        monitor.stop();
+        return result;
     }
     let ready = AgentReady::new(pid).map_err(|error| {
         terminate_process(pid);
@@ -515,10 +558,10 @@ fn parse_sha256(value: &str) -> Option<[u8; 32]> {
 }
 
 #[derive(Clone)]
-struct SessionCredentials {
-    endpoint: String,
-    session_id: String,
-    token: String,
+pub(super) struct SessionCredentials {
+    pub(super) endpoint: String,
+    pub(super) session_id: String,
+    pub(super) token: String,
 }
 
 impl SessionCredentials {
@@ -689,6 +732,12 @@ fn monitor_children(
                                 handoff.mark_attached(candidate.lease_id).map_err(|error| {
                                     format!("cannot acknowledge attached fork child: {error}")
                                 })?;
+                                frida.resume(child.process)?;
+                                handoff.wait_ready(candidate.lease_id).map_err(|error| {
+                                    format!(
+                                        "fork Core recovery did not reach the native gate: {error}"
+                                    )
+                                })?;
                                 inject_child_entrypoint(
                                     frida,
                                     child.process,
@@ -848,7 +897,7 @@ fn child_failure_action(enforce: bool) -> ChildFailureAction {
     }
 }
 
-fn register_fork_child(
+pub(super) fn register_fork_child(
     credentials: &SessionCredentials,
     parent_pid: u32,
     process: Process,
@@ -943,9 +992,12 @@ fn inject_child_entrypoint(
                 .map_err(|error| format!("cannot authorize child fork handoffs: {error}"))?;
         }
     }
-    frida
-        .resume(process)
-        .map_err(|error| format!("Frida Core resume failed: {error}"))
+    if fork_lease.is_none() {
+        frida
+            .resume(process)
+            .map_err(|error| format!("Frida Core resume failed: {error}"))?;
+    }
+    Ok(())
 }
 
 struct AgentReady {
@@ -1017,6 +1069,7 @@ fn merged_environment(overrides: &[(OsString, OsString)]) -> Vec<(OsString, OsSt
     for (key, value) in overrides {
         values.insert(key.clone(), value.clone());
     }
+    values.remove(std::ffi::OsStr::new("HYPERHUB_ATTACHMENT_DIAGNOSTICS"));
     values.into_iter().collect()
 }
 

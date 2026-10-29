@@ -122,6 +122,7 @@ impl AcquireCredentialsContext {
 }
 
 pub(in crate::windows_gum) struct SchannelContext {
+    pub(in crate::windows_gum) compatibility: bool,
     pub(in crate::windows_gum) old_context: *mut SecHandle,
     pub(in crate::windows_gum) new_context: *mut SecHandle,
     pub(in crate::windows_gum) target: Option<Vec<u16>>,

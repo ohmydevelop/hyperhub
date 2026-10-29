@@ -65,6 +65,55 @@ pub(crate) fn background<T>(call: impl FnOnce() -> T) -> T {
     let _reset = Reset(HOST_BACKGROUND.with(|flag| flag.replace(true)));
     call()
 }
+static REGISTRY: std::sync::atomic::AtomicPtr<std::sync::Mutex<std::collections::BTreeSet<usize>>> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+fn slot_registry() -> &'static std::sync::Mutex<std::collections::BTreeSet<usize>> {
+    let mut pointer = REGISTRY.load(Ordering::Acquire);
+    if pointer.is_null() {
+        let fresh = Box::into_raw(Box::new(std::sync::Mutex::new(
+            std::collections::BTreeSet::new(),
+        )));
+        match REGISTRY.compare_exchange(
+            std::ptr::null_mut(),
+            fresh,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => pointer = fresh,
+            Err(old) => {
+                unsafe {
+                    drop(Box::from_raw(fresh));
+                }
+                pointer = old;
+            }
+        }
+    }
+    unsafe { &*pointer }
+}
+pub(crate) fn retire_thread_slots() -> Result<(), i32> {
+    {
+        let slots = slot_registry().lock().map_err(|_| crate::HH_ERR_PROTOCOL)?;
+        for pointer in slots.iter().copied() {
+            let slot = unsafe { &*(pointer as *mut Slot) };
+            if slot
+                .calling
+                .try_borrow()
+                .map_err(|_| crate::HH_ERR_PROTOCOL)?
+                .is_some()
+            {
+                return Err(crate::HH_ERR_PROTOCOL);
+            }
+        }
+    }
+    slots::retire();
+    let mut slots = slot_registry().lock().map_err(|_| crate::HH_ERR_PROTOCOL)?;
+    for pointer in std::mem::take(&mut *slots) {
+        unsafe {
+            drop(Box::from_raw(pointer as *mut Slot));
+        }
+    }
+    Ok(())
+}
 fn current_slot() -> *mut Slot {
     let pointer = slots::get().cast::<Slot>();
     if !pointer.is_null() && unsafe { (*pointer).epoch } != EPOCH.load(Ordering::Acquire) {
@@ -78,10 +127,18 @@ fn current_slot() -> *mut Slot {
     }
 }
 unsafe fn destroy_slot(value: *mut std::ffi::c_void) {
+    let _attachment_cleanup = crate::attachment::enter();
     if value.is_null() {
         return;
     }
     let pointer = value.cast::<Slot>();
+    if !slot_registry()
+        .lock()
+        .map(|mut registry| registry.remove(&(pointer as usize)))
+        .unwrap_or(false)
+    {
+        return;
+    }
     if slots::get() == value {
         let _ = slots::set(std::ptr::null_mut());
     }
@@ -135,8 +192,19 @@ impl EngineCallGuard {
                 #[cfg(test)]
                 destroyed: RefCell::new(None),
             }));
+            if let Ok(mut registry) = slot_registry().lock() {
+                registry.insert(pointer as usize);
+            } else {
+                unsafe {
+                    drop(Box::from_raw(pointer));
+                }
+                return None;
+            }
             temporary = CLEANED.with(Cell::get);
             if slots::set(pointer.cast()).is_err() {
+                if let Ok(mut registry) = slot_registry().lock() {
+                    registry.remove(&(pointer as usize));
+                }
                 unsafe {
                     drop(Box::from_raw(pointer));
                 }
@@ -162,6 +230,9 @@ impl Drop for EngineCallGuard {
             unsafe { &*self.slot }.calling.replace(self.previous.take());
             if self.temporary {
                 let _ = slots::set(std::ptr::null_mut());
+                if let Ok(mut registry) = slot_registry().lock() {
+                    registry.remove(&(self.slot as usize));
+                }
                 unsafe {
                     drop(Box::from_raw(self.slot));
                 }
@@ -185,6 +256,7 @@ pub(crate) fn calling(runtime: &Runtime) -> Result<Lease, i32> {
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn reset_after_fork() {
+    REGISTRY.store(std::ptr::null_mut(), Ordering::Release);
     EPOCH.fetch_add(1, Ordering::AcqRel);
     #[cfg(windows)]
     slots::reset_after_fork();
@@ -253,5 +325,15 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+}
+
+/// The Windows loader calls this only after all callback registrations, Host
+/// workers and application return paths have been independently quiesced.
+#[cfg(all(windows, feature = "gum-agent"))]
+pub(crate) unsafe fn release_retired_slot_registry() {
+    let pointer = REGISTRY.swap(std::ptr::null_mut(), Ordering::AcqRel);
+    if !pointer.is_null() {
+        drop(Box::from_raw(pointer));
     }
 }

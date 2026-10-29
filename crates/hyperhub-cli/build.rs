@@ -11,6 +11,16 @@ const NEEDLE3_MODEL_SHA256: &str =
 
 fn main() {
     println!("cargo:rerun-if-changed=../../build_support/native_base.rs");
+    println!("cargo:rerun-if-changed=../../build_support/native_dependencies.rs");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS");
+    let dependencies =
+        native_base::native_dependencies::NativeDependencies::from_environment(&target_os)
+            .expect("cannot resolve CLI native SDK inputs");
+    if target_os == "linux" || std::env::var_os("CARGO_FEATURE_EMBEDDED_AGENT").is_some() {
+        dependencies
+            .require_native(&target_os)
+            .expect("native CLI cannot use an SDK-free Engine identity");
+    }
     println!("cargo:rerun-if-env-changed=HYPERHUB_FRIDA_CORE_ROOT");
     println!("cargo:rerun-if-env-changed=HYPERHUB_EMBEDDED_AGENT_PATH");
     println!("cargo:rerun-if-env-changed=HYPERHUB_EMBEDDED_ENGINE_PATH");

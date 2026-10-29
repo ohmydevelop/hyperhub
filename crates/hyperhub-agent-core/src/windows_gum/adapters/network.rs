@@ -160,30 +160,168 @@ pub(in crate::windows_gum) static ORIGINAL_WSARECVFROM: AtomicPtr<c_void> =
 pub(in crate::windows_gum) static ORIGINAL_CONNECTEX: AtomicPtr<c_void> =
     AtomicPtr::new(null_mut());
 
+/// Call the target's original resolver once, at a synchronous DNS boundary.
+/// It may legitimately return an externally managed fake/TUN address.
+pub(crate) fn resolve_native_addresses(
+    hostname: &str,
+    family: u32,
+) -> Result<Vec<crate::NativeDnsAddress>, i32> {
+    let _error = crate::engine_call::WindowsLastErrorGuard::capture();
+    crate::engine_call::background(|| unsafe {
+        if let Some(answers) = super::native_dns::resolve_current() {
+            return answers;
+        }
+        let original = original!(ORIGINAL_GETADDRINFOW, GetAddrInfoWFn)
+            .or_else(|| {
+                find_export("ws2_32.dll", "GetAddrInfoW")
+                    .map(|value| std::mem::transmute::<*mut c_void, GetAddrInfoWFn>(value))
+            })
+            .ok_or(crate::HH_ERR_PROTOCOL)?;
+        let name = hostname.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let mut hints = ADDRINFOW::default();
+        hints.ai_family = if family == 6 {
+            AF_INET6 as i32
+        } else {
+            AF_INET as i32
+        };
+        let mut result = null_mut();
+        let status = original(name.as_ptr(), null(), &hints, &mut result);
+        if status != 0 {
+            return Err(status);
+        }
+        let mut answers = Vec::new();
+        let mut cursor = result;
+        while let Some(value) = cursor.as_ref() {
+            let Some((copy, length)) = copy_sockaddr(value.ai_addr, value.ai_addrlen as i32) else {
+                cursor = value.ai_next;
+                continue;
+            };
+            let (_, target) =
+                socket_target_from_sockaddr((&copy as *const SOCKADDR_STORAGE).cast(), length);
+            if let Some(target) = target {
+                let (scope_id, flowinfo) = if target.ip.is_ipv6() && value.ai_addrlen >= 28 {
+                    let bytes = std::slice::from_raw_parts(
+                        (&copy as *const SOCKADDR_STORAGE).cast::<u8>(),
+                        length as usize,
+                    );
+                    (
+                        u32::from_ne_bytes(bytes[24..28].try_into().unwrap()),
+                        u32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
+                    )
+                } else {
+                    (0, 0)
+                };
+                let answer = crate::NativeDnsAddress {
+                    ip: target.ip,
+                    scope_id,
+                    flowinfo,
+                };
+                answers.push(answer);
+            }
+            cursor = value.ai_next;
+        }
+        windows_sys::Win32::Networking::WinSock::FreeAddrInfoW(result);
+        Ok(answers)
+    })
+}
+unsafe fn record_address(hostname: &str, address: *const SOCKADDR, length: i32) -> i32 {
+    let Some((copy, length)) = copy_sockaddr(address, length) else {
+        return crate::HH_ERR_INVALID;
+    };
+    let (_, target) =
+        socket_target_from_sockaddr((&copy as *const SOCKADDR_STORAGE).cast(), length);
+    let Some(target) = target else {
+        return HH_OK;
+    };
+    let Ok(name) = CString::new(hostname) else {
+        return crate::HH_ERR_INVALID;
+    };
+    let bytes = match target.ip {
+        IpAddr::V4(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => ip.octets().to_vec(),
+    };
+    hh_agent_record_dns(
+        name.as_ptr(),
+        if bytes.len() == 4 { 4 } else { 6 },
+        bytes.as_ptr(),
+        bytes.len(),
+    )
+}
+macro_rules! record_addrinfo {
+    ($name:ident,$ty:ty) => {
+        unsafe fn $name(hostname: &str, mut result: *mut $ty) -> i32 {
+            while let Some(value) = result.as_ref() {
+                let status = record_address(hostname, value.ai_addr, value.ai_addrlen as i32);
+                if status == crate::HH_ERR_ALIAS_CONFLICT {
+                    return status;
+                }
+                result = value.ai_next;
+            }
+            HH_OK
+        }
+    };
+}
+record_addrinfo!(record_addrinfo_a, ADDRINFOA);
+record_addrinfo!(record_addrinfo_w, ADDRINFOW);
+record_addrinfo!(record_addrinfo_ex_w, ADDRINFOEXW);
+record_addrinfo!(record_addrinfo_ex_a, ADDRINFOEXA);
+fn allow_native_dns(hostname: &str) -> Result<(), i32> {
+    if crate::engine_call::host_background() {
+        return Ok(());
+    }
+    let mut context = DnsContext {
+        hostname: hostname.into(),
+        family: AF_UNSPEC as i32,
+        synthesize: false,
+        replacement: None,
+        denied_error: None,
+    };
+    runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ());
+    context.denied_error.map_or(Ok(()), Err)
+}
+
 pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo(
     node: *const c_char,
     service: *const c_char,
     hints: *const ADDRINFOA,
     result: *mut *mut ADDRINFOA,
 ) -> i32 {
+    let entry_error = windows_sys::Win32::Foundation::GetLastError();
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_GETADDRINFO, GetAddrInfoFn) else {
         return WSATRY_AGAIN;
     };
     if node.is_null() || result.is_null() || INSIDE_HOOK.with(Cell::get) {
-        return original(node, service, hints, result);
+        return super::native_dns::call_original(entry_error, || {
+            original(node, service, hints, result)
+        });
     }
     hook_result(
         None,
-        || original(node, service, hints, result),
+        || super::native_dns::call_original(entry_error, || original(node, service, hints, result)),
         || {
             let Some(_guard) = HookGuard::enter() else {
-                return original(node, service, hints, result);
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
             };
             let Ok(hostname) = CStr::from_ptr(node).to_str() else {
-                return original(node, service, hints, result);
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
             };
             if hostname.parse::<IpAddr>().is_ok() {
-                return original(node, service, hints, result);
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
+            }
+            if hints
+                .as_ref()
+                .is_some_and(|hints| hints.ai_flags & AI_NUMERICHOST as i32 != 0)
+            {
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
             }
             let family = if hints.is_null() {
                 AF_UNSPEC as i32
@@ -192,20 +330,46 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo(
             };
             if !matches!(family, x if x == AF_UNSPEC as i32 || x == AF_INET as i32 || x == AF_INET6 as i32)
             {
-                return original(node, service, hints, result);
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
             }
             let mut context = DnsContext {
                 hostname: hostname.to_owned(),
                 family,
+                synthesize: true,
                 replacement: None,
                 denied_error: None,
             };
-            runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ());
+            let (_, native_error) = super::native_dns::with_query(
+                super::native_dns::NativeQuery::A {
+                    call: original,
+                    entry_error,
+                    node,
+                    service,
+                    hints,
+                },
+                || runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ()),
+            );
             if let Some(error) = context.denied_error {
                 return error;
             }
             let Some((fake, resolved_family)) = context.replacement else {
-                return WSATRY_AGAIN;
+                if crate::attachment::enforcing() && context.synthesize {
+                    return WSATRY_AGAIN;
+                }
+                let status = super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
+                let _original_error = crate::engine_call::WindowsLastErrorGuard::capture();
+                if status == 0
+                    && record_addrinfo_a(hostname, *result) == crate::HH_ERR_ALIAS_CONFLICT
+                {
+                    windows_sys::Win32::Networking::WinSock::freeaddrinfo(*result);
+                    *result = null_mut();
+                    return WSATRY_AGAIN;
+                }
+                return status;
             };
             let Ok(fake) = CString::new(fake) else {
                 return WSATRY_AGAIN;
@@ -218,7 +382,15 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo(
             numeric.ai_family = resolved_family;
             numeric.ai_flags |= AI_NUMERICHOST as i32;
             numeric.ai_flags &= !(AI_CANONNAME as i32);
-            original(fake.as_ptr(), service, &numeric, result)
+            let status = super::native_dns::call_original(entry_error, || {
+                original(fake.as_ptr(), service, &numeric, result)
+            });
+            if status == 0 {
+                if let Some(error) = native_error {
+                    windows_sys::Win32::Foundation::SetLastError(error);
+                }
+            }
+            status
         },
     )
 }
@@ -229,22 +401,38 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_w(
     hints: *const ADDRINFOW,
     result: *mut *mut ADDRINFOW,
 ) -> i32 {
+    let entry_error = windows_sys::Win32::Foundation::GetLastError();
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_GETADDRINFOW, GetAddrInfoWFn) else {
         return WSATRY_AGAIN;
     };
     if node.is_null() || result.is_null() || INSIDE_HOOK.with(Cell::get) {
-        return original(node, service, hints, result);
+        return super::native_dns::call_original(entry_error, || {
+            original(node, service, hints, result)
+        });
     }
     hook_result(
         None,
-        || original(node, service, hints, result),
+        || super::native_dns::call_original(entry_error, || original(node, service, hints, result)),
         || {
             let Some(_guard) = HookGuard::enter() else {
-                return original(node, service, hints, result);
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
             };
             let hostname = wide_string(node);
             if hostname.is_empty() || hostname.parse::<IpAddr>().is_ok() {
-                return original(node, service, hints, result);
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
+            }
+            if hints
+                .as_ref()
+                .is_some_and(|hints| hints.ai_flags & AI_NUMERICHOST as i32 != 0)
+            {
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
             }
             let family = if hints.is_null() {
                 AF_UNSPEC as i32
@@ -253,20 +441,46 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_w(
             };
             if !matches!(family, x if x == AF_UNSPEC as i32 || x == AF_INET as i32 || x == AF_INET6 as i32)
             {
-                return original(node, service, hints, result);
+                return super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
             }
             let mut context = DnsContext {
-                hostname,
+                hostname: hostname.clone(),
                 family,
+                synthesize: true,
                 replacement: None,
                 denied_error: None,
             };
-            runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ());
+            let (_, native_error) = super::native_dns::with_query(
+                super::native_dns::NativeQuery::W {
+                    call: original,
+                    entry_error,
+                    node,
+                    service,
+                    hints,
+                },
+                || runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ()),
+            );
             if let Some(error) = context.denied_error {
                 return error;
             }
             let Some((fake, resolved_family)) = context.replacement else {
-                return WSATRY_AGAIN;
+                if crate::attachment::enforcing() && context.synthesize {
+                    return WSATRY_AGAIN;
+                }
+                let status = super::native_dns::call_original(entry_error, || {
+                    original(node, service, hints, result)
+                });
+                let _original_error = crate::engine_call::WindowsLastErrorGuard::capture();
+                if status == 0
+                    && record_addrinfo_w(&hostname, *result) == crate::HH_ERR_ALIAS_CONFLICT
+                {
+                    windows_sys::Win32::Networking::WinSock::FreeAddrInfoW(*result);
+                    *result = null_mut();
+                    return WSATRY_AGAIN;
+                }
+                return status;
             };
             let mut fake_wide = fake.encode_utf16().collect::<Vec<_>>();
             fake_wide.push(0);
@@ -278,7 +492,15 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_w(
             numeric.ai_family = resolved_family;
             numeric.ai_flags |= AI_NUMERICHOST as i32;
             numeric.ai_flags &= !(AI_CANONNAME as i32);
-            original(fake_wide.as_ptr(), service, &numeric, result)
+            let status = super::native_dns::call_original(entry_error, || {
+                original(fake_wide.as_ptr(), service, &numeric, result)
+            });
+            if status == 0 {
+                if let Some(error) = native_error {
+                    windows_sys::Win32::Foundation::SetLastError(error);
+                }
+            }
+            status
         },
     )
 }
@@ -295,26 +517,13 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
     completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
     name_handle: *mut HANDLE,
 ) -> i32 {
+    let entry_error = windows_sys::Win32::Foundation::GetLastError();
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_GETADDRINFOEXA, GetAddrInfoExAFn) else {
         return WSATRY_AGAIN;
     };
     if node.is_null() || result.is_null() || INSIDE_HOOK.with(Cell::get) {
-        return original(
-            node,
-            service,
-            namespace,
-            namespace_id,
-            hints,
-            result,
-            timeout,
-            overlapped,
-            completion,
-            name_handle,
-        );
-    }
-    hook_result(
-        None,
-        || {
+        return super::native_dns::call_original(entry_error, || {
             original(
                 node,
                 service,
@@ -327,10 +536,13 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
                 completion,
                 name_handle,
             )
-        },
+        });
+    }
+    hook_result(
+        None,
         || {
-            let Some(_guard) = HookGuard::enter() else {
-                return original(
+            super::native_dns::call_original(entry_error, || {
+                original(
                     node,
                     service,
                     namespace,
@@ -341,24 +553,63 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
                     overlapped,
                     completion,
                     name_handle,
-                );
+                )
+            })
+        },
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return super::native_dns::call_original(entry_error, || {
+                    original(
+                        node,
+                        service,
+                        namespace,
+                        namespace_id,
+                        hints,
+                        result,
+                        timeout,
+                        overlapped,
+                        completion,
+                        name_handle,
+                    )
+                });
             };
             let Ok(hostname) = CStr::from_ptr(node.cast()).to_str() else {
                 return WSATRY_AGAIN;
             };
             if hostname.parse::<IpAddr>().is_ok() {
-                return original(
-                    node,
-                    service,
-                    namespace,
-                    namespace_id,
-                    hints,
-                    result,
-                    timeout,
-                    overlapped,
-                    completion,
-                    name_handle,
-                );
+                return super::native_dns::call_original(entry_error, || {
+                    original(
+                        node,
+                        service,
+                        namespace,
+                        namespace_id,
+                        hints,
+                        result,
+                        timeout,
+                        overlapped,
+                        completion,
+                        name_handle,
+                    )
+                });
+            }
+            if hints
+                .as_ref()
+                .is_some_and(|hints| hints.ai_flags & AI_NUMERICHOST as i32 != 0)
+            {
+                return super::native_dns::call_original(entry_error, || {
+                    original(
+                        node,
+                        service,
+                        namespace,
+                        namespace_id,
+                        hints,
+                        result,
+                        timeout,
+                        overlapped,
+                        completion,
+                        name_handle,
+                    )
+                });
             }
             let family = hints
                 .as_ref()
@@ -366,15 +617,56 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
             let mut context = DnsContext {
                 hostname: hostname.to_owned(),
                 family,
+                synthesize: overlapped.is_null()
+                    && completion.is_none()
+                    && matches!(namespace, 0 | 12),
                 replacement: None,
                 denied_error: None,
             };
-            runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ());
+            let (_, native_error) = super::native_dns::with_query(
+                super::native_dns::NativeQuery::ExA {
+                    call: original,
+                    entry_error,
+                    node,
+                    service,
+                    namespace,
+                    namespace_id,
+                    hints,
+                    timeout,
+                    name_handle,
+                },
+                || runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ()),
+            );
             if let Some(error) = context.denied_error {
                 return error;
             }
             let Some((fake, resolved_family)) = context.replacement else {
-                return WSATRY_AGAIN;
+                if crate::attachment::enforcing() && context.synthesize {
+                    return WSATRY_AGAIN;
+                }
+                let status = super::native_dns::call_original(entry_error, || {
+                    original(
+                        node,
+                        service,
+                        namespace,
+                        namespace_id,
+                        hints,
+                        result,
+                        timeout,
+                        overlapped,
+                        completion,
+                        name_handle,
+                    )
+                });
+                let _original_error = crate::engine_call::WindowsLastErrorGuard::capture();
+                if status == 0
+                    && record_addrinfo_ex_a(hostname, *result) == crate::HH_ERR_ALIAS_CONFLICT
+                {
+                    windows_sys::Win32::Networking::WinSock::FreeAddrInfoEx(*result);
+                    *result = null_mut();
+                    return WSATRY_AGAIN;
+                }
+                return status;
             };
             let Ok(fake) = CString::new(fake) else {
                 return WSATRY_AGAIN;
@@ -383,18 +675,26 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_a(
             numeric.ai_family = resolved_family;
             numeric.ai_flags |= AI_NUMERICHOST as i32;
             numeric.ai_flags &= !(AI_CANONNAME as i32);
-            original(
-                fake.as_ptr().cast(),
-                service,
-                namespace,
-                namespace_id,
-                &numeric,
-                result,
-                timeout,
-                overlapped,
-                completion,
-                name_handle,
-            )
+            let status = super::native_dns::call_original(entry_error, || {
+                original(
+                    fake.as_ptr().cast(),
+                    service,
+                    namespace,
+                    namespace_id,
+                    &numeric,
+                    result,
+                    timeout,
+                    overlapped,
+                    completion,
+                    name_handle,
+                )
+            });
+            if status == 0 {
+                if let Some(error) = native_error {
+                    windows_sys::Win32::Foundation::SetLastError(error);
+                }
+            }
+            status
         },
     )
 }
@@ -411,6 +711,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
     completion: LPLOOKUPSERVICE_COMPLETION_ROUTINE,
     name_handle: *mut HANDLE,
 ) -> i32 {
+    let entry_error = windows_sys::Win32::Foundation::GetLastError();
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_GETADDRINFOEXW, GetAddrInfoExWFn) else {
         return WSATRY_AGAIN;
     };
@@ -430,22 +732,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
         );
     }
     if node.is_null() || result.is_null() || INSIDE_HOOK.with(Cell::get) {
-        return original(
-            node,
-            service,
-            namespace,
-            namespace_id,
-            hints,
-            result,
-            timeout,
-            overlapped,
-            completion,
-            name_handle,
-        );
-    }
-    hook_result(
-        None,
-        || {
+        return super::native_dns::call_original(entry_error, || {
             original(
                 node,
                 service,
@@ -458,14 +745,13 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
                 completion,
                 name_handle,
             )
-        },
+        });
+    }
+    hook_result(
+        None,
         || {
-            let Some(_guard) = HookGuard::enter() else {
-                return WSATRY_AGAIN;
-            };
-            let hostname = wide_string(node);
-            if hostname.is_empty() || hostname.parse::<IpAddr>().is_ok() {
-                return original(
+            super::native_dns::call_original(entry_error, || {
+                original(
                     node,
                     service,
                     namespace,
@@ -476,23 +762,103 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
                     overlapped,
                     completion,
                     name_handle,
-                );
+                )
+            })
+        },
+        || {
+            let Some(_guard) = HookGuard::enter() else {
+                return WSATRY_AGAIN;
+            };
+            let hostname = wide_string(node);
+            if hostname.is_empty() || hostname.parse::<IpAddr>().is_ok() {
+                return super::native_dns::call_original(entry_error, || {
+                    original(
+                        node,
+                        service,
+                        namespace,
+                        namespace_id,
+                        hints,
+                        result,
+                        timeout,
+                        overlapped,
+                        completion,
+                        name_handle,
+                    )
+                });
+            }
+            if hints
+                .as_ref()
+                .is_some_and(|hints| hints.ai_flags & AI_NUMERICHOST as i32 != 0)
+            {
+                return super::native_dns::call_original(entry_error, || {
+                    original(
+                        node,
+                        service,
+                        namespace,
+                        namespace_id,
+                        hints,
+                        result,
+                        timeout,
+                        overlapped,
+                        completion,
+                        name_handle,
+                    )
+                });
             }
             let family = hints
                 .as_ref()
                 .map_or(AF_UNSPEC as i32, |value| value.ai_family);
             let mut context = DnsContext {
-                hostname,
+                hostname: hostname.clone(),
                 family,
+                synthesize: matches!(namespace, 0 | 12),
                 replacement: None,
                 denied_error: None,
             };
-            runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ());
+            let (_, native_error) = super::native_dns::with_query(
+                super::native_dns::NativeQuery::ExW {
+                    call: original,
+                    entry_error,
+                    node,
+                    service,
+                    namespace,
+                    namespace_id,
+                    hints,
+                    timeout,
+                    name_handle,
+                },
+                || runtime().dns.dispatch(&mut context, |_| (), |_, _, _| ()),
+            );
             if let Some(error) = context.denied_error {
                 return error;
             }
             let Some((fake, resolved_family)) = context.replacement else {
-                return WSATRY_AGAIN;
+                if crate::attachment::enforcing() && context.synthesize {
+                    return WSATRY_AGAIN;
+                }
+                let status = super::native_dns::call_original(entry_error, || {
+                    original(
+                        node,
+                        service,
+                        namespace,
+                        namespace_id,
+                        hints,
+                        result,
+                        timeout,
+                        overlapped,
+                        completion,
+                        name_handle,
+                    )
+                });
+                let _original_error = crate::engine_call::WindowsLastErrorGuard::capture();
+                if status == 0
+                    && record_addrinfo_ex_w(&hostname, *result) == crate::HH_ERR_ALIAS_CONFLICT
+                {
+                    windows_sys::Win32::Networking::WinSock::FreeAddrInfoExW(*result);
+                    *result = null_mut();
+                    return WSATRY_AGAIN;
+                }
+                return status;
             };
             let mut fake_wide = fake.encode_utf16().collect::<Vec<_>>();
             fake_wide.push(0);
@@ -500,18 +866,26 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_getaddrinfo_ex_w(
             numeric.ai_family = resolved_family;
             numeric.ai_flags |= AI_NUMERICHOST as i32;
             numeric.ai_flags &= !(AI_CANONNAME as i32);
-            original(
-                fake_wide.as_ptr(),
-                service,
-                namespace,
-                namespace_id,
-                &numeric,
-                result,
-                timeout,
-                overlapped,
-                completion,
-                name_handle,
-            )
+            let status = super::native_dns::call_original(entry_error, || {
+                original(
+                    fake_wide.as_ptr(),
+                    service,
+                    namespace,
+                    namespace_id,
+                    &numeric,
+                    result,
+                    timeout,
+                    overlapped,
+                    completion,
+                    name_handle,
+                )
+            });
+            if status == 0 {
+                if let Some(error) = native_error {
+                    windows_sys::Win32::Foundation::SetLastError(error);
+                }
+            }
+            status
         },
     )
 }
@@ -524,23 +898,44 @@ pub(in crate::windows_gum) unsafe fn wide_string(value: *const u16) -> String {
     String::from_utf16_lossy(std::slice::from_raw_parts(value, length))
 }
 
-unsafe fn record_dns_query_results(hostname: &str, mut record: *mut DNS_RECORDA) {
+unsafe fn record_dns_query_results(hostname: &str, mut record: *mut DNS_RECORDA) -> i32 {
+    if crate::engine_call::host_background() {
+        return HH_OK;
+    }
     let Ok(hostname) = CString::new(hostname) else {
-        return;
+        return crate::HH_ERR_INVALID;
     };
     while let Some(current) = record.as_ref() {
         match current.wType {
             DNS_TYPE_A => {
                 let address = current.Data.A.IpAddress.to_ne_bytes();
-                let _ = hh_agent_record_dns(hostname.as_ptr(), 4, address.as_ptr(), address.len());
+                if hh_agent_record_dns(hostname.as_ptr(), 4, address.as_ptr(), address.len())
+                    == crate::HH_ERR_ALIAS_CONFLICT
+                {
+                    return crate::HH_ERR_ALIAS_CONFLICT;
+                }
             }
             DNS_TYPE_AAAA => {
                 let address = current.Data.AAAA.Ip6Address.IP6Byte;
-                let _ = hh_agent_record_dns(hostname.as_ptr(), 6, address.as_ptr(), address.len());
+                if hh_agent_record_dns(hostname.as_ptr(), 6, address.as_ptr(), address.len())
+                    == crate::HH_ERR_ALIAS_CONFLICT
+                {
+                    return crate::HH_ERR_ALIAS_CONFLICT;
+                }
             }
             _ => {}
         }
         record = current.pNext;
+    }
+    HH_OK
+}
+unsafe fn reject_dns_records(results: *mut *mut DNS_RECORDA) {
+    if !results.is_null() && !(*results).is_null() {
+        windows_sys::Win32::NetworkManagement::Dns::DnsFree(
+            (*results).cast(),
+            windows_sys::Win32::NetworkManagement::Dns::DnsFreeRecordList,
+        );
+        *results = null_mut();
     }
 }
 
@@ -553,10 +948,24 @@ unsafe fn dns_query_a_impl(
     results: *mut *mut DNS_RECORDA,
     reserved: *mut *mut c_void,
 ) -> u32 {
-    let status = original(name, query_type, options, extra, results, reserved);
+    let entry_error = windows_sys::Win32::Foundation::GetLastError();
+    if !name.is_null() {
+        if let Ok(hostname) = CStr::from_ptr(name.cast()).to_str() {
+            if let Err(error) = allow_native_dns(hostname) {
+                return error as u32;
+            }
+        }
+    }
+    let status = super::native_dns::call_original(entry_error, || {
+        original(name, query_type, options, extra, results, reserved)
+    });
+    let _original_error = crate::engine_call::WindowsLastErrorGuard::capture();
     if status == 0 && !name.is_null() && !results.is_null() {
         if let Ok(hostname) = CStr::from_ptr(name.cast()).to_str() {
-            record_dns_query_results(hostname, *results);
+            if record_dns_query_results(hostname, *results) == crate::HH_ERR_ALIAS_CONFLICT {
+                reject_dns_records(results);
+                return WSATRY_AGAIN as u32;
+            }
         }
     }
     status
@@ -570,6 +979,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_a(
     results: *mut *mut DNS_RECORDA,
     reserved: *mut *mut c_void,
 ) -> u32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_DNSQUERY_A, DnsQueryAFn) else {
         return WSATRY_AGAIN as u32;
     };
@@ -586,6 +996,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_utf8(
     results: *mut *mut DNS_RECORDA,
     reserved: *mut *mut c_void,
 ) -> u32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_DNSQUERY_UTF8, DnsQueryAFn) else {
         return WSATRY_AGAIN as u32;
     };
@@ -602,17 +1013,31 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_w(
     results: *mut *mut DNS_RECORDA,
     reserved: *mut *mut c_void,
 ) -> u32 {
+    let entry_error = windows_sys::Win32::Foundation::GetLastError();
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_DNSQUERY_W, DnsQueryWFn) else {
         return WSATRY_AGAIN as u32;
     };
-    let status = original(name, query_type, options, extra, results, reserved);
+    if !name.is_null() {
+        if let Err(error) = allow_native_dns(&wide_string(name)) {
+            return error as u32;
+        }
+    }
+    let status = super::native_dns::call_original(entry_error, || {
+        original(name, query_type, options, extra, results, reserved)
+    });
+    let _original_error = crate::engine_call::WindowsLastErrorGuard::capture();
     if status == 0 && !name.is_null() && !results.is_null() {
-        record_dns_query_results(&wide_string(name), *results);
+        if record_dns_query_results(&wide_string(name), *results) == crate::HH_ERR_ALIAS_CONFLICT {
+            reject_dns_records(results);
+            return WSATRY_AGAIN as u32;
+        }
     }
     status
 }
 
 struct DnsQueryExContext {
+    _attachment_pending: crate::attachment::CallGuard,
     engine: hyperhub_runtime::Lease,
     hostname: String,
     callback: PDNS_QUERY_COMPLETION_ROUTINE,
@@ -624,13 +1049,22 @@ unsafe extern "system" fn dns_query_ex_completion(
     context: *const c_void,
     results: *mut DNS_QUERY_RESULT,
 ) {
+    let _attachment_call = crate::attachment::enter();
+    let original_error = crate::engine_call::WindowsLastErrorGuard::capture();
     let context = Arc::from_raw(context.cast::<DnsQueryExContext>());
     context.callback_called.store(true, Ordering::Release);
-    if let Some(results) = results.as_ref() {
+    if let Some(results) = results.as_mut() {
         let _guard = HookGuard::enter();
         let _engine = crate::engine_call::EngineCallGuard::with_lease(context.engine.clone());
-        record_dns_query_results(&context.hostname, results.pQueryRecords);
+        if results.QueryStatus == 0
+            && record_dns_query_results(&context.hostname, results.pQueryRecords)
+                == crate::HH_ERR_ALIAS_CONFLICT
+        {
+            reject_dns_records(&mut results.pQueryRecords);
+            results.QueryStatus = WSATRY_AGAIN;
+        }
     }
+    drop(original_error);
     if let Some(callback) = context.callback {
         let inside = INSIDE_HOOK.with(|value| value.replace(false));
         callback(context.callback_context as *const c_void, results);
@@ -643,18 +1077,29 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_ex(
     results: *mut DNS_QUERY_RESULT,
     cancel: *mut DNS_QUERY_CANCEL,
 ) -> i32 {
+    let entry_error = windows_sys::Win32::Foundation::GetLastError();
+    let _attachment_call = crate::attachment::enter();
     const ERROR_IO_PENDING: i32 = 997;
     let Some(original) = original!(ORIGINAL_DNSQUERY_EX, DnsQueryExFn) else {
         return WSATRY_AGAIN;
     };
     let Some(request) = request.as_ref() else {
-        return original(request, results, cancel);
+        return super::native_dns::call_original(entry_error, || {
+            original(request, results, cancel)
+        });
     };
-    if request.QueryName.is_null() || INSIDE_HOOK.with(Cell::get) {
-        return original(request, results, cancel);
+    if request.QueryName.is_null()
+        || INSIDE_HOOK.with(Cell::get)
+        || crate::engine_call::host_background()
+    {
+        return super::native_dns::call_original(entry_error, || {
+            original(request, results, cancel)
+        });
     }
     let Some(_guard) = HookGuard::enter() else {
-        return original(request, results, cancel);
+        return super::native_dns::call_original(entry_error, || {
+            original(request, results, cancel)
+        });
     };
     let Some(engine) = crate::state()
         .lock()
@@ -664,7 +1109,11 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_ex(
         return windows_sys::Win32::Networking::WinSock::WSAENOBUFS;
     };
     let hostname = wide_string(request.QueryName);
+    if let Err(error) = allow_native_dns(&hostname) {
+        return error;
+    }
     let context = Arc::new(DnsQueryExContext {
+        _attachment_pending: crate::attachment::enter(),
         engine,
         hostname: hostname.clone(),
         callback: request.pQueryCompletionCallback,
@@ -675,24 +1124,37 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_dns_query_ex(
     let mut request_v1 = *request;
     request_v1.pQueryCompletionCallback = Some(dns_query_ex_completion);
     request_v1.pQueryContext = callback_context.cast_mut().cast();
-    let status = if request.Version >= 3 {
+    let mut status = if request.Version >= 3 {
         let mut request_v3 = *((request as *const DNS_QUERY_REQUEST).cast::<DNS_QUERY_REQUEST3>());
         request_v3.pQueryCompletionCallback = Some(dns_query_ex_completion);
         request_v3.pQueryContext = callback_context.cast_mut().cast();
-        original(
-            (&request_v3 as *const DNS_QUERY_REQUEST3).cast(),
-            results,
-            cancel,
-        )
+        super::native_dns::call_original(entry_error, || {
+            original(
+                (&request_v3 as *const DNS_QUERY_REQUEST3).cast(),
+                results,
+                cancel,
+            )
+        })
     } else {
-        original(&request_v1, results, cancel)
+        super::native_dns::call_original(entry_error, || original(&request_v1, results, cancel))
     };
+    let _original_error = crate::engine_call::WindowsLastErrorGuard::capture();
     if status != ERROR_IO_PENDING {
         if !context.callback_called.load(Ordering::Acquire) {
             drop(Arc::from_raw(callback_context));
         }
-        if let Some(results) = results.as_ref() {
-            record_dns_query_results(&hostname, results.pQueryRecords);
+        if let Some(results) = results
+            .as_mut()
+            .filter(|_| !context.callback_called.load(Ordering::Acquire))
+        {
+            if status == 0
+                && record_dns_query_results(&hostname, results.pQueryRecords)
+                    == crate::HH_ERR_ALIAS_CONFLICT
+            {
+                reject_dns_records(&mut results.pQueryRecords);
+                results.QueryStatus = WSATRY_AGAIN;
+                status = WSATRY_AGAIN;
+            }
         }
     }
     status
@@ -703,6 +1165,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_connect(
     name: *const SOCKADDR,
     length: i32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_CONNECT, ConnectFn) else {
         return SOCKET_ERROR;
     };
@@ -716,7 +1179,13 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_connect(
             let Some(_guard) = HookGuard::enter() else {
                 return original(socket, name, length);
             };
-            let (family, target) = socket_target_from_sockaddr(name, length);
+            let Some((copy, copied_length)) = copy_sockaddr(name, length) else {
+                return original(socket, name, length);
+            };
+            let (family, target) = socket_target_from_sockaddr(
+                (&copy as *const SOCKADDR_STORAGE).cast(),
+                copied_length,
+            );
             let mut context = ConnectContext::new(ConnectKind::Blocking, socket, family, target);
             let mut storage = SOCKADDR_STORAGE::default();
             let result = runtime().connect.dispatch(
@@ -747,6 +1216,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_connect(
     send_qos: *const QOS,
     recv_qos: *const QOS,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_WSACONNECT, WsaConnectFn) else {
         return SOCKET_ERROR;
     };
@@ -760,7 +1230,13 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_connect(
             let Some(_guard) = HookGuard::enter() else {
                 return original(socket, name, length, caller, callee, send_qos, recv_qos);
             };
-            let (family, target) = socket_target_from_sockaddr(name, length);
+            let Some((copy, copied_length)) = copy_sockaddr(name, length) else {
+                return original(socket, name, length, caller, callee, send_qos, recv_qos);
+            };
+            let (family, target) = socket_target_from_sockaddr(
+                (&copy as *const SOCKADDR_STORAGE).cast(),
+                copied_length,
+            );
             let mut context = ConnectContext::new(ConnectKind::Blocking, socket, family, target);
             let mut storage = SOCKADDR_STORAGE::default();
             let result = runtime().connect.dispatch(
@@ -799,6 +1275,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_connect_ex(
     bytes_sent: *mut u32,
     overlapped: *mut OVERLAPPED,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_CONNECTEX, ConnectExFn) else {
         return 0;
     };
@@ -842,7 +1319,21 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_connect_ex(
                     overlapped,
                 );
             };
-            let (family, target) = socket_target_from_sockaddr(name, length);
+            let Some((copy, copied_length)) = copy_sockaddr(name, length) else {
+                return original(
+                    socket,
+                    name,
+                    length,
+                    send_buffer,
+                    send_length,
+                    bytes_sent,
+                    overlapped,
+                );
+            };
+            let (family, target) = socket_target_from_sockaddr(
+                (&copy as *const SOCKADDR_STORAGE).cast(),
+                copied_length,
+            );
             let mut context = ConnectContext::new(ConnectKind::Extended, socket, family, target);
             let mut storage = SOCKADDR_STORAGE::default();
             let result = runtime().connect.dispatch(
@@ -910,6 +1401,53 @@ pub(in crate::windows_gum) unsafe fn socket_ready(
     result > 0
 }
 
+/// Copy only a validated native sockaddr width. Invalid or inaccessible caller
+/// buffers are left to the original API, which chooses its own WSA error.
+/// The SDK probe cannot replace the caller's error or dereference PROT_NONE.
+pub(in crate::windows_gum) unsafe fn copy_sockaddr(
+    requested: *const SOCKADDR,
+    length: i32,
+) -> Option<(SOCKADDR_STORAGE, i32)> {
+    let _error = crate::engine_call::WindowsLastErrorGuard::capture();
+    if requested.is_null() || length < 2 {
+        return None;
+    }
+    let mut storage = SOCKADDR_STORAGE::default();
+    let mut copied = 0usize;
+    let process = windows_sys::Win32::System::Threading::GetCurrentProcess();
+    if windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+        process,
+        requested.cast(),
+        (&mut storage as *mut SOCKADDR_STORAGE).cast(),
+        2,
+        &mut copied,
+    ) == 0
+        || copied != 2
+    {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts((&storage as *const SOCKADDR_STORAGE).cast::<u8>(), 2);
+    let needed = match u16::from_ne_bytes([bytes[0], bytes[1]]) {
+        AF_INET => 16,
+        AF_INET6 => 28,
+        _ => return None,
+    };
+    if length < needed {
+        return None;
+    }
+    if windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+        process,
+        requested.cast(),
+        (&mut storage as *mut SOCKADDR_STORAGE).cast(),
+        needed as usize,
+        &mut copied,
+    ) == 0
+        || copied != needed as usize
+    {
+        return None;
+    }
+    Some((storage, needed))
+}
 pub(in crate::windows_gum) unsafe fn socket_target_from_sockaddr(
     requested: *const SOCKADDR,
     length: i32,
@@ -938,7 +1476,7 @@ unsafe fn effective_sockaddr(
     original_length: i32,
     storage: &mut SOCKADDR_STORAGE,
 ) -> (*const SOCKADDR, i32) {
-    if !context.is_proxy_redirected() {
+    if !context.is_redirected() {
         return (original, original_length);
     }
     let Some(target) = context.destination() else {
@@ -967,6 +1505,8 @@ unsafe fn effective_sockaddr(
             output[..2].copy_from_slice(&AF_INET6.to_ne_bytes());
             output[2..4].copy_from_slice(&target.port.to_be_bytes());
             output[8..24].copy_from_slice(&ip.octets());
+            output[4..8].copy_from_slice(&context.native_flow.to_ne_bytes());
+            output[24..28].copy_from_slice(&context.native_scope.to_ne_bytes());
             ((storage as *mut SOCKADDR_STORAGE).cast::<SOCKADDR>(), 28)
         }
     }
@@ -997,6 +1537,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_send(
     length: i32,
     flags: i32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_SEND, SendFn) else {
         return SOCKET_ERROR;
     };
@@ -1035,6 +1576,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_recv(
     length: i32,
     flags: i32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_RECV, RecvFn) else {
         return SOCKET_ERROR;
     };
@@ -1075,6 +1617,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_sendto(
     address: *const SOCKADDR,
     address_length: i32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_SENDTO, SendToFn) else {
         return SOCKET_ERROR;
     };
@@ -1117,6 +1660,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_recvfrom(
     address: *mut SOCKADDR,
     address_length: *mut i32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_RECVFROM, RecvFromFn) else {
         return SOCKET_ERROR;
     };
@@ -1160,6 +1704,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_send(
     overlapped: *mut OVERLAPPED,
     completion: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_WSASEND, WsaSendFn) else {
         return SOCKET_ERROR;
     };
@@ -1203,6 +1748,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_recv(
     overlapped: *mut OVERLAPPED,
     completion: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_WSARECV, WsaRecvFn) else {
         return SOCKET_ERROR;
     };
@@ -1258,6 +1804,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_sendto(
     overlapped: *mut OVERLAPPED,
     completion: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_WSASENDTO, WsaSendToFn) else {
         return SOCKET_ERROR;
     };
@@ -1345,6 +1892,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_wsa_recvfrom(
     overlapped: *mut OVERLAPPED,
     completion: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_WSARECVFROM, WsaRecvFromFn) else {
         return SOCKET_ERROR;
     };
@@ -1593,6 +2141,7 @@ pub(in crate::windows_gum) unsafe fn recv_all(socket: SOCKET, mut data: &mut [u8
 }
 
 pub(in crate::windows_gum) unsafe extern "system" fn hook_closesocket(socket: SOCKET) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_CLOSESOCKET, CloseSocketFn) else {
         return SOCKET_ERROR;
     };
@@ -1615,6 +2164,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_ioctlsocket(
     command: i32,
     argument: *mut u32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_IOCTLSOCKET, IoctlSocketFn) else {
         return SOCKET_ERROR;
     };

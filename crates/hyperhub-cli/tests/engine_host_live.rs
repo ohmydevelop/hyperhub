@@ -787,6 +787,29 @@ async fn native_host_scenario(
     fs::create_dir_all(&child_dir).unwrap();
     let policy_child = child_dir.join(policy_child.file_name().unwrap());
     fs::copy(&executable, &policy_child).unwrap();
+    // Reversible run persists its bootstrap under the instance's runtime key.
+    // Keep the mock Serve and the real CLI on the same disposable generation.
+    let mut descriptor = hyperhub_core::config_store::new_descriptor();
+    descriptor.memory_kib = 8192;
+    descriptor.iterations = 1;
+    descriptor.lanes = 1;
+    let keyring = hyperhub_core::config_store::ConfigKeyring::from_runtime_master(
+        descriptor,
+        Zeroizing::new(vec![0; 32]),
+    )
+    .unwrap();
+    hyperhub_core::config_store::save_encrypted_with_keyring(
+        &root.0.join("config.bin"),
+        &config,
+        &keyring,
+    )
+    .unwrap();
+    hyperhub_core::config_store::save_runtime_key(
+        &root.0.join("runtime/config-key.bin"),
+        &keyring,
+        api_key.as_bytes(),
+    )
+    .unwrap();
     let sessions =
         SessionRegistry::default().with_api_key(Zeroizing::new(api_key.as_bytes().to_vec()));
     let auth = sessions.clone();
@@ -816,6 +839,7 @@ async fn native_host_scenario(
         RuntimeState::new(Arc::new(config)).unwrap(),
         Zeroizing::new(vec![0; 32]),
     )
+    .with_attachment_directory(root.0.join("runtime/attachments"))
     .with_engine_upgrades(
         &root.0.join("upgrades"),
         Zeroizing::new(api_key.as_bytes().to_vec()),

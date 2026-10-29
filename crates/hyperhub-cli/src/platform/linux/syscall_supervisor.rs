@@ -18,6 +18,13 @@ use super::dns_tracking::parse_dns_query;
 use super::dns_tracking::{parse_dns_addresses, DnsTransactions};
 use super::hook_manifest::{self, syscall};
 
+#[path = "syscall_supervisor_attached.rs"]
+mod attached;
+pub(super) use attached::process_tree as attachment_process_tree;
+pub(super) use attached::{
+    run as run_attached, Configuration as AttachedConfiguration, Event as AttachmentEvent,
+};
+
 const PTRACE_TRACEME: libc::c_uint = 0;
 const PTRACE_PEEKDATA: libc::c_uint = 2;
 const PTRACE_POKEDATA: libc::c_uint = 5;
@@ -99,6 +106,9 @@ impl ProcessIntent {
 
 #[derive(Debug)]
 enum PendingSyscall {
+    DeferredSocketCall {
+        original: Registers,
+    },
     OverrideResult {
         result: i64,
     },
@@ -152,6 +162,26 @@ enum PendingSyscall {
         original: Vec<u8>,
         target: TargetAddress,
     },
+}
+
+impl PendingSyscall {
+    fn has_recovery_dependency(&self) -> bool {
+        matches!(
+            self,
+            Self::DeferredSocketCall { .. }
+                | Self::OverrideResult { .. }
+                | Self::Connect { .. }
+                | Self::IoctlNonblocking { .. }
+                | Self::Socket {
+                    logical_nonblocking: true,
+                    ..
+                }
+                | Self::FcntlSetfl {
+                    logical_nonblocking: true,
+                    ..
+                }
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -249,6 +279,7 @@ struct Supervisor {
     parents: HashMap<libc::pid_t, libc::pid_t>,
     members: HashSet<libc::pid_t>,
     logical_nonblocking: HashSet<u64>,
+    inherited_nonblocking: HashSet<u64>,
     file_tables: HashMap<libc::pid_t, u64>,
     pending_child_stops: HashSet<libc::pid_t>,
     next_file_table: u64,
@@ -262,6 +293,7 @@ struct Supervisor {
     process_starts: HashMap<libc::pid_t, u64>,
     tree_failure: Option<(Option<i32>, Option<i32>)>,
     last_exit: Option<(u32, u64)>,
+    attachment: Option<attached::State>,
 }
 
 pub fn run<F>(
@@ -312,8 +344,13 @@ where
     }
 
     let control = super::engine_control::control_runtime()?;
-    let child = spawn_traced(target, argv0, args, environment)?;
-    let initial_status = wait_for(child)?;
+    let reversible = environment_value(environment, "HYPERHUB_ATTACHMENT_ID").is_some();
+    let child = spawn_traced(target, argv0, args, environment, reversible)?;
+    let initial_status = if reversible {
+        attached::resume_owned_startup(child).inspect_err(|_| terminate(child))?
+    } else {
+        wait_for(child)?
+    };
     if !libc::WIFSTOPPED(initial_status) || libc::WSTOPSIG(initial_status) != libc::SIGTRAP {
         terminate(child);
         return Err(format!(
@@ -325,6 +362,13 @@ where
         return Err("serve rejected Linux static root process activation".into());
     }
     set_options(child).inspect_err(|_| terminate(child))?;
+    let owned_execution =
+        crate::attachment::owned_run_execution(environment).inspect_err(|_| terminate(child))?;
+    let owned_bridge = owned_execution
+        .as_ref()
+        .map(attached::OwnedBridge::new)
+        .transpose()
+        .inspect_err(|_| terminate(child))?;
 
     let mut supervisor = Supervisor {
         engine: hyperhub_engine::resident(),
@@ -350,6 +394,7 @@ where
         parents: HashMap::new(),
         members: HashSet::from([child]),
         logical_nonblocking: HashSet::new(),
+        inherited_nonblocking: HashSet::new(),
         file_tables: HashMap::from([(child, 1)]),
         pending_child_stops: HashSet::new(),
         next_file_table: 2,
@@ -365,6 +410,7 @@ where
             .unwrap_or_default(),
         tree_failure: None,
         last_exit: None,
+        attachment: owned_bridge.as_ref().map(attached::OwnedBridge::state),
     };
     super::engine_control::bootstrap(
         &supervisor.engine,
@@ -382,13 +428,74 @@ where
         child as u32,
     )
     .inspect_err(|_| terminate(child))?;
+    if owned_bridge.is_some() {
+        attached::activate_owned(child).inspect_err(|_| terminate(child))?;
+    }
     resume_syscall(child, 0).inspect_err(|_| terminate(child))?;
+    if let Some(bridge) = &owned_bridge {
+        bridge.report(AttachmentEvent::Active(vec![child as u32]));
+    }
     let result = supervisor.event_loop();
-    if result.is_err() {
+    if let Err(error) = &result {
+        if let Some(bridge) = &owned_bridge {
+            bridge.report(AttachmentEvent::Degraded(error.clone()));
+            // Ownership is limited to the pre-ready startup. An active owned
+            // run must not kill its target merely because tracing failed.
+            let _ = supervisor.detach_external();
+            let root_status = supervisor.root_status;
+            supervisor.attachment.take();
+            drop(owned_bridge);
+            drop(_engine_control);
+            if let Some(code) = root_status {
+                return Ok(code);
+            }
+            let status = wait_for(child)?;
+            let code = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                128 + libc::WTERMSIG(status)
+            } else {
+                return Err("degraded run returned a nonterminal wait status".into());
+            };
+            let _ = crate::attachment::notify_owned_run_root_exit(code);
+            return Ok(code);
+        }
         supervisor.terminate_all();
         return result;
     }
     supervisor.write_hook_report()?;
+    let detached = supervisor
+        .attachment
+        .as_ref()
+        .is_some_and(|state| state.detaching);
+    if let Some(bridge) = &owned_bridge {
+        bridge.report(if detached {
+            AttachmentEvent::Detached
+        } else {
+            AttachmentEvent::Exited
+        });
+    }
+    let root_status = supervisor.root_status;
+    supervisor.attachment.take();
+    if detached {
+        drop(_engine_control);
+        if let Some(code) = root_status {
+            drop(owned_bridge);
+            return Ok(code);
+        }
+        let status = wait_for(child)?;
+        let code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status)
+        } else {
+            return Err("detached run returned a nonterminal wait status".into());
+        };
+        let _ = crate::attachment::notify_owned_run_root_exit(code);
+        drop(owned_bridge);
+        return Ok(code);
+    }
+    drop(owned_bridge);
     result
 }
 
@@ -508,6 +615,7 @@ impl Supervisor {
         {
             self.socket_engines.remove(&descriptor.id);
             self.logical_nonblocking.remove(&descriptor.id);
+            self.inherited_nonblocking.remove(&descriptor.id);
             self.dns_queries.forget(descriptor.id);
         }
     }
@@ -628,7 +736,10 @@ impl Supervisor {
 
     fn event_loop(&mut self) -> Result<i32, String> {
         while !self.threads.is_empty() {
-            let mut awaiting_terminal = false;
+            if self.poll_attachment()? {
+                return Ok(0);
+            }
+            let mut awaiting_terminal = self.attachment.is_some();
             let now = Instant::now();
             for (&tid, state) in &self.threads {
                 if let Some(wait) = &state.register_wait {
@@ -670,6 +781,8 @@ impl Supervisor {
             if libc::WIFEXITED(status) {
                 if tid == self.root_pid {
                     self.root_status = Some(libc::WEXITSTATUS(status));
+                    let _ =
+                        crate::attachment::notify_owned_run_root_exit(libc::WEXITSTATUS(status));
                 }
                 self.observe_exit(tid, Some(libc::WEXITSTATUS(status)), None);
                 self.threads.remove(&tid);
@@ -679,6 +792,8 @@ impl Supervisor {
             if libc::WIFSIGNALED(status) {
                 if tid == self.root_pid {
                     self.root_status = Some(128 + libc::WTERMSIG(status));
+                    let _ =
+                        crate::attachment::notify_owned_run_root_exit(128 + libc::WTERMSIG(status));
                 }
                 self.observe_exit(tid, None, Some(libc::WTERMSIG(status)));
                 self.threads.remove(&tid);
@@ -691,9 +806,38 @@ impl Supervisor {
 
             let signal = libc::WSTOPSIG(status);
             let event = (status as u32) >> 16;
+            if let Some(state) = self.attachment.as_mut() {
+                state.stopped.insert(tid, status);
+            }
+            if self.detach_unscoped_child(tid)? {
+                continue;
+            }
+            if self.attachment.is_some() && !self.file_tables.contains_key(&tid) {
+                self.pending_child_stops.insert(tid);
+                continue;
+            }
+            if self.attachment.is_some() && event == attached::EVENT_STOP {
+                if signal != libc::SIGTRAP
+                    && !self
+                        .attachment
+                        .as_mut()
+                        .is_some_and(|state| state.new_children.remove(&tid))
+                {
+                    // A pre-existing application group-stop stays stopped.
+                    attached::listen(tid)?;
+                    self.attachment
+                        .as_mut()
+                        .expect("external state")
+                        .stopped
+                        .remove(&tid);
+                } else {
+                    self.resume_tracee(tid, 0)?;
+                }
+                continue;
+            }
             if signal == SYSCALL_STOP {
                 if matches!(self.handle_syscall(tid)?, SyscallStep::Ready) {
-                    resume_syscall(tid, 0)?;
+                    self.resume_tracee(tid, 0)?;
                 }
                 continue;
             }
@@ -711,7 +855,7 @@ impl Supervisor {
             }
             if signal == libc::SIGTRAP && event != 0 {
                 self.handle_event(tid, event)?;
-                resume_syscall(tid, 0)?;
+                self.resume_tracee(tid, 0)?;
                 continue;
             }
             if !self.file_tables.contains_key(&tid) {
@@ -722,12 +866,14 @@ impl Supervisor {
             self.thread_groups
                 .entry(tid)
                 .or_insert_with(|| thread_group(tid));
-            let deliver = if signal == libc::SIGSTOP || signal == libc::SIGTRAP {
+            let deliver = if self.attachment.is_none()
+                && (signal == libc::SIGSTOP || signal == libc::SIGTRAP)
+            {
                 0
             } else {
                 signal
             };
-            resume_syscall(tid, deliver)?;
+            self.resume_tracee(tid, deliver)?;
         }
         if let Some((pid, start)) = self.last_exit {
             let (code, signal) = self.tree_failure.unwrap_or((Some(0), None));
@@ -749,6 +895,9 @@ impl Supervisor {
                 if child != 0 {
                     let child = child as libc::pid_t;
                     self.threads.entry(child).or_default();
+                    if let Some(state) = self.attachment.as_mut() {
+                        state.new_children.insert(child);
+                    }
                     let parent_group = thread_group(tid);
                     let child_group = thread_group(child);
                     self.thread_groups.insert(child, child_group);
@@ -768,6 +917,17 @@ impl Supervisor {
                         table
                     };
                     self.file_tables.insert(child, table);
+                    if child_group != parent_group && !self.attachment_tracks_children() {
+                        self.attachment
+                            .as_mut()
+                            .expect("external process scope")
+                            .unscoped_children
+                            .insert(child);
+                        if self.pending_child_stops.remove(&child) {
+                            self.detach_unscoped_child(child)?;
+                        }
+                        return Ok(());
+                    }
                     if child_group != parent_group {
                         self.parents.entry(child_group).or_insert(parent_group);
                         // Register every new process before either task resumes.
@@ -776,7 +936,7 @@ impl Supervisor {
                         self.ensure_member(child)?;
                     }
                     if self.pending_child_stops.remove(&child) {
-                        resume_syscall(child, 0)?;
+                        self.resume_tracee(child, 0)?;
                     }
                 }
             }
@@ -879,7 +1039,11 @@ impl Supervisor {
 
     fn handle_syscall(&mut self, tid: libc::pid_t) -> Result<SyscallStep, String> {
         let known_thread = self.threads.contains_key(&tid) && self.file_tables.contains_key(&tid);
-        let entering = self.threads.entry(tid).or_default().entering;
+        let entering = if self.attachment.is_some() {
+            attached::syscall_is_entry(tid)?
+        } else {
+            self.threads.entry(tid).or_default().entering
+        };
         let mut registers = match Registers::get(tid) {
             Ok(registers) => registers,
             Err(error) => {
@@ -897,6 +1061,12 @@ impl Supervisor {
             self.refresh_sandbox_if_due();
             let engine = self.engine.acquire();
             let pending = self.syscall_enter(tid, &mut registers, &engine)?;
+            if pending
+                .as_ref()
+                .is_some_and(PendingSyscall::has_recovery_dependency)
+            {
+                self.checkpoint_ptrace_safety(true)?;
+            }
             if pending.is_some() {
                 registers.set(tid)?;
             }
@@ -915,6 +1085,7 @@ impl Supervisor {
                 .take()
                 .unwrap_or_else(|| self.engine.acquire());
             self.syscall_exit(tid, &mut registers, pending, &engine)?;
+            self.restore_detached_socket_flags(tid, &registers)?;
             if modified {
                 registers.set(tid)?;
             }
@@ -924,6 +1095,7 @@ impl Supervisor {
             .get_mut(&tid)
             .expect("syscall thread")
             .register_wait = None;
+        self.checkpoint_ptrace_safety(false)?;
         Ok(SyscallStep::Ready)
     }
 
@@ -948,6 +1120,41 @@ impl Supervisor {
             },
         );
         self.record_hooks(number);
+        let detaching = self
+            .attachment
+            .as_ref()
+            .is_some_and(|state| state.detaching);
+        // An inherited nonblocking socket retains its native flags until the
+        // application actually connects it. Defer that operation to an exit
+        // stop, where remote syscalls can safely prepare the SOCKS handshake.
+        let socket_io = matches!(
+            number,
+            syscall::CONNECT
+                | syscall::SENDTO
+                | syscall::SENDMSG
+                | syscall::SENDMMSG
+                | syscall::RECVFROM
+                | syscall::RECVMSG
+                | syscall::RECVMMSG
+                | syscall::WRITE
+                | syscall::READ
+                | syscall::WRITEV
+                | syscall::READV
+        );
+        if socket_io {
+            let key = (self.descriptor_table(tid), registers.argument(0) as i32);
+            if self.sockets.get(&key).is_some_and(|socket| {
+                (!detaching
+                    && number == syscall::CONNECT
+                    && socket.requires_blocking_handshake()
+                    && self.inherited_nonblocking.contains(&socket.id))
+                    || (detaching && self.logical_nonblocking.contains(&socket.id))
+            }) {
+                let original = *registers;
+                registers.set_syscall_number(syscall::GETPID);
+                return Ok(Some(PendingSyscall::DeferredSocketCall { original }));
+            }
+        }
         // Fast Open combines connect and first payload. Until the supervisor can
         // mediate both atomically, refuse it before any kernel network side effect.
         let flags = if number == syscall::SENDTO {
@@ -957,17 +1164,22 @@ impl Supervisor {
         } else {
             0
         };
-        if flags & libc::MSG_FASTOPEN as u64 != 0 {
+        if !detaching && flags & libc::MSG_FASTOPEN as u64 != 0 {
             return Ok(Some(deny_syscall(registers, libc::EOPNOTSUPP)));
         }
         if let Some(pending) = self.intent_enter(tid, number, registers, engine)? {
             return Ok(Some(pending));
         }
         // Observation must not turn a native EFAULT/partial batch into supervisor failure.
-        if let Ok(Some(pending)) = self.dns_enter(tid, number, registers) {
-            return Ok(Some(pending));
+        if !detaching {
+            if let Ok(Some(pending)) = self.dns_enter(tid, number, registers) {
+                return Ok(Some(pending));
+            }
         }
         if number == syscall::SOCKET {
+            if detaching {
+                return Ok(None);
+            }
             let domain = registers.argument(0) as i32;
             let socket_type = registers.argument(1) as i32;
             let descriptor = SocketDescriptor {
@@ -1034,6 +1246,7 @@ impl Supervisor {
                 let original: [u8; 4] = value.try_into().unwrap();
                 let logical_nonblocking = i32::from_ne_bytes(original) != 0;
                 if logical_nonblocking {
+                    self.checkpoint_ptrace_safety(true)?;
                     write_memory(tid, value_address, &0i32.to_ne_bytes())?;
                 }
                 return Ok(Some(PendingSyscall::IoctlNonblocking {
@@ -1043,6 +1256,13 @@ impl Supervisor {
                     logical_nonblocking,
                 }));
             }
+            return Ok(None);
+        }
+        if self
+            .attachment
+            .as_ref()
+            .is_some_and(|state| state.detaching)
+        {
             return Ok(None);
         }
         if number != syscall::CONNECT {
@@ -1111,6 +1331,7 @@ impl Supervisor {
             target.ip,
             original.len(),
         )?;
+        self.checkpoint_ptrace_safety(true)?;
         write_memory(tid, address, &proxy)?;
         registers.set_argument(2, proxy.len() as u64);
         Ok(Some(PendingSyscall::Connect {
@@ -1129,6 +1350,103 @@ impl Supervisor {
         engine: &hyperhub_runtime::Lease,
     ) -> Result<(), String> {
         match pending {
+            Some(PendingSyscall::DeferredSocketCall { original }) => {
+                let fd = original.argument(0) as i32;
+                let key = (self.descriptor_table(tid), fd);
+                let socket_id = self.sockets.get(&key).map(|socket| socket.id);
+                if let Some(id) = socket_id {
+                    self.inherited_nonblocking.remove(&id);
+                }
+                if self
+                    .attachment
+                    .as_ref()
+                    .is_some_and(|state| state.detaching)
+                {
+                    let flags = remote_syscall(
+                        tid,
+                        registers,
+                        libc::SYS_fcntl,
+                        [fd as u64, libc::F_GETFL as u64, 0, 0, 0, 0],
+                    )?;
+                    if flags < 0 {
+                        *registers = original;
+                        registers.set_result(flags);
+                        return Ok(());
+                    }
+                    let result = remote_syscall(
+                        tid,
+                        registers,
+                        libc::SYS_fcntl,
+                        [
+                            fd as u64,
+                            libc::F_SETFL as u64,
+                            (flags as i32 | libc::O_NONBLOCK) as u64,
+                            0,
+                            0,
+                            0,
+                        ],
+                    )?;
+                    if result < 0 {
+                        *registers = original;
+                        registers.set_result(result);
+                        return Ok(());
+                    }
+                    if let Some(id) = socket_id {
+                        self.logical_nonblocking.remove(&id);
+                        self.mark_handshake_complete(id);
+                    }
+                }
+                let mut operation = original;
+                let pending = self.syscall_enter(tid, &mut operation, engine)?;
+                if !self
+                    .attachment
+                    .as_ref()
+                    .is_some_and(|state| state.detaching)
+                    && !matches!(pending, Some(PendingSyscall::Connect { .. }))
+                {
+                    if let Some(id) = socket_id {
+                        self.inherited_nonblocking.insert(id);
+                    }
+                }
+                if matches!(pending, Some(PendingSyscall::Connect { .. })) {
+                    let flags = remote_syscall(
+                        tid,
+                        registers,
+                        libc::SYS_fcntl,
+                        [fd as u64, libc::F_GETFL as u64, 0, 0, 0, 0],
+                    )?;
+                    if flags < 0 {
+                        return Err(format!("cannot inspect inherited socket flags: {flags}"));
+                    }
+                    let result = remote_syscall(
+                        tid,
+                        registers,
+                        libc::SYS_fcntl,
+                        [
+                            fd as u64,
+                            libc::F_SETFL as u64,
+                            (flags as i32 & !libc::O_NONBLOCK) as u64,
+                            0,
+                            0,
+                            0,
+                        ],
+                    )?;
+                    if result < 0 {
+                        return Err(format!(
+                            "cannot prepare inherited socket handshake: {result}"
+                        ));
+                    }
+                }
+                let result = remote_syscall(
+                    tid,
+                    registers,
+                    operation.syscall_number(),
+                    std::array::from_fn(|index| operation.argument(index)),
+                )?;
+                operation.set_result(result);
+                self.syscall_exit(tid, &mut operation, pending, engine)?;
+                *registers = operation;
+            }
             Some(PendingSyscall::OverrideResult { result }) => {
                 registers.set_result(result);
             }
@@ -1186,6 +1504,7 @@ impl Supervisor {
                 logical_nonblocking,
             }) => {
                 if registers.result() >= 0 {
+                    self.inherited_nonblocking.remove(&socket_id);
                     if logical_nonblocking {
                         self.logical_nonblocking.insert(socket_id);
                     } else {
@@ -1208,6 +1527,7 @@ impl Supervisor {
             }) => {
                 write_memory(tid, value_address, &original)?;
                 if registers.result() >= 0 {
+                    self.inherited_nonblocking.remove(&socket_id);
                     if logical_nonblocking {
                         self.logical_nonblocking.insert(socket_id);
                     } else {
@@ -1529,6 +1849,13 @@ impl Supervisor {
             }));
         }
 
+        if self
+            .attachment
+            .as_ref()
+            .is_some_and(|state| state.detaching)
+        {
+            return Ok(None);
+        }
         match self.file_intent(tid, number, registers) {
             Ok(Some(intent)) if self.file_denied(tid, &intent, engine)? => {
                 return Ok(Some(deny_syscall(registers, libc::EACCES)));
@@ -2448,6 +2775,10 @@ impl Supervisor {
                 .map_err(|error| format!("cannot register static child {child}: {error}"))?;
             self.members.insert(child);
         }
+        if let Some(state) = self.attachment.as_ref() {
+            let pids = self.process_starts.keys().map(|pid| *pid as u32).collect();
+            let _ = state.events.send(AttachmentEvent::Active(pids));
+        }
         Ok(process_pid)
     }
 
@@ -2496,7 +2827,7 @@ impl Supervisor {
         }
     }
 
-    fn refresh_exec_member(&self, process: libc::pid_t) -> Result<(), String> {
+    fn refresh_exec_member(&mut self, process: libc::pid_t) -> Result<(), String> {
         // Successful exec keeps PID and birth, but changes the executable used
         // for authenticated restart recovery. Refresh before this image runs.
         if !self
@@ -2507,6 +2838,30 @@ impl Supervisor {
             return Err(format!(
                 "static exec process identity changed for {process}"
             ));
+        }
+        if process == self.root_pid {
+            if let Some(state) = self.attachment.as_mut() {
+                if let Some(execution) = state.recovery.as_ref() {
+                    let previous = state
+                        .current_root
+                        .as_ref()
+                        .ok_or("root exec has no verified previous identity")?;
+                    let manager = state
+                        .manager_identity
+                        .as_ref()
+                        .ok_or("root exec manager identity is unavailable")?;
+                    let current = hyperhub_core::attachments::inspect_process(process as u32)?;
+                    let nonce = rand::random::<[u8; 32]>();
+                    // This is the actual PTRACE_EVENT_EXEC stop. Core commits
+                    // the authoritative epoch before the new image resumes,
+                    // including a same-image exec.
+                    self.control
+                        .block_on(hyperhub_core::attachments::report_attachment_exec(
+                            execution, manager, previous, &current, nonce,
+                        ))?;
+                    state.current_root = Some(current);
+                }
+            }
         }
         let parent = self
             .parents
@@ -3097,6 +3452,7 @@ fn spawn_traced(
     argv0: &OsString,
     args: &[OsString],
     environment: &[(OsString, OsString)],
+    seized_startup: bool,
 ) -> Result<libc::pid_t, String> {
     let program = CString::new(target.as_os_str().as_bytes())
         .map_err(|_| "target contains NUL".to_string())?;
@@ -3133,7 +3489,11 @@ fn spawn_traced(
     }
     if pid == 0 {
         unsafe {
-            if libc::ptrace(
+            if seized_startup {
+                if libc::raise(libc::SIGSTOP) != 0 {
+                    libc::_exit(126);
+                }
+            } else if libc::ptrace(
                 PTRACE_TRACEME,
                 0,
                 std::ptr::null_mut::<c_void>(),
@@ -3439,7 +3799,7 @@ fn expect_syscall_stop(tid: libc::pid_t, phase: &str) -> Result<(), String> {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct Registers {
     r15: u64,
@@ -3472,7 +3832,7 @@ struct Registers {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct Registers {
     regs: [u64; 31],
@@ -4003,7 +4363,7 @@ mod tests {
     }
 }
 
-fn process_birth(pid: libc::pid_t) -> Option<u64> {
+pub(super) fn process_birth(pid: libc::pid_t) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(") ")?
         .1

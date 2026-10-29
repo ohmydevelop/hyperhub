@@ -7,6 +7,7 @@ pub(in crate::windows_gum) enum FileOperation {
     Rename,
 }
 pub(in crate::windows_gum) struct FileOperationContext {
+    pub(in crate::windows_gum) reader: crate::FilePolicyReader,
     pub(in crate::windows_gum) operation: FileOperation,
     pub(in crate::windows_gum) path: Option<String>,
     pub(in crate::windows_gum) _handle: usize,

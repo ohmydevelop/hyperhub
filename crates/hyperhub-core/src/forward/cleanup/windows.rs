@@ -591,15 +591,80 @@ mod tests {
         let root = PrivateRoot::new();
         let outside = PrivateRoot::new();
         let link = root.0.join("directory-link");
-        std::os::windows::fs::symlink_dir(&outside.0, &link).unwrap();
+        // Junctions exercise the reparse boundary under the ordinary-user
+        // deployment contract without SeCreateSymbolicLinkPrivilege.
+        directory_junction(&outside.0, &link).unwrap();
         assert!(Directory::open(&link).is_err());
         std::fs::remove_dir(&link).unwrap();
         let source = outside.leaf(b"outside bytes");
         let name = source.file_name().unwrap();
-        std::os::windows::fs::symlink_file(&source, root.0.join(name)).unwrap();
+        let leaf = root.0.join(name);
+        directory_junction(&outside.0, &leaf).unwrap();
         let directory = Directory::open(&root.0).unwrap();
         assert!(directory.leaves().is_err());
-        assert_eq!(std::fs::read(source).unwrap(), b"outside bytes");
+        std::fs::remove_dir(&leaf).unwrap();
+        // Also cover a file symlink when the test token can create one. The
+        // mandatory junction assertions above are never skipped.
+        match std::os::windows::fs::symlink_file(&source, &leaf) {
+            Ok(()) => {
+                assert!(directory.leaves().is_err());
+                std::fs::remove_file(&leaf).unwrap();
+            }
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                eprintln!("file symlink requires a privileged token; junction checks completed");
+            }
+            Err(error) => panic!("cannot create file symlink fixture: {error}"),
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), b"outside bytes");
+    }
+
+    fn directory_junction(target: &Path, link: &Path) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        // REPARSE_DATA_BUFFER mount-point layout from MS-FSCC 2.1.2.5.
+        const MOUNT_POINT: u32 = 0xa000_0003;
+        const SET_REPARSE_POINT: u32 = 0x0009_00a4;
+        let path = std::fs::canonicalize(target)?;
+        let path: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+        let path = path
+            .strip_prefix(prefix.as_slice())
+            .ok_or_else(|| invalid("junction fixture requires a canonical local Windows path"))?;
+        let substitute: Vec<u16> = r"\??\".encode_utf16().chain(path.iter().copied()).collect();
+        let length = u16::try_from(substitute.len() * 2)
+            .map_err(|_| invalid("junction fixture target is too long"))?;
+        let mut data = Vec::new();
+        data.extend_from_slice(&MOUNT_POINT.to_le_bytes());
+        data.extend_from_slice(&(length + 12).to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes()); // Reserved.
+        for field in [0, length, length + 2, 0] {
+            data.extend_from_slice(&field.to_le_bytes());
+        }
+        for unit in substitute.iter().copied().chain([0, 0]) {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::create_dir(link)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(link)?;
+        let mut returned = 0;
+        if unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                SET_REPARSE_POINT,
+                data.as_ptr().cast(),
+                data.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
     #[test]
     fn process_wait_uses_exact_handle_and_rejects_wrong_birth() {

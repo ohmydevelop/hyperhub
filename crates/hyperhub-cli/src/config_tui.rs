@@ -15,12 +15,9 @@ use hyperhub_core::config::{
     SshAccount, SshHostKey, SshPrivateKey, Upstream, UpstreamKind, WebSocketCapture,
     DEFAULT_ROUTE_ID,
 };
-use hyperhub_core::config_document::ConfigDocument;
 use hyperhub_core::config_store;
 use hyperhub_core::control::{control_request, discovery_control_endpoint};
-use hyperhub_core::session::{
-    config_update_proof, ControlRequest, ControlResponse, InjectedProcessSnapshot,
-};
+use hyperhub_core::session::{ControlRequest, ControlResponse, InjectedProcessSnapshot};
 use hyperhub_core::ssh_keys::{
     generate_rsa_private_key, import_private_key, public_key_info, short_label, PublicKeyInfo,
 };
@@ -4472,7 +4469,7 @@ fn save_with_liveness(app: &mut App, live: bool) -> Result<(), String> {
     };
     // Ordinary saves retain the current key generation, including offline saves.
     // AEAD encryption still creates a fresh nonce for every write.
-    let keyring = match persisted {
+    let mut keyring = match persisted {
         Some(keyring) if !password_changed => keyring,
         _ => config_store::ConfigKeyring::derive(
             app.password.as_bytes(),
@@ -4480,11 +4477,23 @@ fn save_with_liveness(app: &mut App, live: bool) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?,
     };
+    if let Some(previous) = app.previous_password.as_ref().filter(|_| password_changed) {
+        keyring = keyring
+            .with_password_rotation(&app.path, previous.as_bytes(), app.password.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
     let api_key = app
         .runtime_keys
         .as_ref()
         .map(|paths| crate::password::ensure_api_key(&paths.api_key).map(|(_, key)| key))
         .transpose()?;
+    let offline_guard = if live {
+        None
+    } else {
+        Some(
+            hyperhub_core::config_persistence::offline_configuration_guard(&app.path, &app.config)?,
+        )
+    };
     if let Some(previous) = app.previous_password.as_ref().filter(|_| password_changed) {
         config_store::reencrypt_root_certificates(
             &app.path,
@@ -4494,8 +4503,24 @@ fn save_with_liveness(app: &mut App, live: bool) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     }
-    config_store::save_encrypted_with_keyring(&app.path, &app.config, &keyring)
-        .map_err(|error| error.to_string())?;
+    let display_warning = if let Some(guard) = &offline_guard {
+        config_store::save_encrypted_with_keyring_guarded(&app.path, &app.config, &keyring, guard)
+            .map_err(|error| error.to_string())?
+    } else {
+        let signer = hyperhub_core::config_persistence::ConfigPersistenceSigner::from_password(
+            app.password.as_bytes(),
+            keyring.descriptor(),
+        )?;
+        crate::config_persistence::save(
+            &app.path,
+            None,
+            &app.config,
+            &keyring,
+            Some(&signer),
+            true,
+        )?;
+        None
+    };
     // The new password is now persisted even if the subsequent envelope write fails.
     app.previous_password = None;
     if let (Some(paths), Some(api_key)) = (&app.runtime_keys, api_key) {
@@ -4512,44 +4537,14 @@ fn save_with_liveness(app: &mut App, live: bool) -> Result<(), String> {
     app.dirty = false;
     app.saved = true;
     if live {
-        match push_live_update(app) {
-            Ok(()) => {
-                app.status = format!("✓ 已保存并热更新到运行中的 Serve（{}）", app.path.display());
-            }
-            Err(error) => {
-                app.status = format!(
-                    "✓ 已保存到 {}；✗ 热更新失败：{error}（重启 Serve 后生效）",
-                    app.path.display()
-                );
-            }
-        }
+        app.status = format!("✓ 已保存并热更新到运行中的 Serve（{}）", app.path.display());
     } else {
         app.status = format!("✓ 已加密保存到 {}", app.path.display());
     }
-    Ok(())
-}
-
-/// 把已保存的配置推送给运行中的 Serve：用与 serve 相同的派生密钥对配置 JSON 做
-/// HMAC 证明，serve 校验通过后经 `RuntimeState::apply` 热替换快照。
-fn push_live_update(app: &App) -> Result<(), String> {
-    let descriptor = config_store::read_descriptor(&app.path).map_err(|error| error.to_string())?;
-    let key = config_store::derive_session_auth_key(app.password.as_bytes(), &descriptor)
-        .map_err(|error| error.to_string())?;
-    let config_json = serde_json::to_string(&ConfigDocument::from_config(&app.config))
-        .map_err(|error| error.to_string())?;
-    let proof = config_update_proof(&key, &config_json)?;
-    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-    let response = runtime
-        .block_on(control_request(
-            &discovery_control_endpoint(),
-            &ControlRequest::UpdateConfig { proof, config_json },
-        ))
-        .map_err(|error| format!("无法连接运行中的 Serve：{error}"))?;
-    match response {
-        ControlResponse::Ok => Ok(()),
-        ControlResponse::Error { message } => Err(message),
-        _ => Err("Serve 返回了意外的响应".into()),
+    if let Some(error) = display_warning {
+        app.status.push_str(&format!("；脱敏显示刷新失败：{error}"));
     }
+    Ok(())
 }
 
 /// 复用同一个 Tokio Runtime 执行控制面请求。每次刷新都执行

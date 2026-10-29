@@ -26,20 +26,44 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
     let plugin_id = plugin.id();
 
     registrar.dns_before(plugin_id, CallbackCategory::Transform, |context| {
+        if !crate::attachment::enforcing()
+            || crate::attachment::native_dns_mode()
+                == hyperhub_runtime::attachment::NativeDnsMode::PreserveAnswers
+        {
+            context.synthesize = false;
+            return Ok(HookDecision::Continue);
+        }
+        if !context.synthesize {
+            return Ok(HookDecision::Continue);
+        }
         let hostname = CString::new(context.hostname.as_str())
             .map_err(|_| HookError::new("DNS hostname contains an interior NUL"))?;
-        context.replacement = super::network::resolve_fake_hostname(&hostname, context.family);
-        if context.replacement.is_some() {
-            Ok(HookDecision::Continue)
-        } else {
-            Ok(HookDecision::Deny(()))
+        match super::network::resolve_fake_hostname(&hostname, context.family) {
+            Ok(Some(replacement)) => {
+                context.replacement = Some(replacement);
+                Ok(HookDecision::Continue)
+            }
+            Ok(None) => {
+                context.synthesize = false;
+                Ok(HookDecision::Continue)
+            }
+            Err(_) => Ok(HookDecision::Deny(())),
         }
     });
     registrar.connect_before(plugin_id, CallbackCategory::Transform, |context| {
-        if let Some((family, target)) =
-            super::network::proxy_target(context.socket, context.source_family(), context.source())
-        {
-            context.redirect_to_proxy(family, target);
+        match super::network::proxy_target(
+            context.socket,
+            context.source_family(),
+            context.source(),
+        ) {
+            Ok(Some((family, target, Some((scope, flow))))) => {
+                context.redirect_to_native(family, target, scope, flow)
+            }
+            Ok(Some((family, target, None))) => context.redirect_to_proxy(family, target),
+            Err(_) => {
+                return Ok(context.deny(windows_sys::Win32::Networking::WinSock::WSAEHOSTUNREACH))
+            }
+            Ok(None) => (),
         }
         Ok(HookDecision::Continue)
     });

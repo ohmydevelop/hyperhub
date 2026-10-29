@@ -25,6 +25,13 @@ pub(super) fn initialize() -> Result<(), String> {
         std::env::var_os("HYPERHUB_FORK_HANDOFF_SOCKET").ok_or("missing fork handoff socket")?;
     let secret =
         std::env::var("HYPERHUB_FORK_HANDOFF_SECRET").map_err(|_| "missing fork handoff secret")?;
+    initialize_explicit(path.as_os_str(), &secret)
+}
+
+pub(super) fn initialize_explicit(path: &std::ffi::OsStr, secret: &str) -> Result<(), String> {
+    if CLIENT.get().is_some() {
+        return Ok(());
+    }
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     let bytes = path.as_bytes();
@@ -146,15 +153,8 @@ unsafe fn exchange(op: u8, lease: &[u8; 32]) -> Result<[u8; 32], ()> {
 
 unsafe fn exchange_until(op: u8, lease: &[u8; 32], deadline: i64) -> Result<[u8; 32], ()> {
     let client = CLIENT.get().ok_or(())?;
-    let fd = libc::syscall(
-        libc::SYS_socket,
-        libc::AF_UNIX,
-        libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-        0,
-    ) as libc::c_int;
-    if fd < 0 {
-        return Err(());
-    }
+    let socket = hyperhub_runtime::owned_ipc_fds::IpcFd::socket(true).map_err(|_| ())?;
+    let fd = socket.raw_fd().map_err(|_| ())?;
     let result = (|| {
         if libc::syscall(
             libc::SYS_connect,
@@ -249,7 +249,7 @@ unsafe fn exchange_until(op: u8, lease: &[u8; 32], deadline: i64) -> Result<[u8;
         }
         Ok(received)
     })();
-    libc::syscall(libc::SYS_close, fd);
+    drop(socket);
     result
 }
 

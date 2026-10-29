@@ -13,6 +13,16 @@ impl<T> Snapshot<T> {
     pub(crate) fn load_full(&self) -> Option<Arc<T>> {
         self.0.read().expect("Hook snapshot poisoned").clone()
     }
+    pub(crate) fn try_load_full(&self) -> Result<Option<Arc<T>>, ()> {
+        self.0.read().map(|value| value.clone()).map_err(|_| ())
+    }
+    /// Inspect Copy metadata without cloning or dropping an Arc payload. This
+    /// is also safe at allocator-sensitive native boundaries; the callback
+    /// must not allocate, reenter, or return a reference into the snapshot.
+    pub(crate) fn inspect<R: Copy>(&self, inspect: impl FnOnce(Option<&T>) -> R) -> R {
+        let value = self.0.read().expect("Hook snapshot poisoned");
+        inspect(value.as_deref())
+    }
     pub(crate) fn store(&self, value: Option<Arc<T>>) {
         let old = std::mem::replace(&mut *self.0.write().expect("Hook snapshot poisoned"), value);
         // A final destructor can free allocator resources or enter another Hook.

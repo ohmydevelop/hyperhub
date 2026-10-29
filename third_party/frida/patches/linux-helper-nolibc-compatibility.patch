@@ -1,0 +1,48 @@
+diff --git a/bootstrapper.c b/bootstrapper.c
+index 7cc889e5c..e43263a4a 100644
+--- a/bootstrapper.c
++++ b/bootstrapper.c
+@@ -1120,7 +1120,19 @@ static int
+ frida_socketpair (int domain, int type, int protocol, int sv[2])
+ {
+ #ifdef NOLIBC
++# ifdef __NR_socketpair
+   return my_syscall4 (__NR_socketpair, domain, type, protocol, sv);
++# elif defined (__NR_socketcall)
++  unsigned long args[] = {
++    (unsigned long) domain,
++    (unsigned long) type,
++    (unsigned long) protocol,
++    (unsigned long) sv
++  };
++  return my_syscall2 (__NR_socketcall, 8 /* SYS_SOCKETPAIR */, args);
++# else
++#  error No socketpair syscall is available for this architecture
++# endif
+ #else
+   return socketpair (domain, type, protocol, sv);
+ #endif
+diff --git a/ext/linux/tools/include/nolibc/types.h b/ext/linux/tools/include/nolibc/types.h
+index 921e292ad..250655d15 100644
+--- a/ext/linux/tools/include/nolibc/types.h
++++ b/ext/linux/tools/include/nolibc/types.h
+@@ -7,6 +7,19 @@
+ #define _NOLIBC_TYPES_H
+ 
+ #include "std.h"
++
++/*
++ * Request only kernel-owned UAPI names.  Old cross sysroots otherwise expose
++ * libc-facing typedefs that conflict with nolibc's architecture-aware types.
++ */
++typedef signed long suseconds_t;
++#define __KERNEL_STRICT_NAMES
++
+ #include <linux/time.h>
++
++#undef FD_CLR
++#undef FD_SET
++#undef FD_ISSET
++#undef FD_ZERO
+ 
+ 

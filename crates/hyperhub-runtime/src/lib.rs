@@ -4,9 +4,12 @@
 //! callers retain a `Lease` through syscall exits, callbacks and cancellation.
 pub mod abi;
 pub mod artifact;
+pub mod attachment;
 pub mod generation;
 pub mod handoff;
 pub mod native;
+#[cfg(unix)]
+pub mod owned_ipc_fds;
 
 pub use generation::{Engine, Error, Lease, Runtime, Settings, Snapshot, Stage};
 

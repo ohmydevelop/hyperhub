@@ -1,3 +1,4 @@
+mod attachment;
 pub(super) mod child_process;
 mod windows;
 

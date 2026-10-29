@@ -166,3 +166,142 @@ where
 {
     Err("unsupported platform".into())
 }
+
+/// Inspect a live target without granting authority to alter it.
+pub fn inspect_attachment_target(
+    pid: u32,
+) -> Result<hyperhub_core::attachments::ProcessIdentity, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::inspect_attachment_target(pid);
+    }
+    #[cfg(windows)]
+    {
+        return windows::inspect_attachment_target(pid);
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = pid;
+        Err("dynamic attachment is unsupported on this platform".into())
+    }
+}
+pub fn validate_attachment_backend(
+    pid: u32,
+    scope: hyperhub_core::attachments::Scope,
+    backend: hyperhub_core::attachments::Backend,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::validate_attachment_backend(pid, scope, backend)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, scope, backend);
+        Ok(())
+    }
+}
+
+pub fn validate_external_runtime(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        windows::validate_external_runtime(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
+pub fn run_attachment_manager(
+    execution: &hyperhub_core::attachments::Execution,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::run_attachment_manager(execution);
+    }
+    #[cfg(windows)]
+    {
+        return windows::run_attachment_manager(execution);
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = execution;
+        Err("dynamic attachment is unsupported on this platform".into())
+    }
+}
+pub fn run_attachment_recovery(
+    execution: &hyperhub_core::attachments::Execution,
+    record: &hyperhub_core::attachments::Record,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::run_attachment_recovery(execution, record);
+    }
+    #[cfg(windows)]
+    {
+        return windows::run_attachment_recovery(execution, record);
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (execution, record);
+        Err("attachment recovery is not supported on this platform".into())
+    }
+}
+pub fn run_owned_attachment_manager(
+    execution: &hyperhub_core::attachments::Execution,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return windows::run_owned_attachment_manager(execution);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = execution;
+        return Err(
+            "Linux foreground attachment managers cannot transfer ownership to a second keeper"
+                .into(),
+        );
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = execution;
+        Err("reversible attachment keepers are not supported on this platform".into())
+    }
+}
+pub fn detach_attachment(
+    record: &hyperhub_core::attachments::Record,
+    authorization: &hyperhub_core::attachments::Authorization,
+) -> Result<hyperhub_core::attachments::Outcome, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::detach_attachment(record, authorization);
+    }
+    #[cfg(windows)]
+    {
+        return windows::detach_attachment(record, authorization);
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = (record, authorization);
+        Err("dynamic attachment is unsupported on this platform".into())
+    }
+}
+pub fn reattach_attachment(
+    record: &hyperhub_core::attachments::Record,
+    authorization: &hyperhub_core::attachments::Authorization,
+) -> Result<hyperhub_core::attachments::Outcome, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::reattach_attachment(record, authorization);
+    }
+    #[cfg(windows)]
+    {
+        return windows::reattach_attachment(record, authorization);
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = (record, authorization);
+        Err("dynamic attachment is unsupported on this platform".into())
+    }
+}

@@ -43,10 +43,20 @@ def main() -> None:
     checks = load_checks(checks_path)
     performance = load_performance(summary_path)
     fixtures = json.loads(fixtures_path.read_text(encoding="utf-8"))
-    passed = all(check["status"] == "pass" for check in checks)
+    # A successful subset is useful evidence but cannot claim full coverage.
+    statuses={check["status"] for check in checks}
+    valid=bool(checks) and statuses <= {"pass","fail","skip"}
+    unique=len({check["check"] for check in checks})==len(checks)
+    passed=valid and unique and "fail" not in statuses
+    skipped=sum(check["status"]=="skip" for check in checks)
+    complete=valid and unique and skipped==0
+    status="fail" if not passed else ("pass" if complete else "partial")
     suite = {
         "schema_version": 1,
-        "status": "pass" if passed else "fail",
+        "status": status,
+        "coverage_complete": complete,
+        "executed_checks": sum(check["status"] in {"pass","fail"} for check in checks),
+        "skipped_checks": skipped,
         "checks": checks,
         "performance": performance,
         "fixtures": fixtures,
@@ -55,7 +65,8 @@ def main() -> None:
 
     with report_path.open("w", encoding="utf-8") as report:
         report.write("# Linux backend reusable benchmark\n\n")
-        report.write(f"**Result: {'PASS' if passed else 'FAIL'}**\n\n")
+        report.write(f"**Result: {status.upper()}**\n\n")
+        report.write(f"Coverage complete: {'yes' if complete else 'no'}; skipped checks: {skipped}.\n\n")
         report.write("## Functional checks\n\n")
         report.write("| Check | Status | Details |\n")
         report.write("| --- | --- | --- |\n")

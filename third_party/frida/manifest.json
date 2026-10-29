@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "version": "17.17.0",
+  "source": {
+    "core": {
+      "url": "https://github.com/frida/frida-core.git",
+      "revision": "c812943c457376c906802f7bb79d13c67a6e4d22"
+    },
+    "gum": {
+      "url": "https://github.com/frida/frida-gum.git",
+      "revision": "ddc10c5559cbb41a3dd72866bfba6ff3945ffa5c"
+    },
+    "glib": {
+      "url": "https://github.com/frida/glib.git",
+      "revision": "790ffa82e80d99fba8a3db494e46f907d560893c"
+    },
+    "releng": "c9cc18138b364f691573c695e1fe47ddc4c56f26",
+    "meson": "6620128a0fc86218dd8d2843c7e9a3513772448e"
+  },
+  "patches": {
+    "spawn-monitor-linux-safe-metadata.patch": "ed67458d969a5e92717bba8f116f04f8941d599eaef8d04cbe50119d1b92bebf",
+    "glib-gwakeup-eventfd.patch": "679cef6f59c2493c97fe23628f9ff1d3414d1e1ff18bc5659fba2da9b02a881a",
+    "child-agent-lifetime.patch": "0cb8b431ad094afcd713fa3146a299ccc027d5ac7cf0cf17585b6a36c92e5746",
+    "glib-dbus-connection-retirement.patch": "e822615475fe712afdf7bc88966ce0bd4711defc535db0a6ef1b059895870050",
+    "dbus-context-retirement.patch": "7084a68bc4a30881f75f5d6c44bc98f25ab94a0e65c1f6d76f9b8b8e4e1ccc08",
+    "linux-helper-artifacts.patch": "104350aa8e6c2c7014ae429f22807c3da195ba3c40e7f8bded5be3c6840d4e4e"
+  },
+  "dependencies_version": "20260717",
+  "archives": {
+    "node-v22.20.0-linux-x64.tar.xz": "00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc",
+    "toolchain-linux-x86_64.tar.xz": "a61c23d17b1b23826714b1f4db1f494ea23c1f6a5cfe9df2ce85206405bceb9b",
+    "sdk-linux-x86_64.tar.xz": "afa38ce2c5f4ad32308b14ed3b7db0ffdc0d0df56adcf52bec3c308319f6ff1f",
+    "sdk-linux-x86.tar.xz": "015cb76bfd30caa293f6250a9bc0841b4c6f73066d483f51ab311a896fbeb9c8",
+    "sdk-linux-arm64.tar.xz": "33783b419c572cd1a54fdcba5df706484e63ed0f99d5dee53555273b70fb3e53"
+  },
+  "go": {
+    "version": "1.26.8",
+    "sha256": "d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b"
+  },
+  "toolchains": {
+    "x86_64": {
+      "repository": "frida/x-tools-linux-x86_64",
+      "manifest": "e36d7dd1d78e77e06fc48f107c47aa072541659e1c89680696b33eee72040c0d",
+      "layer": "5b07fce5118cbea6f0f26083e7778e2830a343f6618878d6ac36f085b6d221f2",
+      "triplet": "x86_64-linux-gnu",
+      "glibc_baseline": "2.5"
+    },
+    "x86": {
+      "repository": "frida/x-tools-linux-x86",
+      "manifest": "8d622b2dff6040ed7ace620a94a055dee62f243a1552d0f3b287b6e2db268a09",
+      "layer": "0e837fbb74c2520b478a64a0ca35cb0bf4cabef2a5299c99ac09494cb9ef15ae",
+      "triplet": "i686-linux-gnu",
+      "glibc_baseline": "2.5"
+    },
+    "arm64": {
+      "repository": "frida/x-tools-linux-arm64",
+      "manifest": "0e46954115374101f8207b0e47fd8f05da83f089933da0b50e7fcd6d5879697e",
+      "layer": "fcdf9a11f83303db70349b2ea6ab28db9524edb73c0567232defc8e7e94c61a3",
+      "triplet": "aarch64-linux-gnu",
+      "glibc_baseline": "2.17"
+    }
+  },
+  "go_module_prefetch": {
+    "module": "github.com/frida/typescript-go",
+    "version": "v0.0.0-20250601212135-a4721f45f19c",
+    "sha256": "f721d8d17192302fe63823e4ee133ef6eced0d1d26f78f0a21158eb246ba2859",
+    "go_sum": "h1:IWBI9AwSFLWymI4enx1jrAw0E4H2E+qHwsihv+AxSoE="
+  },
+  "patch_files": {
+    "spawn-monitor-linux-safe-metadata.patch": {
+      "lib/payload/spawn-monitor.vala": "39db8cde10e2855b3ef3b6c8445cddebbdee95af545692ae2915b36ea6763e33",
+      "lib/payload/spawn-monitor-glue.c": "88277a7fd58e09701f111ad3767efd00e74e8c3ad29b1daafa00d8191a4360b7"
+    },
+    "glib-gwakeup-eventfd.patch": {
+      "glib/gwakeup.c": "228e5557321b2a1ab7e4adeac8e0fb3a92c37ea2cf11267b2ab3abc759f5a1d6"
+    },
+    "child-agent-lifetime.patch": {
+      "lib/agent/agent-glue.c": "996838ddd4e574a2c8c754f9d12d467c297f0974edd8c177f6fc649563923aa5",
+      "lib/agent/agent.vala": "bb4de91ae876c042d5494b1aa5c340131aa02d1bf4e228fba5c5673e1276af44",
+      "lib/base/session.vala": "cc182cb9790a480dbcdb54c6a9971ac158be8b218da0dbbd074480807c5e2708",
+      "src/frida.vala": "bcbc2d9c77c0365e09fdc4e385de86660f66c6a51ef3becc0115220fec3a5f8f",
+      "src/host-session-service.vala": "66ab4c3952bc6b9701a989412cc9c4b79a1ae56513f742edf24dc780c8a1929f",
+      "src/linux/frida-helper-backend.vala": "2679c91133b56eca36b23defb80316e86bade1c7084988af9268e14dabbf011b",
+      "src/linux/frida-helper-process.vala": "157e24509aca69577d0d14a2037e8bc10e5b2d0463f5a6f273d053ec9d2158ec",
+      "src/linux/frida-helper-service.vala": "193d80a5fbd57871134516f0f446b556eeeb9e7da73492ea3df6b215c46c202f",
+      "src/linux/frida-helper-types.vala": "6686667122db7679dccf4b14975fe5109ed36f21743363be55948300d94e1cd5",
+      "src/linux/helpers/bootstrapper.c": "7cc889e5cc9b032258def4d5f72b820d3bd56beef2e31786addba765caac6142",
+      "src/linux/helpers/inject-context.h": "62f995198914f3cb13110267d24d234e42a19920c6dac260d373f7ec9f90eaf6",
+      "src/linux/helpers/loader.c": "67b43850e5698d89cb0ab9162687f531200bfab19dfd0b5add544d526d14d8cc",
+      "src/linux/linjector.vala": "a63f7b2a599f3bb312d7efc68fb95114aa46d961352cdd062799ac72f9677224"
+    },
+    "glib-dbus-connection-retirement.patch": {
+      "gio/gdbusconnection.c": "1d486729d0963653a8a6b30db9342d5cfffec8afc69a5a178d651ee345552e1f",
+      "gio/gdbusprivate.c": "98e0c79a5473e4700f280ba67e8406ba3b8a1395c5b12e9d1b2662a1fb44ac08",
+      "gio/gdbusprivate.h": "618616c14e1839948206e64f7e52f4fab7abe1f541da9e822804ec1066e5e7aa"
+    },
+    "dbus-context-retirement.patch": {
+      "lib/base/dbus.vala": "3e9debf9ddbb2c5862d8cc623d565b5c0ee127e1164ad7c8a615c33e92ec2c38"
+    },
+    "linux-helper-artifacts.patch": {
+      "src/meson.build": "63f8f04f6db32edd51c178178f910c79946799c4beb088e421fe1ccf190600d8",
+      "meson.options": "6e7841fbc527ef3df3c15e181b4a97cd142158094cb18428d8780a8f531977f1"
+    }
+  }
+}

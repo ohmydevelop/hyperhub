@@ -8,19 +8,13 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_ACP};
-use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
-use windows_sys::Win32::System::LibraryLoader::{
-    GetModuleFileNameW, GetModuleHandleW, GetProcAddress,
-};
-use windows_sys::Win32::System::Memory::{
-    VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
-};
+use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeThread, GetProcessId,
-    OpenProcess, QueryFullProcessImageNameW, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_CREATE_THREAD, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+    CreateEventW, GetCurrentProcessId, GetProcessId, OpenProcess, QueryFullProcessImageNameW,
+    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
+    PROCESS_CREATE_THREAD, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
+    PROCESS_VM_WRITE,
 };
 
 use crate::windows_gum::gum::{AGENT_MODULE, CHILD_EVENT_ID};
@@ -131,6 +125,9 @@ pub(super) unsafe fn create_child_event(name: &str) -> Option<HANDLE> {
 }
 
 pub(super) fn observe_child_failures() -> bool {
+    if let Some(bootstrap) = crate::attachment::bootstrap() {
+        return bootstrap.observe;
+    }
     std::env::var("HYPERHUB_ENFORCEMENT_MODE")
         .is_ok_and(|value| value.eq_ignore_ascii_case("observe"))
 }
@@ -153,7 +150,9 @@ pub(super) unsafe fn finish_child_process(
         rule_id,
         decision_source,
     );
-    CloseHandle(ready_event);
+    if !ready_event.is_null() {
+        CloseHandle(ready_event);
+    }
     if result.is_ok() {
         if !caller_requested_suspended && ResumeThread(information.hThread) == u32::MAX {
             report_child_failure(
@@ -165,7 +164,7 @@ pub(super) unsafe fn finish_child_process(
         }
         return 1;
     }
-    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+    if crate::attachment::legacy_debug() {
         let failure = result.as_ref().unwrap_err();
         eprintln!(
             "HyperHub: child setup failed for pid {} at {} (error {})",
@@ -217,7 +216,40 @@ unsafe fn inject_and_register_child(
     rule_id: Option<&str>,
     decision_source: &str,
 ) -> Result<(), ChildInjectionFailure> {
-    inject_child_agent(process).map_err(|()| ChildInjectionFailure::last_error("dll_injection"))?;
+    if crate::attachment::managed() {
+        let executable = query_process_path(process)
+            .map_err(|()| ChildInjectionFailure::last_error("path_query"))?;
+        let decision = crate::ProcessHookDecision {
+            hook: true,
+            rule_id: rule_id.map(str::to_owned),
+            source: decision_source.to_owned(),
+            version: policy_version,
+        };
+        return super::attachment::inject_created_child(process, child_pid, &executable, &decision)
+            .map_err(|code| ChildInjectionFailure {
+                stage: "reversible_child_initialization",
+                error_code: code,
+                executable: Some(executable),
+            });
+    }
+    let module = inject_child_agent(process)
+        .map_err(|()| ChildInjectionFailure::last_error("dll_injection"))?;
+    let entry = module
+        .base
+        .checked_add(
+            hyperhub_runtime::attachment::windows_inject::export_rva(
+                &module.path,
+                "hyperhub_agent_legacy_start",
+            )
+            .map_err(|_| ChildInjectionFailure::last_error("explicit_entry"))?,
+        )
+        .ok_or_else(|| ChildInjectionFailure::last_error("explicit_entry"))?;
+    if hyperhub_runtime::attachment::windows_inject::call(process, entry, &[0])
+        .map_err(|_| ChildInjectionFailure::last_error("explicit_start"))?
+        != 0
+    {
+        return Err(ChildInjectionFailure::last_error("explicit_start"));
+    }
     if WaitForSingleObject(ready_event, 30_000) != WAIT_OBJECT_0 {
         return Err(ChildInjectionFailure {
             stage: "ready_wait",
@@ -269,46 +301,22 @@ pub(super) unsafe fn fail_created_child(information: &mut PROCESS_INFORMATION) -
     0
 }
 
-pub(super) unsafe fn inject_child_agent(process: HANDLE) -> Result<(), ()> {
-    let path = std::env::var_os("HYPERHUB_AGENT_PATH").ok_or(())?;
-    crate::integrity::verify_agent_runtime(std::path::Path::new(&path))?;
-    let mut library = path.encode_wide().collect::<Vec<_>>();
-    if library.is_empty() || library.contains(&0) {
-        return Err(());
+pub(super) unsafe fn inject_child_agent(
+    process: HANDLE,
+) -> Result<hyperhub_runtime::attachment::windows_inject::Module, ()> {
+    let path = if crate::attachment::managed() {
+        agent_module_path().ok_or(())?
+    } else {
+        std::path::PathBuf::from(std::env::var_os("HYPERHUB_AGENT_PATH").ok_or(())?)
+    };
+    crate::integrity::verify_agent_runtime(&path)?;
+    let pid = GetProcessId(process);
+    if let Some(module) =
+        hyperhub_runtime::attachment::windows_inject::find_module(pid, &path).map_err(|_| ())?
+    {
+        return Ok(module);
     }
-    library.push(0);
-    let bytes = library.len() * std::mem::size_of::<u16>();
-    let remote = VirtualAllocEx(
-        process,
-        null(),
-        bytes,
-        MEM_RESERVE | MEM_COMMIT,
-        PAGE_READWRITE,
-    );
-    if remote.is_null() {
-        return Err(());
-    }
-    let result = (|| {
-        if WriteProcessMemory(process, remote, library.as_ptr().cast(), bytes, null_mut()) == 0 {
-            return Err(());
-        }
-        let kernel = wide_null("kernel32.dll");
-        let module = GetModuleHandleW(kernel.as_ptr());
-        if module.is_null() {
-            return Err(());
-        }
-        let load_library = GetProcAddress(module, b"LoadLibraryW\0".as_ptr()).ok_or(())?;
-        let start = std::mem::transmute(load_library);
-        let thread = CreateRemoteThread(process, null(), 0, Some(start), remote, 0, null_mut());
-        if thread.is_null() {
-            return Err(());
-        }
-        let wait = WaitForSingleObject(thread, INFINITE);
-        CloseHandle(thread);
-        (wait == WAIT_OBJECT_0).then_some(()).ok_or(())
-    })();
-    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
-    result
+    hyperhub_runtime::attachment::windows_inject::load(process, pid, &path).map_err(|_| ())
 }
 
 pub(in crate::windows_gum) unsafe fn inject_fork_candidate(child_pid: u32) -> Result<(), ()> {
@@ -324,24 +332,20 @@ pub(in crate::windows_gum) unsafe fn inject_fork_candidate(child_pid: u32) -> Re
         return Err(());
     }
     let result = (|| {
-        inject_child_agent(process)?;
-        let thread = CreateRemoteThread(
-            process,
-            null(),
-            0,
-            Some(crate::windows_gum::hyperhub_agent_postfork_start),
-            null_mut(),
-            0,
-            null_mut(),
-        );
-        if thread.is_null() {
-            return Err(());
-        }
-        let wait = WaitForSingleObject(thread, 10_000);
-        let mut exit_code = ERROR_DLL_INIT_FAILED;
-        let queried = GetExitCodeThread(thread, &mut exit_code);
-        CloseHandle(thread);
-        (wait == WAIT_OBJECT_0 && queried != 0 && exit_code == 0)
+        let module = inject_child_agent(process)?;
+        let entry = module
+            .base
+            .checked_add(
+                hyperhub_runtime::attachment::windows_inject::export_rva(
+                    &module.path,
+                    "hyperhub_agent_postfork_start",
+                )
+                .map_err(|_| ())?,
+            )
+            .ok_or(())?;
+        (hyperhub_runtime::attachment::windows_inject::call(process, entry, &[0])
+            .map_err(|_| ())?
+            == 0)
             .then_some(())
             .ok_or(())
     })();
@@ -357,10 +361,6 @@ pub(super) unsafe fn query_process_path(process: HANDLE) -> Result<String, ()> {
     }
     path.truncate(length as usize);
     Ok(String::from_utf16_lossy(&path))
-}
-
-pub(super) fn wide_null(value: &str) -> Vec<u16> {
-    OsStr::new(value).encode_wide().chain(Some(0)).collect()
 }
 
 pub(super) unsafe fn build_child_environment(

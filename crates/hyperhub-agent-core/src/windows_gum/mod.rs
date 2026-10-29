@@ -4,10 +4,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_DLL_INIT_FAILED, HMODULE};
 use windows_sys::Win32::System::Threading::{
-    CreateThread, GetCurrentProcessId, OpenEventA, SetEvent, EVENT_MODIFY_STATE,
+    GetCurrentProcessId, OpenEventA, SetEvent, EVENT_MODIFY_STATE,
 };
 
 mod adapters;
+pub(crate) use adapters::network::resolve_native_addresses;
 mod capabilities;
 pub(crate) mod file_intents;
 mod gum;
@@ -76,10 +77,26 @@ pub(in crate::windows_gum) const DNSQUERY_A: u32 = 44;
 pub(in crate::windows_gum) const DNSQUERY_UTF8: u32 = 45;
 pub(in crate::windows_gum) const DNSQUERY_W: u32 = 46;
 pub(in crate::windows_gum) const DNSQUERY_EX: u32 = 47;
+pub(in crate::windows_gum) const FREE_CREDENTIALS: u32 = 48;
+pub(in crate::windows_gum) const DELETE_SECURITY_CONTEXT: u32 = 49;
 
+static ATTACHMENT_RELEASE_STARTED: AtomicBool = AtomicBool::new(false);
 static AGENT_STARTED: AtomicBool = AtomicBool::new(false);
 static AGENT_OWNER_PID: AtomicU32 = AtomicU32::new(0);
 static RUNTIME_GENERATION: AtomicU64 = AtomicU64::new(0);
+static EXTERNAL_POSIX_RUNTIME_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn external_posix_runtime_unsupported() -> bool {
+    EXTERNAL_POSIX_RUNTIME_UNSUPPORTED.load(Ordering::Acquire)
+}
+
+pub(in crate::windows_gum) fn mark_external_posix_runtime_unsupported() {
+    if crate::attachment::externally_attached() {
+        // May run under the loader lock. Status and the manager publish this
+        // monotonic capability loss; no state lock, IPC or allocation here.
+        EXTERNAL_POSIX_RUNTIME_UNSUPPORTED.store(true, Ordering::Release);
+    }
+}
 
 pub(in crate::windows_gum) fn rebuild_after_msys_fork(lease_id: &str) -> Result<(), i32> {
     let current_pid = unsafe { GetCurrentProcessId() };
@@ -115,6 +132,7 @@ pub(in crate::windows_gum) fn rebuild_after_msys_fork(lease_id: &str) -> Result<
         return Err(error);
     }
     crate::runtime::replace_state_after_fork(rebuilt);
+    crate::attachment::startup::runtime_rebuilt()?;
     crate::engine_call::initialize_thread_slots()?;
     crate::control::initialize_engine_control(deadline)?;
     if rebuild_builtin_plugins_after_fork().is_err() {
@@ -186,6 +204,9 @@ pub(in crate::windows_gum) fn rebuild_after_msys_fork(lease_id: &str) -> Result<
         return Err(crate::HH_ERR_PROTOCOL);
     }
     AGENT_OWNER_PID.store(current_pid, Ordering::Release);
+    if crate::attachment::managed() {
+        crate::attachment::mark_native_ready()?;
+    }
     crate::subscribe_sandbox();
     Ok(())
 }
@@ -216,6 +237,9 @@ unsafe fn signal_inherited_child_event() {
 }
 
 unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
+    crate::engine_call::background(|| initialize_gum_agent_inner())
+}
+unsafe fn initialize_gum_agent_inner() -> u32 {
     initialization_log("worker_started");
     if crate::engine_call::initialize_thread_slots().is_err() {
         return ERROR_DLL_INIT_FAILED;
@@ -230,13 +254,23 @@ unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
         return ERROR_DLL_INIT_FAILED;
     }
     initialization_log("bootstrap_complete");
+    install_agent_hooks()
+}
+
+unsafe fn install_agent_hooks() -> u32 {
+    if crate::attachment::startup::check().is_err() {
+        return ERROR_DLL_INIT_FAILED;
+    }
     if let Err(error) = initialize_builtin_plugins() {
-        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+        if crate::attachment::legacy_debug() {
             eprintln!("hyperhub-gum: failed to initialize hook plugins: {error}");
         }
         return ERROR_DLL_INIT_FAILED;
     }
     gum_init_embedded();
+    if !adapters::file::warm_memory_queries() {
+        return ERROR_DLL_INIT_FAILED;
+    }
     initialization_log("gum_initialized");
     let interceptor = gum_interceptor_obtain();
     if interceptor.is_null() {
@@ -244,10 +278,13 @@ unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
     }
     let report = HookManager::new(interceptor).install_builtin_hooks();
     initialization_log(&format!("hooks_installed success={}", report.success()));
+    if crate::attachment::startup::check().is_err() {
+        return ERROR_DLL_INIT_FAILED;
+    }
     if !manager::start_msys_runtime_hook_watcher(interceptor) {
         return ERROR_DLL_INIT_FAILED;
     }
-    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+    if crate::attachment::legacy_debug() {
         eprintln!(
             "hyperhub-gum: hooks installed={} optional_missing={} resolution_failed={} installation_failed={} skipped={} rolled_back={}",
             report.count(manager::HookInstallStatus::Installed),
@@ -268,14 +305,14 @@ unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
         return ERROR_DLL_INIT_FAILED;
     }
     if let Err(error) = publish_runtime_manifest(&report) {
-        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+        if crate::attachment::legacy_debug() {
             eprintln!("hyperhub-gum: failed to publish hook manifest: {error}");
         }
         return ERROR_DLL_INIT_FAILED;
     }
     AGENT_OWNER_PID.store(GetCurrentProcessId(), Ordering::Release);
     RUNTIME_GENERATION.store(1, Ordering::Release);
-    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+    if crate::attachment::legacy_debug() {
         let manifest = runtime_manifest();
         eprintln!(
             "hyperhub-gum: plugins={:?} native_hooks={} semantic_hooks={}",
@@ -299,19 +336,24 @@ unsafe extern "system" fn initialize_gum_agent(_: *mut c_void) -> u32 {
             );
         }
     }
-    signal_agent_event("HYPERHUB_LOADED_EVENT");
-    signal_agent_event("HYPERHUB_READY_EVENT");
-    signal_inherited_child_event();
+    if !crate::attachment::managed() {
+        signal_agent_event("HYPERHUB_LOADED_EVENT");
+        signal_agent_event("HYPERHUB_READY_EVENT");
+        signal_inherited_child_event();
+    }
     // Gum intentionally remains initialized for the injected process lifetime.
     0
 }
 
 fn initialization_log(stage: &str) {
+    if crate::attachment::managed() {
+        return;
+    }
     use std::io::Write;
     let line = format!("hyperhub-agent: pid={} stage={stage}\n", unsafe {
         GetCurrentProcessId()
     });
-    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+    if crate::attachment::legacy_debug() {
         eprint!("{line}");
     }
     if let Some(path) = std::env::var_os("HYPERHUB_AGENT_INIT_LOG") {
@@ -331,24 +373,80 @@ pub unsafe extern "system" fn DllMain(
     reason: u32,
     _reserved: *mut c_void,
 ) -> i32 {
-    const DLL_PROCESS_ATTACH: u32 = 1;
-    if reason != DLL_PROCESS_ATTACH {
-        return 1;
+    // Loading the Alpha native base is passive. No application environment
+    // value can opt an already-running process into hook initialization.
+    if reason == 1 {
+        AGENT_MODULE.store(instance as usize, Ordering::Release);
     }
-    AGENT_MODULE.store(instance as usize, Ordering::Release);
-    if adapters::process::is_current_process_msys_fork_bootstrap() {
-        return 1;
-    }
-    if AGENT_STARTED.swap(true, Ordering::AcqRel) {
-        return 1;
-    }
-    let worker = CreateThread(null(), 0, Some(initialize_gum_agent), null(), 0, null_mut());
-    if worker.is_null() {
-        AGENT_STARTED.store(false, Ordering::Release);
-        return 0;
-    }
-    CloseHandle(worker);
     1
+}
+
+/// Explicit compatibility entry for a freshly-created legacy launcher child.
+/// The caller invokes this only after LoadLibrary has released the loader lock.
+#[no_mangle]
+pub unsafe extern "system" fn hyperhub_agent_legacy_start(context: *mut c_void) -> u32 {
+    if AGENT_STARTED.swap(true, Ordering::AcqRel) {
+        return crate::HH_ERR_PROTOCOL as u32;
+    }
+    initialize_gum_agent(context)
+}
+
+/// Runs on a dedicated remote thread after the native loader has released its
+/// lock. The remote buffer is a big-endian u32 length followed by JSON bytes.
+#[no_mangle]
+pub unsafe extern "system" fn hyperhub_attachment_start(context: *mut c_void) -> u32 {
+    let _native_initialization = crate::attachment::enter();
+    let mut startup = None;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::engine_call::background(|| -> Result<(), i32> {
+            use hyperhub_runtime::attachment::InitializationStage as Stage;
+            if context.is_null() {
+                return Err(crate::HH_ERR_INVALID);
+            }
+            let header = unsafe { std::slice::from_raw_parts(context.cast::<u8>(), 4) };
+            let length =
+                u32::from_be_bytes(header.try_into().map_err(|_| crate::HH_ERR_INVALID)?) as usize;
+            if length == 0 || length > hyperhub_runtime::attachment::MAX_FRAME {
+                return Err(crate::HH_ERR_INVALID);
+            }
+            let data = unsafe { std::slice::from_raw_parts(context.cast::<u8>().add(4), length) };
+            let bootstrap: hyperhub_runtime::attachment::Bootstrap =
+                serde_json::from_slice(data).map_err(|_| crate::HH_ERR_PROTOCOL)?;
+            if AGENT_STARTED.swap(true, Ordering::AcqRel) {
+                return Err(crate::HH_ERR_PROTOCOL);
+            }
+            startup = Some(
+                crate::attachment::bind_metadata_for_startup(&bootstrap, false)?
+                    .ok_or(crate::HH_ERR_PROTOCOL)?,
+            );
+            // Bind rollback before Engine or Hook installation so every later
+            // typed failure remains reachable through the same authenticated Host.
+            crate::attachment::start_server()?;
+            crate::attachment::startup::stage(Stage::Engine)?;
+            crate::attachment::initialize_bound(&bootstrap)?;
+            crate::attachment::startup::stage(Stage::InstallingHooks)?;
+            let status = unsafe { install_agent_hooks() };
+            if status != 0 {
+                return Err(crate::HH_ERR_PROTOCOL);
+            }
+            crate::attachment::startup::stage(Stage::AliasCatchup)?;
+            crate::attachment::initialize_alias_host()?;
+            crate::attachment::mark_native_ready()?;
+            if bootstrap.initially_owned && !crate::attachment::logically_detached() {
+                crate::attachment::activate_initial_owned()?;
+            }
+            Ok(())
+        })
+    }));
+    let success = matches!(result, Ok(Ok(())));
+    if let Some(startup) = startup {
+        startup.finish(success);
+    }
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(code)) => code as u32,
+        Err(_) => crate::HH_ERR_INVALID as u32,
+    }
 }
 
 #[no_mangle]
@@ -432,15 +530,72 @@ mod tests {
 
     #[test]
     fn exposes_only_known_native_replacements() {
-        for hook_id in GETADDRINFO..=DNSQUERY_EX {
+        for hook_id in GETADDRINFO..=DELETE_SECURITY_CONTEXT {
             assert!(!hh_gum_replacement(hook_id).is_null());
         }
         assert!(hh_gum_replacement(0).is_null());
-        assert!(hh_gum_replacement(DNSQUERY_EX + 1).is_null());
+        assert!(hh_gum_replacement(u32::MAX).is_null());
     }
 }
 
 pub(crate) fn with_host_io<T>(call: impl FnOnce() -> T) -> T {
     let _guard = gum::HookGuard::enter();
     call()
+}
+
+pub(crate) fn retire_attachment_callbacks() -> Result<(), String> {
+    if capabilities::gateway::compatibility_resources() {
+        return Err("retained_schannel_credentials_or_contexts".into());
+    }
+
+    unsafe {
+        manager::retire_owned_hooks()?;
+    }
+    if crate::attachment::active_calls() != 0 {
+        return Err("active_hook_calls".into());
+    }
+    unsafe {
+        runtime::retire_plugins();
+    }
+    Ok(())
+}
+
+pub(crate) fn finish_attachment_retirement() -> Result<(), String> {
+    unsafe { manager::finish_retirement() }
+}
+
+/// Called only after the private channel has retired and native/OS callbacks,
+/// TLS and Host workers have all left. This function never returns through code
+/// in the module being released.
+#[no_mangle]
+pub unsafe extern "system" fn hyperhub_attachment_release(_context: *mut c_void) -> u32 {
+    if !crate::attachment::unload_ready() {
+        return crate::HH_ERR_PROTOCOL as u32;
+    }
+    let module = AGENT_MODULE.load(Ordering::Acquire) as HMODULE;
+    if module.is_null() {
+        return crate::HH_ERR_PROTOCOL as u32;
+    }
+    if ATTACHMENT_RELEASE_STARTED.swap(true, Ordering::AcqRel) {
+        return crate::HH_ERR_PROTOCOL as u32;
+    }
+    if crate::attachment::release_retired_storage().is_err() {
+        ATTACHMENT_RELEASE_STARTED.store(false, Ordering::Release);
+        return crate::HH_ERR_PROTOCOL as u32;
+    }
+    runtime::release_manifest_storage();
+    manager::release_registry_storage();
+    capabilities::gateway::release_trust_storage();
+    adapters::file::release_handle_metadata();
+    windows_sys::Win32::System::LibraryLoader::FreeLibraryAndExitThread(module, 0);
+}
+
+/// Read-only recovery probe. It remains usable after the private Host channel
+/// closes, including a lost unload ACK; it never starts or stops enforcement.
+#[no_mangle]
+pub unsafe extern "system" fn hyperhub_attachment_state(_context: *mut c_void) -> u32 {
+    0x4855_0000
+        | u32::from(crate::attachment::unload_ready())
+        | (u32::from(ATTACHMENT_RELEASE_STARTED.load(Ordering::Acquire)) << 1)
+        | (u32::from(!crate::attachment::server_running()) << 2)
 }

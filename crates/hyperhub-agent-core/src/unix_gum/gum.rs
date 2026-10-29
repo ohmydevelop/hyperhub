@@ -23,6 +23,8 @@ pub struct GumInvocationContext {
 pub type GumInvocationCallback = unsafe extern "C" fn(*mut GumInvocationContext, *mut c_void);
 #[link(name = "frida-gum", kind = "static")]
 extern "C" {
+    #[link_name = "_frida_g_object_unref"]
+    fn release_object(object: *mut c_void);
     fn gum_init_embedded();
     fn gum_interceptor_obtain() -> *mut GumInterceptor;
     fn gum_interceptor_begin_transaction(interceptor: *mut GumInterceptor);
@@ -41,6 +43,7 @@ extern "C" {
         original_function: *mut *mut c_void,
         options: *const c_void,
     ) -> i32;
+    fn gum_interceptor_flush(interceptor: *mut GumInterceptor) -> i32;
     fn gum_interceptor_revert(interceptor: *mut GumInterceptor, function_address: *mut c_void);
     fn gum_make_call_listener(
         on_enter: Option<GumInvocationCallback>,
@@ -163,6 +166,9 @@ pub unsafe fn replace(
         Err(status)
     }
 }
+pub unsafe fn flush(interceptor: *mut GumInterceptor) -> bool {
+    gum_interceptor_flush(interceptor) != 0
+}
 pub unsafe fn revert(interceptor: *mut GumInterceptor, target: *mut c_void) {
     gum_interceptor_revert(interceptor, target)
 }
@@ -193,6 +199,9 @@ pub unsafe fn attach(
 }
 pub unsafe fn detach(interceptor: *mut GumInterceptor, listener: *mut GumInvocationListener) {
     gum_interceptor_detach(interceptor, listener)
+}
+pub unsafe fn release_listener(listener: *mut GumInvocationListener) {
+    release_object(listener.cast());
 }
 pub unsafe fn argument(context: *mut GumInvocationContext, index: u32) -> *mut c_void {
     gum_invocation_context_get_nth_argument(context, index)

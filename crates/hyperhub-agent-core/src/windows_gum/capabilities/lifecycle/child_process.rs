@@ -19,6 +19,14 @@ impl AgentHookPlugin for ChildProcessPlugin {
 }
 
 fn process_decision(executable: Option<&str>) -> crate::ProcessHookDecision {
+    if !crate::attachment::propagating() {
+        return crate::ProcessHookDecision {
+            hook: false,
+            rule_id: None,
+            source: "attachment_scope".into(),
+            version: 0,
+        };
+    }
     let Some(executable) = executable else {
         return crate::ProcessHookDecision {
             hook: true,
@@ -28,6 +36,14 @@ fn process_decision(executable: Option<&str>) -> crate::ProcessHookDecision {
         };
     };
     let executable = normalize_executable_path(executable);
+    if let Some(bootstrap) = crate::attachment::bootstrap() {
+        return crate::control::decide_process_hook(
+            &bootstrap.control_endpoint,
+            &bootstrap.session_id,
+            &bootstrap.token,
+            &executable,
+        );
+    }
     let endpoint = std::env::var("HYPERHUB_CONTROL_ENDPOINT").ok();
     let session_id = std::env::var("HYPERHUB_SESSION_ID").ok();
     let token = std::env::var("HYPERHUB_SESSION_TOKEN").ok();
@@ -152,6 +168,13 @@ fn prepare_win32_child(context: &mut ChildProcessContext) -> HookCallbackResult<
         return Ok(HookDecision::Continue);
     }
     context.caller_requested_suspended = !plan.resume_after_ready;
+    if crate::attachment::managed() {
+        // Keep the caller's environment representation unchanged. In
+        // particular, an ANSI block must not be relabeled as Unicode.
+        context.creation_flags |= CREATE_SUSPENDED;
+        context.prepared = true;
+        return Ok(HookDecision::Continue);
+    }
     let event_name = super::windows::child_event_name();
     let Some(ready_event) = (unsafe { super::windows::create_child_event(&event_name) }) else {
         return if super::windows::observe_child_failures() {

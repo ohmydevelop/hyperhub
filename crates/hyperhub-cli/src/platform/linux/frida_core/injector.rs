@@ -1,8 +1,11 @@
-use super::{should_try_device_fallback, take_error, Command, FridaCore};
+use super::{
+    should_try_device_fallback, take_error, Cancellable, Command, FridaCore, FridaRequestError,
+};
 use crate::platform::linux::frida_core::{context::Context, Process};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::Arc;
 
 impl Context {
     pub(super) fn inject(
@@ -11,6 +14,7 @@ impl Context {
         library: &Path,
         entrypoint: &str,
         data: &[u8],
+        cancellation: Option<&Cancellable>,
     ) -> Result<u32, String> {
         let library = CString::new(library.as_os_str().as_bytes())
             .map_err(|_| "library path contains NUL".to_string())?;
@@ -18,6 +22,9 @@ impl Context {
             CString::new(entrypoint).map_err(|_| "entrypoint contains NUL".to_string())?;
         let data = CString::new(data).map_err(|_| "injection data contains NUL".to_string())?;
         unsafe {
+            let cancellable = cancellation
+                .map(Cancellable::as_ptr)
+                .unwrap_or(std::ptr::null_mut());
             let mut error = std::ptr::null_mut();
             let id = frida_sys::frida_injector_inject_library_file_sync(
                 self.injector.as_ptr(),
@@ -25,7 +32,7 @@ impl Context {
                 library.as_ptr(),
                 entrypoint.as_ptr(),
                 data.as_ptr(),
-                std::ptr::null_mut(),
+                cancellable,
                 &mut error,
             );
             if error.is_null() {
@@ -43,7 +50,7 @@ impl Context {
                 library.as_ptr(),
                 entrypoint.as_ptr(),
                 data.as_ptr(),
-                std::ptr::null_mut(),
+                cancellable,
                 &mut fallback_error,
             );
             if fallback_error.is_null() {
@@ -71,7 +78,33 @@ impl FridaCore {
             library: library.to_owned(),
             entrypoint: entrypoint.to_owned(),
             data: data.as_bytes().to_vec(),
+            cancellation: None,
             reply,
         })
+    }
+
+    pub fn inject_with_timeout(
+        &self,
+        process: Process,
+        library: &Path,
+        entrypoint: &str,
+        data: &CString,
+        timeout: std::time::Duration,
+    ) -> Result<u32, FridaRequestError> {
+        let cancellation = Arc::new(Cancellable::new()?);
+        let command_cancellation = cancellation.clone();
+        let timeout_cancellation = cancellation.clone();
+        self.request_with_timeout(
+            timeout,
+            move || timeout_cancellation.cancel(),
+            move |reply| Command::Inject {
+                process,
+                library: library.to_owned(),
+                entrypoint: entrypoint.to_owned(),
+                data: data.as_bytes().to_vec(),
+                cancellation: Some(command_cancellation),
+                reply,
+            },
+        )
     }
 }

@@ -1,0 +1,1586 @@
+diff --git a/lib/agent/agent-glue.c b/lib/agent/agent-glue.c
+index d354fe0..d7c795e 100644
+--- a/lib/agent/agent-glue.c
++++ b/lib/agent/agent-glue.c
+@@ -15,6 +15,119 @@
+ # include <gioopenssl.h>
+ #endif
+ 
++#ifdef HAVE_LINUX
++# include <pthread.h>
++# ifndef G_ATOMIC_LOCK_FREE
++#  error Linux recovery admission requires lock-free 32-bit GLib atomics
++# endif
++
++/* Native admission survives Environment._deinit() and subsequent Runner
++ * instances. No allocation, GLib lifecycle service, or fork-inherited mutex.
++ * Positive state is (token << 1) | claimed; negative states are local only.
++ * Tokens are never reused within this loaded image, including across Runners. */
++static gint frida_recovery_sequence = 0;
++static gint frida_recovery_admission = 0;
++static gint frida_recovery_resident = 0;
++
++/* Regression targets may export this exact weak symbol to exercise the
++ * controller-loss lifecycle. Ordinary applications do not export it, so
++ * their global namespace leaves this branch disabled. */
++extern gint hyperhub_frida_regression_disconnect_before_prepare_v1 (void)
++    __attribute__ ((weak));
++
++gboolean
++_frida_agent_regression_disconnect_before_prepare (void)
++{
++  if (hyperhub_frida_regression_disconnect_before_prepare_v1 == NULL)
++    return FALSE;
++  return hyperhub_frida_regression_disconnect_before_prepare_v1 () != 0;
++}
++
++void
++_frida_agent_entry_pin_resident (void)
++{
++  /* A later fresh Runner cannot prove that an old loader has disappeared. */
++  g_atomic_int_set (&frida_recovery_resident, 1);
++}
++
++gboolean
++_frida_agent_entry_is_resident (void)
++{
++  return g_atomic_int_get (&frida_recovery_resident) != 0;
++}
++
++gboolean
++_frida_agent_entry_begin_initial (void)
++{
++  return g_atomic_int_compare_and_exchange (&frida_recovery_admission, 0, -1);
++}
++
++guint
++_frida_agent_entry_begin_recovery (void)
++{
++  gint previous;
++
++  do
++  {
++    previous = g_atomic_int_get (&frida_recovery_sequence);
++    if (previous == G_MAXINT / 2)
++    {
++      /* Exhaustion refuses all remote launches; local-only cycles still let
++       * the native application proceed without reusing a wire token. */
++      g_atomic_int_set (&frida_recovery_admission, -4);
++      return 0;
++    }
++  }
++  while (!g_atomic_int_compare_and_exchange (&frida_recovery_sequence,
++      previous, previous + 1));
++
++  g_atomic_int_set (&frida_recovery_admission, (previous + 1) << 1);
++  return previous + 1;
++}
++
++gboolean
++_frida_agent_entry_claim (guint token)
++{
++  if (token == 0)
++    return g_atomic_int_compare_and_exchange (&frida_recovery_admission, -4, -3);
++  if (token > G_MAXINT / 2)
++    return FALSE;
++  return g_atomic_int_compare_and_exchange (&frida_recovery_admission,
++      token << 1, (token << 1) | 1);
++}
++
++void
++_frida_agent_entry_begin_retirement (void)
++{
++  g_atomic_int_set (&frida_recovery_admission, -2);
++}
++
++void
++_frida_agent_entry_finish_retirement (void)
++{
++  g_atomic_int_set (&frida_recovery_admission, 0);
++}
++
++static void *
++frida_agent_local_recovery_worker (void * data)
++{
++  (void) data;
++  if (!_frida_agent_run_local_recovery ())
++    pthread_detach (pthread_self ());
++  return NULL;
++}
++
++gint
++_frida_agent_start_local_recovery (gpointer * thread)
++{
++  pthread_t worker;
++  gint result = pthread_create (&worker, NULL, frida_agent_local_recovery_worker, NULL);
++  if (result == 0)
++    *thread = (gpointer) worker;
++  return result;
++}
++#endif
++
+ void
+ _frida_agent_environment_init (void)
+ {
+diff --git a/lib/agent/agent.vala b/lib/agent/agent.vala
+index f99f31f..3dd4daa 100644
+--- a/lib/agent/agent.vala
++++ b/lib/agent/agent.vala
+@@ -1,17 +1,66 @@
+ namespace Frida.Agent {
+ 	public void main (string agent_parameters, ref Frida.UnloadPolicy unload_policy, void * injector_state) {
++#if LINUX
++		// This check deliberately precedes shared_instance and all GLib/Gum
++		// objects: a stale loader may arrive after Environment._deinit().
++		uint token = injector_state != null ? ((LinuxInjectorState *) injector_state)->recovery_token : 0;
++		if (token != 0) {
++			if (!entry_claim (token)) {
++				entry_pin_resident ();
++				// The private loader owns/detaches its actual pthread. Resident
++				// prevents a rejected launch from dlclosing another runner.
++				unload_policy = RESIDENT;
++				return;
++			}
++			unload_policy = IMMEDIATE;
++			Runner.resume_after_transition (ref unload_policy, injector_state);
++		} else {
++			if (!entry_begin_initial ()) {
++				entry_pin_resident ();
++				unload_policy = RESIDENT;
++				return;
++			}
++			Runner.create_and_run (agent_parameters, ref unload_policy, injector_state);
++		}
++#else
+ 		if (Runner.shared_instance == null)
+ 			Runner.create_and_run (agent_parameters, ref unload_policy, injector_state);
+ 		else
+ 			Runner.resume_after_transition (ref unload_policy, injector_state);
++#endif
+ 	}
+ 
++#if LINUX
++	[CCode (cname = "_frida_agent_entry_pin_resident")]
++	private extern void entry_pin_resident ();
++	[CCode (cname = "_frida_agent_entry_is_resident")]
++	private extern bool entry_is_resident ();
++	[CCode (cname = "_frida_agent_entry_begin_initial")]
++	private extern bool entry_begin_initial ();
++	[CCode (cname = "_frida_agent_entry_begin_recovery")]
++	private extern uint entry_begin_recovery ();
++	[CCode (cname = "_frida_agent_entry_claim")]
++	private extern bool entry_claim (uint token);
++	[CCode (cname = "_frida_agent_entry_begin_retirement")]
++	private extern void entry_begin_retirement ();
++	[CCode (cname = "_frida_agent_entry_finish_retirement")]
++	private extern void entry_finish_retirement ();
++	[CCode (cname = "_frida_agent_start_local_recovery")]
++	private extern int start_local_recovery (out void * thread);
++	[CCode (cname = "_frida_agent_regression_disconnect_before_prepare")]
++	private extern bool regression_disconnect_before_prepare ();
++
++	public bool _run_local_recovery () {
++		return Runner.run_local_recovery ();
++	}
++#endif
++
+ 	private enum StopReason {
+ 		UNLOAD,
+ 		PROCESS_TRANSITION
+ 	}
+ 
+-	private sealed class Runner : Object, ProcessInvader, AgentSessionProvider, ExitHandler, ForkHandler, SpawnHandler {
++	private sealed class Runner : Object, ProcessInvader, AgentSessionProvider, AgentLifetimeProvider, ExitHandler, ForkHandler, SpawnHandler {
+ 		public static Runner shared_instance = null;
+ 		public static Mutex shared_mutex;
+ 		private static string? cached_agent_path = null;
+@@ -57,8 +104,18 @@ namespace Frida.Agent {
+ 		private AgentController? controller;
+ 		private Error? start_error = null;
+ 		private bool unloading = false;
++		private bool unload_completed = false;
++		private int unload_after_recovery = 0;
++		private int transition_active = 0;
++		private bool recovery_resident = false;
++		private uint recovery_token = 0;
++		private bool recovery_inline = false;
++		private string? transition_error = null;
++		private bool fork_permission_pending = false;
++		private bool specialization_permission_pending = false;
+ 		private uint filter_id = 0;
+ 		private uint registration_id = 0;
++		private uint lifetime_registration_id = 0;
+ 		private uint pending_calls = 0;
+ 		private Promise<bool> pending_close;
+ 		private Gee.Map<AgentSessionId?, LiveAgentSession> sessions =
+@@ -179,6 +236,11 @@ namespace Frida.Agent {
+ 					shared_instance.keep_running_eternalized ();
+ 					return;
+ 				} else {
++#if LINUX
++					if (entry_is_resident ())
++						unload_policy = RESIDENT;
++					entry_begin_retirement ();
++#endif
+ 					release_shared_instance ();
+ 				}
+ 
+@@ -186,6 +248,11 @@ namespace Frida.Agent {
+ 			}
+ 
+ 			Environment._deinit ();
++#if LINUX
++			if (entry_is_resident ())
++				unload_policy = RESIDENT;
++			entry_finish_retirement ();
++#endif
+ 		}
+ 
+ 		private static void apply_linker_notifier_offsets (string agent_parameters) {
+@@ -221,6 +288,11 @@ namespace Frida.Agent {
+ 
+ 				shared_instance.run_after_transition ();
+ 
++#if LINUX
++				if (shared_instance.recovery_resident || entry_is_resident ())
++					unload_policy = RESIDENT;
++#endif
++
+ 				if (shared_instance.stop_reason == PROCESS_TRANSITION) {
+ #if LINUX || FREEBSD
+ 					if (injector_state != null)
+@@ -233,6 +305,11 @@ namespace Frida.Agent {
+ 					shared_instance.keep_running_eternalized ();
+ 					return;
+ 				} else {
++#if LINUX
++					if (entry_is_resident ())
++						unload_policy = RESIDENT;
++					entry_begin_retirement ();
++#endif
+ 					release_shared_instance ();
+ 				}
+ 
+@@ -240,6 +317,11 @@ namespace Frida.Agent {
+ 			}
+ 
+ 			Environment._deinit ();
++#if LINUX
++			if (entry_is_resident ())
++				unload_policy = RESIDENT;
++			entry_finish_retirement ();
++#endif
+ 		}
+ 
+ 		private static void release_shared_instance () {
+@@ -403,7 +485,123 @@ namespace Frida.Agent {
+ 			main_context.pop_thread_default ();
+ 		}
+ 
++		private void begin_recovery_cycle () {
++			recovery_inline = false;
++#if LINUX
++			recovery_token = entry_begin_recovery ();
++			if (recovery_token == 0) {
++				recovery_resident = true;
++				transition_error = "Recovery token space exhausted; retaining local resident runner";
++			}
++#endif
++		}
++
++		private void record_transition_error (string phase, GLib.Error error) {
++#if LINUX
++			entry_pin_resident ();
++#endif
++			recovery_resident = true;
++			AtomicInt.set (ref unload_after_recovery, 1);
++			transition_error = ("%s: pid=%u token=%u parent=%u child=%u " +
++				"parent-injectee=%u child-injectee=%u specialized-injectee=%u domain=%u code=%d: %s").printf (phase,
++				get_process_id (), recovery_token, fork_parent_pid, fork_child_pid, fork_parent_injectee_id,
++				fork_child_injectee_id, specialized_injectee_id, error.domain, error.code, error.message);
++		}
++
++		private void retire_controller () {
++			controller = null;
++			fork_permission_pending = false;
++			specialization_permission_pending = false;
++			discard_connections ();
++			Promise<bool> operation;
++			lock (pending_calls) {
++				pending_calls = 0;
++				operation = pending_close;
++				pending_close = null;
++			}
++			if (operation != null)
++				operation.resolve (true);
++		}
++
++		private void start_fallback_agent_thread () {
++#if LINUX
++			entry_pin_resident ();
++			if (!entry_claim (recovery_token))
++				return;
++			recovery_resident = true;
++			void * thread;
++			int result = start_local_recovery (out thread);
++			if (result == 0) {
++				agent_pthread = thread;
++			} else {
++				// Resource exhaustion still releases the native fork. Pump cleanup
++				// inline, and retain the runtime because this callback owns it.
++				recovery_inline = true;
++				AtomicInt.set (ref unload_after_recovery, 1);
++				transition_error = "Unable to create recovery pthread: %d".printf (result);
++			}
++#else
++			agent_gthread = new Thread<bool> ("frida-eternal-agent", () => {
++				var ignore_scope = new ThreadIgnoreScope (FRIDA_THREAD);
++				run_after_transition ();
++				ignore_scope = null;
++				return true;
++			});
++#endif
++		}
++
++#if LINUX
++		public static bool run_local_recovery () {
++			{
++				var ignore_scope = new ThreadIgnoreScope (FRIDA_THREAD);
++				shared_instance.run_after_transition ();
++				if (shared_instance.stop_reason == PROCESS_TRANSITION)
++					return true;
++				if (shared_instance.is_eternal) {
++					shared_instance.keep_running_eternalized ();
++					return false;
++				}
++				entry_begin_retirement ();
++				release_shared_instance ();
++				ignore_scope = null;
++			}
++			// This is a native pthread, not a GLib thread proxy. The loaded image
++			// stays resident; only the owning Runner/environment are retired.
++			Environment._deinit ();
++			entry_finish_retirement ();
++			return false;
++		}
++#endif
++
++		private void run_inline_unload () {
++			if (unload_completed)
++				return;
++			main_context.push_thread_default ();
++			main_loop.run ();
++			main_context.pop_thread_default ();
++			agent_tid = 0;
++			agent_pthread = null;
++			disable_child_gating ();
++			exit_monitor = null;
++			// No independent runner exists on pthread_create failure. Keep this
++			// callback's environment resident rather than destroy its own scope.
++		}
++
++		private void complete_recovery_cycle () {
++			AtomicInt.set (ref transition_active, 0);
++			if (AtomicInt.compare_and_exchange (ref unload_after_recovery, 1, 0)) {
++				schedule_idle (() => {
++					if (!unloading)
++						unload.begin (null);
++					else if (unload_completed)
++						main_loop.quit ();
++					return false;
++				});
++			}
++		}
++
+ 		private void prepare_to_fork () {
++			AtomicInt.set (ref transition_active, 1);
+ 			var fdt_padder = FileDescriptorTablePadder.obtain ();
+ 
+ 			schedule_idle (() => {
+@@ -419,6 +617,7 @@ namespace Frida.Agent {
+ 
+ 		private async void do_prepare_to_fork () {
+ 			stop_reason = PROCESS_TRANSITION;
++			fork_permission_pending = false;
+ 
+ #if !WINDOWS
+ 			if (controller != null) {
+@@ -426,12 +625,29 @@ namespace Frida.Agent {
+ 					fork_parent_pid = get_process_id ();
++#if LINUX
++					if (regression_disconnect_before_prepare ()) {
++						var stale_controller = controller;
++						discard_connections ();
++						controller = stale_controller;
++						throw new Error.INVALID_OPERATION ("Regression controller disconnect before fork preparation");
++					}
++#endif
+ 					fork_child_id = yield controller.prepare_to_fork (fork_parent_pid, null,
+ 						out fork_parent_injectee_id, out fork_child_injectee_id, out fork_child_socket);
++					if (fork_child_id.handle == 0 || fork_parent_injectee_id == 0 || fork_child_injectee_id == 0 ||
++							fork_child_socket == null)
++						throw new Error.INVALID_OPERATION ("Controller returned invalid fork preparation state");
++					fork_permission_pending = true;
+ 				} catch (GLib.Error e) {
+-#if ANDROID
+-					error ("Oops, SELinux rule probably missing for your system. Symptom: %s", e.message);
++#if LINUX
++					record_transition_error ("prepare-fork", e);
+ #else
+-					error ("%s", e.message);
++					GLib.error ("%s", e.message);
+ #endif
++					retire_controller ();
++					fork_child_id = HostChildId (0);
++					fork_parent_injectee_id = 0;
++					fork_child_injectee_id = 0;
++					fork_child_socket = null;
+ 				}
+ 			}
+ #endif
+@@ -469,6 +677,7 @@ namespace Frida.Agent {
+ 			transition_mutex.lock ();
+ 
+ 			transition_recovery_state = RECOVERING;
++			begin_recovery_cycle ();
+ 
+ 			schedule_idle (() => {
+ 				recreate_agent_thread_after_fork.begin (actor);
+@@ -484,12 +693,23 @@ namespace Frida.Agent {
+ 				return false;
+ 			});
+ 
+-			while (transition_recovery_state != RECOVERED)
+-				transition_cond.wait (transition_mutex);
++			if (recovery_inline) {
++				transition_mutex.unlock ();
++				main_context.push_thread_default ();
++				main_loop.run ();
++				main_context.pop_thread_default ();
++				transition_mutex.lock ();
++			} else {
++				while (transition_recovery_state != RECOVERED)
++					transition_cond.wait (transition_mutex);
++			}
+ 
+ 			transition_mutex.unlock ();
+ 
+ 			fdt_padder = null;
++			complete_recovery_cycle ();
++			if (recovery_inline)
++				run_inline_unload ();
+ 		}
+ 
+ 		private static void suspend_subsystems () {
+@@ -542,7 +762,12 @@ namespace Frida.Agent {
+ 					try {
+ 						yield setup_connection_with_stream (stream);
+ 					} catch (Error e) {
+-						assert_not_reached ();
++#if LINUX
++						record_transition_error ("connect-fork-child", e);
++#else
++						GLib.error ("%s", e.message);
++#endif
++						retire_controller ();
+ 					}
+ 				}
+ 
+@@ -552,27 +777,35 @@ namespace Frida.Agent {
+ 				assert_not_reached ();
+ 			}
+ 
+-			if (controller != null) {
++			if (controller != null
++#if LINUX
++					&& recovery_token != 0
++#endif
++					) {
+ 				try {
++#if LINUX
++					yield controller.recreate_agent_thread_with_token (pid, injectee_id, recovery_token, null);
++#else
+ 					yield controller.recreate_agent_thread (pid, injectee_id, null);
++#endif
+ 				} catch (GLib.Error e) {
+-					assert_not_reached ();
++#if LINUX
++					record_transition_error ("recreate-fork", e);
++#else
++					GLib.error ("%s", e.message);
++#endif
++					retire_controller ();
++					start_fallback_agent_thread ();
+ 				}
+ 			} else {
+-				agent_gthread = new Thread<bool> ("frida-eternal-agent", () => {
+-					var ignore_scope = new ThreadIgnoreScope (FRIDA_THREAD);
+-					run_after_transition ();
+-					ignore_scope = null;
+-
+-					return true;
+-				});
++				start_fallback_agent_thread ();
+ 			}
+ 
+ 			main_loop.quit ();
+ 		}
+ 
+ 		private async void finish_recovery_from_fork (ForkActor actor, string? identifier) {
+-			if (actor == CHILD && controller != null) {
++			if (actor == CHILD && fork_permission_pending && controller != null) {
+ 				var info = HostChildInfo (fork_child_pid, fork_parent_pid, ChildOrigin.FORK);
+ 				if (identifier != null)
+ 					info.identifier = identifier;
+@@ -583,7 +816,8 @@ namespace Frida.Agent {
+ 				try {
+ 					yield controller.wait_for_permission_to_resume (fork_child_id, info, null);
+ 				} catch (GLib.Error e) {
+-					// The connection will/did get closed and we will unload...
++					record_transition_error ("resume-permission", e);
++					retire_controller ();
+ 				}
+ 				controller_proxy.set_default_timeout (previous_timeout);
+ 			}
+@@ -597,14 +831,18 @@ namespace Frida.Agent {
+ 			fork_parent_injectee_id = 0;
+ 			fork_child_injectee_id = 0;
+ 			fork_child_socket = null;
++			fork_permission_pending = false;
+ 
+ 			transition_mutex.lock ();
+ 			transition_recovery_state = RECOVERED;
+ 			transition_cond.signal ();
+ 			transition_mutex.unlock ();
++			if (recovery_inline)
++				main_loop.quit ();
+ 		}
+ 
+ 		private void prepare_to_specialize (string identifier) {
++			AtomicInt.set (ref transition_active, 1);
+ 			schedule_idle (() => {
+ 				do_prepare_to_specialize.begin (identifier);
+ 				return false;
+@@ -618,13 +856,26 @@ namespace Frida.Agent {
+ 
+ 		private async void do_prepare_to_specialize (string identifier) {
+ 			stop_reason = PROCESS_TRANSITION;
++			specialization_permission_pending = false;
+ 
+ 			if (controller != null) {
+ 				try {
+ 					specialized_child_id = yield controller.prepare_to_specialize (get_process_id (), identifier, null,
+ 						out specialized_injectee_id, out specialized_pipe_address);
++					if (specialized_child_id.handle == 0 || specialized_injectee_id == 0 ||
++							specialized_pipe_address == null || specialized_pipe_address == "")
++						throw new Error.INVALID_OPERATION ("Controller returned invalid specialization preparation state");
++					specialization_permission_pending = true;
+ 				} catch (GLib.Error e) {
+-					error ("%s", e.message);
++#if LINUX
++					record_transition_error ("prepare-specialization", e);
++#else
++					GLib.error ("%s", e.message);
++#endif
++					retire_controller ();
++					specialized_child_id = HostChildId (0);
++					specialized_injectee_id = 0;
++					specialized_pipe_address = null;
+ 				}
+ 			}
+ 
+@@ -637,6 +888,7 @@ namespace Frida.Agent {
+ 			transition_mutex.lock ();
+ 
+ 			transition_recovery_state = RECOVERING;
++			begin_recovery_cycle ();
+ 
+ 			schedule_idle (() => {
+ 				recreate_agent_thread_after_specialization.begin ();
+@@ -652,35 +904,54 @@ namespace Frida.Agent {
+ 				return false;
+ 			});
+ 
+-			while (transition_recovery_state != RECOVERED)
+-				transition_cond.wait (transition_mutex);
++			if (recovery_inline) {
++				transition_mutex.unlock ();
++				main_context.push_thread_default ();
++				main_loop.run ();
++				main_context.pop_thread_default ();
++				transition_mutex.lock ();
++			} else {
++				while (transition_recovery_state != RECOVERED)
++					transition_cond.wait (transition_mutex);
++			}
+ 
+ 			transition_mutex.unlock ();
++			complete_recovery_cycle ();
++			if (recovery_inline)
++				run_inline_unload ();
+ 		}
+ 
+ 		private async void recreate_agent_thread_after_specialization () {
+-			if (specialized_pipe_address != null) {
++			if (specialized_pipe_address != null
++#if LINUX
++					&& recovery_token != 0
++#endif
++					) {
+ 				try {
+ 					yield setup_connection_with_transport_uri (specialized_pipe_address);
++#if LINUX
++					yield controller.recreate_agent_thread_with_token (get_process_id (), specialized_injectee_id,
++						recovery_token, null);
++#else
+ 					yield controller.recreate_agent_thread (get_process_id (), specialized_injectee_id, null);
++#endif
+ 				} catch (GLib.Error e) {
+-					assert_not_reached ();
++#if LINUX
++					record_transition_error ("recreate-specialization", e);
++#else
++					GLib.error ("%s", e.message);
++#endif
++					retire_controller ();
++					start_fallback_agent_thread ();
+ 				}
+ 			} else {
+-				agent_gthread = new Thread<bool> ("frida-eternal-agent", () => {
+-					var ignore_scope = new ThreadIgnoreScope (FRIDA_THREAD);
+-					run_after_transition ();
+-					ignore_scope = null;
+-
+-					return true;
+-				});
++				start_fallback_agent_thread ();
+ 			}
+-
+ 			main_loop.quit ();
+ 		}
+ 
+ 		private async void finish_recovery_from_specialization (string identifier) {
+-			if (controller != null) {
++			if (specialization_permission_pending && controller != null) {
+ 				uint pid = get_process_id ();
+ 				uint parent_pid = pid;
+ 				var info = HostChildInfo (pid, parent_pid, ChildOrigin.EXEC);
+@@ -692,7 +963,8 @@ namespace Frida.Agent {
+ 				try {
+ 					yield controller.wait_for_permission_to_resume (specialized_child_id, info, null);
+ 				} catch (GLib.Error e) {
+-					// The connection will/did get closed and we will unload...
++					record_transition_error ("resume-permission", e);
++					retire_controller ();
+ 				}
+ 				controller_proxy.set_default_timeout (previous_timeout);
+ 			}
+@@ -700,11 +972,14 @@ namespace Frida.Agent {
+ 			specialized_child_id = HostChildId (0);
+ 			specialized_injectee_id = 0;
+ 			specialized_pipe_address = null;
++			specialization_permission_pending = false;
+ 
+ 			transition_mutex.lock ();
+ 			transition_recovery_state = RECOVERED;
+ 			transition_cond.signal ();
+ 			transition_mutex.unlock ();
++			if (recovery_inline)
++				main_loop.quit ();
+ 		}
+ 
+ 		private async void prepare_to_exec (HostChildInfo * info) {
+@@ -784,6 +1059,20 @@ namespace Frida.Agent {
+ 			return (v8_backend != null) ? v8_backend : qjs_backend;
+ 		}
+ 
++		private async bool query_resident_pin (Cancellable? cancellable) throws GLib.Error {
++#if LINUX
++			return entry_is_resident ();
++#else
++			return false;
++#endif
++		}
++
++		private async bool query_eternalized (Cancellable? cancellable) throws GLib.Error {
++			if (unloading)
++				throw new Error.INVALID_OPERATION ("Agent is unloading");
++			return _is_eternal;
++		}
++
+ 		private async void open (AgentSessionId id, HashTable<string, Variant> options,
+ 				Cancellable? cancellable) throws Error, IOError {
+ 			if (unloading)
+@@ -1020,6 +1309,10 @@ namespace Frida.Agent {
+ 		}
+ 
+ 		private async void unload (Cancellable? cancellable) throws Error, IOError {
++			if (AtomicInt.get (ref transition_active) != 0) {
++				AtomicInt.set (ref unload_after_recovery, 1);
++				return;
++			}
+ 			if (unloading)
+ 				throw new Error.INVALID_OPERATION ("Agent is already unloading");
+ 			unloading = true;
+@@ -1060,9 +1353,13 @@ namespace Frida.Agent {
+ 			if (!is_eternal)
+ 				teardown_emulated_provider ();
+ 
+-			if (stop_thread_on_unload) {
++			unload_completed = true;
++			if (stop_thread_on_unload || recovery_inline) {
+ 				schedule_idle (() => {
+-					main_loop.quit ();
++					if (AtomicInt.get (ref transition_active) != 0)
++						AtomicInt.set (ref unload_after_recovery, 1);
++					else
++						main_loop.quit ();
+ 					return false;
+ 				});
+ 			}
+@@ -1201,11 +1498,19 @@ namespace Frida.Agent {
+ 
+ 				AgentSessionProvider provider = this;
+ 				registration_id = connection.register_object (ObjectPath.AGENT_SESSION_PROVIDER, provider);
++				AgentLifetimeProvider lifetime_provider = this;
++				lifetime_registration_id = connection.register_object (ObjectPath.AGENT_SESSION_PROVIDER, lifetime_provider);
+ 
+ 				controller = yield connection.get_proxy (null, ObjectPath.AGENT_CONTROLLER, DO_NOT_LOAD_PROPERTIES, null);
+ 
+ 				connection.start_message_processing ();
+ 			} catch (GLib.Error e) {
++				if (connection != null) {
++					connection.on_closed.disconnect (on_connection_closed);
++					unregister_connection ();
++					connection.dispose ();
++					connection = null;
++				}
+ 				throw new Error.TRANSPORT ("%s", e.message);
+ 			}
+ 		}
+@@ -1267,6 +1572,10 @@ namespace Frida.Agent {
+ 				connection.unregister_object (registration_id);
+ 				registration_id = 0;
+ 			}
++			if (lifetime_registration_id != 0) {
++				connection.unregister_object (lifetime_registration_id);
++				lifetime_registration_id = 0;
++			}
+ 
+ 			if (filter_id != 0) {
+ 				connection.remove_filter (filter_id);
+@@ -1276,8 +1585,17 @@ namespace Frida.Agent {
+ 
+ 		private void on_connection_closed (DBusConnection connection, bool remote_peer_vanished, GLib.Error? error) {
+ 			bool closed_by_us = !remote_peer_vanished && error == null;
+-			if (!closed_by_us)
+-				unload.begin (null);
++			if (!closed_by_us) {
++				if (AtomicInt.get (ref transition_active) != 0) {
++#if LINUX
++					entry_pin_resident ();
++#endif
++					recovery_resident = true;
++					AtomicInt.set (ref unload_after_recovery, 1);
++				} else if (!unloading) {
++					unload.begin (null);
++				}
++			}
+ 
+ 			Promise<bool> operation = null;
+ 			lock (pending_calls) {
+diff --git a/lib/base/session.vala b/lib/base/session.vala
+index 21402d2..9acf266 100644
+--- a/lib/base/session.vala
++++ b/lib/base/session.vala
+@@ -61,6 +61,14 @@ namespace Frida {
+ 		public signal void child_gating_changed (uint subscriber_count);
+ 	}
+ 
++	// Internal recovery state, additive to the existing Frida 17 interfaces.
++	[DBus (name = "re.frida.AgentLifetimeProvider1")]
++	public interface AgentLifetimeProvider : Object {
++		public abstract async bool query_eternalized (Cancellable? cancellable) throws GLib.Error;
++		// Positive is a sticky witness. A negative snapshot is not unload proof.
++		public abstract async bool query_resident_pin (Cancellable? cancellable) throws GLib.Error;
++	}
++
+ 	[DBus (name = "re.frida.AgentSession17")]
+ 	public interface AgentSession : Object {
+ 		public abstract async void close (Cancellable? cancellable) throws GLib.Error;
+@@ -116,6 +124,8 @@ namespace Frida {
+ 			out uint specialized_injectee_id, out string specialized_pipe_address) throws GLib.Error;
+ 
+ 		public abstract async void recreate_agent_thread (uint pid, uint injectee_id, Cancellable? cancellable) throws GLib.Error;
++		public abstract async void recreate_agent_thread_with_token (uint pid, uint injectee_id, uint token,
++			Cancellable? cancellable) throws GLib.Error;
+ 		public abstract async void wait_for_permission_to_resume (HostChildId id, HostChildInfo info,
+ 			Cancellable? cancellable) throws GLib.Error;
+ 
+@@ -1143,6 +1153,7 @@ namespace Frida {
+ 	public struct LinuxInjectorState {
+ 		public int frida_ctrlfd;
+ 		public int agent_ctrlfd;
++		public uint recovery_token;
+ 	}
+ #endif
+ 
+diff --git a/src/frida.vala b/src/frida.vala
+index 59386de..eab6f4c 100644
+--- a/src/frida.vala
++++ b/src/frida.vala
+@@ -2857,6 +2857,7 @@ namespace Frida {
+ 			construct;
+ 		}
+ 
++		private bool resident_pin_seen = false;
+ 		private AgentSessionId id;
+ 		private unowned Device device;
+ 
+@@ -2911,6 +2912,54 @@ namespace Frida {
+ 			return state != ATTACHED;
+ 		}
+ 
++		/**
++		 * Queries the attached Agent's sticky native residency pin using the
++		 * existing local provider connection. True remains a conclusive witness
++		 * for this Session. False is only a live snapshot, not unload proof.
++		 * A missing provider, unsupported peer, or disconnected transport is an
++		 * error; callers must retain unknown state instead of inferring false.
++		 */
++		public async bool query_resident_pin (Cancellable? cancellable = null) throws Error, IOError {
++			if (resident_pin_seen)
++				return true;
++			check_open ();
++#if HAVE_LOCAL_BACKEND
++			var host_session = device.current_host_session as LocalHostSession;
++			if (host_session == null)
++				throw new Error.NOT_SUPPORTED ("Resident pin query requires an existing local provider");
++			var provider = host_session.obtain_session_provider (id);
++			var proxy = provider as DBusProxy;
++			if (proxy == null)
++				throw new Error.NOT_SUPPORTED ("Resident pin provider has no authenticated DBus transport");
++			try {
++				AgentLifetimeProvider lifetime = yield proxy.get_connection ().get_proxy (null,
++					ObjectPath.AGENT_SESSION_PROVIDER, DO_NOT_LOAD_PROPERTIES, cancellable);
++				((DBusProxy) lifetime).set_default_timeout (5000);
++				bool pinned = yield lifetime.query_resident_pin (cancellable);
++				if (pinned) {
++					resident_pin_seen = true;
++					return true;
++				}
++				check_open ();
++				return false;
++			} catch (GLib.Error e) {
++				throw_dbus_error (e);
++			}
++#else
++			throw new Error.NOT_SUPPORTED ("Resident pin query requires the local backend");
++#endif
++		}
++
++		public bool query_resident_pin_sync (Cancellable? cancellable = null) throws Error, IOError {
++			return create<QueryResidentPinTask> ().execute (cancellable);
++		}
++
++		private class QueryResidentPinTask : SessionTask<bool> {
++			protected override async bool perform_operation () throws Error, IOError {
++				return yield parent.query_resident_pin (cancellable);
++			}
++		}
++
+ 		/**
+ 		 * Detaches from the target process, tearing down all scripts created
+ 		 * through this session.
+diff --git a/src/host-session-service.vala b/src/host-session-service.vala
+index 90a2e89..b5ff038 100644
+--- a/src/host-session-service.vala
++++ b/src/host-session-service.vala
+@@ -569,7 +569,7 @@ namespace Frida {
+ 			resume_request.resolve (true);
+ 			entry.resume_request = null;
+ 
+-			if (entry.sessions.is_empty) {
++			if (entry.sessions.is_empty && !entry.eternalized && entry.lifetime_query_error == null) {
+ 				unload_and_destroy.begin (entry, APPLICATION_REQUESTED);
+ 			}
+ 
+@@ -600,6 +600,13 @@ namespace Frida {
+ 
+ 			var entry = yield establish (pid, raw_opts, cancellable);
+ 
++			if (entry.lifetime_query_error != null) {
++				yield refresh_child_agent_lifetime (entry, cancellable);
++				cancellable.set_error_if_cancelled ();
++				if (entry.lifetime_query_error != null)
++					throw new Error.TRANSPORT ("%s", entry.lifetime_query_error);
++			}
++
+ 			var id = AgentSessionId.generate ();
+ 			entry.sessions.add (id);
+ 
+@@ -903,6 +910,7 @@ namespace Frida {
+ 				var entry = future.value;
+ 				if (entry.provider == provider) {
+ 					entry.eternalized = true;
++					entry.lifetime_query_error = null;
+ 					break;
+ 				}
+ 			}
+@@ -1111,9 +1119,52 @@ namespace Frida {
+ 		}
+ 
+ 		public async void recreate_agent_thread (uint pid, uint injectee_id, Cancellable? cancellable) throws Error, IOError {
++#if LINUX
++			throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
++#else
+ 			injectee_by_pid[pid] = injectee_id;
+-
+ 			yield injector.recreate_thread (pid, injectee_id, cancellable);
++#endif
++		}
++
++		public async void recreate_agent_thread_with_token (uint pid, uint injectee_id, uint token,
++				Cancellable? cancellable) throws Error, IOError {
++#if LINUX
++			if (token == 0 || token > int.MAX / 2)
++				throw new Error.INVALID_ARGUMENT ("Invalid recovery token");
++			var linux_injector = injector as Linjector;
++			if (linux_injector == null)
++				throw new Error.NOT_SUPPORTED ("Injector does not support recovery tokens");
++			injectee_by_pid[pid] = injectee_id;
++			yield linux_injector.recreate_thread_with_token (pid, injectee_id, token, cancellable);
++#else
++			throw new Error.NOT_SUPPORTED ("Recovery tokens are only available on Linux");
++#endif
++		}
++
++		private async bool query_child_agent_lifetime (DBusConnection connection, Cancellable? cancellable) throws GLib.Error {
++			AgentLifetimeProvider lifetime = yield connection.get_proxy (null, ObjectPath.AGENT_SESSION_PROVIDER,
++				DO_NOT_LOAD_PROPERTIES, cancellable);
++			((DBusProxy) lifetime).set_default_timeout (5000);
++			return yield lifetime.query_eternalized (cancellable);
++		}
++
++		private async void refresh_child_agent_lifetime (AgentEntry entry, Cancellable? cancellable) {
++			var connection = entry.connection;
++			if (connection == null) {
++				entry.lifetime_query_error = "Unable to establish child Agent lifetime: connection unavailable";
++				return;
++			}
++			try {
++				bool snapshot = yield query_child_agent_lifetime (connection, cancellable);
++				entry.eternalized = entry.eternalized || snapshot;
++				entry.lifetime_query_error = null;
++			} catch (GLib.Error e) {
++				// A positive signal is conclusive. Otherwise preserve unknown state;
++				// closing this transport would unload a possibly eternal Runner.
++				entry.lifetime_query_error = entry.eternalized ? null :
++					"Unable to establish child Agent lifetime: " + e.message;
++			}
+ 		}
+ 
+ 		public async void wait_for_permission_to_resume (HostChildId id, HostChildInfo info, Cancellable? cancellable)
+@@ -1141,19 +1192,45 @@ namespace Frida {
+ 				return;
+ 			}
+ 
+-			connection.on_closed.disconnect (on_child_connection_closed);
+-			child_entries.unset (id);
+-
+ 			var resume_request = new Promise<bool> ();
+ 
+-			var agent_entry = new AgentEntry (pid, null, connection, provider, child_entry.controller_registration_id);
+-			agent_entry.resume_request = resume_request;
+-			promise.resolve (agent_entry);
++			bool eternalized = false;
++			string? query_error = null;
++			// The Runner serves DBus while awaiting this recovery call. Retain
++			// the ChildEntry's ownership until the actual-child query completes.
++			ulong lifetime_handler = provider.eternalized.connect (() => {
++				eternalized = true;
++			});
++			try {
++				try {
++					bool snapshot = yield query_child_agent_lifetime (connection, cancellable);
++					eternalized = eternalized || snapshot;
++				} catch (GLib.Error e) {
++					query_error = "Unable to establish child Agent lifetime: " + e.message;
++				}
++				if (connection.is_closed ()) {
++					agent_entries.unset (pid);
++					promise.reject (new Error.TRANSPORT ("Child Agent connection closed during lifetime query"));
++					return;
++				}
+ 
+-			connection.on_closed.connect (on_agent_connection_closed);
+-			provider.closed.connect (on_agent_session_provider_closed);
+-			provider.eternalized.connect (on_agent_session_provider_eternalized);
+-			agent_entry.child_gating_changed.connect (on_child_gating_changed);
++				connection.on_closed.disconnect (on_child_connection_closed);
++				child_entries.unset (id);
++				var agent_entry = new AgentEntry (pid, null, connection, provider, child_entry.controller_registration_id);
++				agent_entry.eternalized = eternalized;
++				agent_entry.lifetime_query_error = eternalized ? null : query_error;
++				agent_entry.resume_request = resume_request;
++
++				// Publish unknown state too: attach reports its bounded error, and
++				// resume may release the native child without guessing unload is safe.
++				connection.on_closed.connect (on_agent_connection_closed);
++				provider.closed.connect (on_agent_session_provider_closed);
++				provider.eternalized.connect (on_agent_session_provider_eternalized);
++				agent_entry.child_gating_changed.connect (on_child_gating_changed);
++				promise.resolve (agent_entry);
++			} finally {
++				provider.disconnect (lifetime_handler);
++			}
+ 
+ 			if (!try_handle_child (info))
+ 				add_pending_child (info);
+@@ -1321,6 +1398,11 @@ namespace Frida {
+ 				default = false;
+ 			}
+ 
++			public string? lifetime_query_error {
++				get;
++				set;
++			}
++
+ 			private bool closing = false;
+ 			private bool registered = true;
+ 			private Promise<bool> close_request = new Promise<bool> ();
+diff --git a/src/linux/frida-helper-backend.vala b/src/linux/frida-helper-backend.vala
+index ebc4104..6272408 100644
+--- a/src/linux/frida-helper-backend.vala
++++ b/src/linux/frida-helper-backend.vala
+@@ -385,7 +385,7 @@ namespace Frida {
+ 
+ 			uninjected (id);
+ 
+-			if (agent.unload_policy == IMMEDIATE && agent.process_status == NORMAL) {
++			if (agent.unload_policy == IMMEDIATE && agent.process_status == NORMAL && !agent.bootstrap_result.resident_pinned) {
+ 				// TODO: Implement did_not_exec() guard.
+ 				deallocate_agent.begin (agent);
+ 			} else {
+@@ -445,27 +445,37 @@ namespace Frida {
+ 		}
+ 
+ 		public async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError {
++			throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
++		}
++
++		public async void recreate_injectee_thread_with_token (uint pid, uint id, uint token,
++				Cancellable? cancellable) throws Error, IOError {
++			if (token == 0)
++				throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
++
+ 			RemoteAgent? old_agent = agents[id];
+ 			if (old_agent == null || old_agent.state != PAUSED)
+ 				throw new Error.INVALID_ARGUMENT ("Invalid ID");
+ 
+ 			cancel_agent_expiry_for_id (id);
+ 
+-			var task = new RejuvenateTask (old_agent);
++			var task = new RejuvenateTask (old_agent, token);
+ 			RemoteAgent new_agent = yield perform (task, pid, cancellable);
+ 			take_agent (new_agent);
+ 		}
+ 
+ 		private class RejuvenateTask : Object, Task<RemoteAgent> {
+ 			private RemoteAgent old_agent;
++			private uint token;
+ 
+-			public RejuvenateTask (RemoteAgent old_agent) {
++			public RejuvenateTask (RemoteAgent old_agent, uint token) {
+ 				this.old_agent = old_agent;
++				this.token = token;
+ 			}
+ 
+ 			public async RemoteAgent run (uint pid, Cancellable? cancellable) throws Error, IOError {
+ 				var session = yield InjectSession.open (pid, cancellable);
+-				RemoteAgent new_agent = yield session.rejuvenate (old_agent, cancellable);
++				RemoteAgent new_agent = yield session.rejuvenate (old_agent, token, cancellable);
+ 				session.close ();
+ 				return new_agent;
+ 			}
+@@ -914,13 +924,23 @@ namespace Frida {
+ 				write_memory_string (loader_base + loader_layout.agent_data_offset, spec.data);
+ 				write_memory_string (loader_base + loader_layout.fallback_address_offset, fallback_address);
+ 
+-				return yield launch_loader (FROM_SCRATCH, spec, bootstrap_result, null, fallback_address, loader_layout,
++				return yield launch_loader (FROM_SCRATCH, spec, bootstrap_result, null, fallback_address, loader_layout, 0,
+ 					cancellable);
+ 			} catch (GLib.Error error) {
+-				try {
+-					yield deallocate_memory ((uintptr) bootstrap_result.libc.munmap, loader_base, loader_layout.size,
+-						null);
+-				} catch (GLib.Error e) {
++				if (!bootstrap_result.may_dispatched && !bootstrap_result.resident_pinned) {
++					// No loader call has been submitted. No pthread can depend on
++					// this allocation, including its stack and libc API snapshot.
++					try {
++						yield deallocate_memory ((uintptr) bootstrap_result.libc.munmap, loader_base,
++							bootstrap_result.context.allocation_size, null);
++					} catch (GLib.Error e) {
++					}
++				} else {
++					// FROM_SCRATCH is just as ambiguous as RELAUNCH after dispatch.
++					// A late pthread may not yet have copied its private context.
++					bootstrap_result.resident_pinned = true;
++					GLib.info ("Retaining native loader allocation for PID %u after uncertain launch: %s",
++						pid, error.message);
+ 				}
+ 
+ 				if (error is IOError)
+@@ -929,9 +949,13 @@ namespace Frida {
+ 			}
+ 		}
+ 
+-		public async RemoteAgent rejuvenate (RemoteAgent old_agent, Cancellable? cancellable) throws Error, IOError {
++		public async RemoteAgent rejuvenate (RemoteAgent old_agent, uint token, Cancellable? cancellable) throws Error, IOError {
++			if (token == 0)
++				throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
++
+ 			InjectSpec spec = old_agent.inject_spec;
+ 			BootstrapResult bootstrap_result = old_agent.bootstrap_result;
++			bootstrap_result.recovery_launched = true;
+ 
+ 			string fallback_address = make_fallback_address ();
+ 			LoaderLayout loader_layout = compute_loader_layout (spec, fallback_address);
+@@ -960,8 +984,19 @@ namespace Frida {
+ 
+ 			write_memory (loader_base + loader_layout.fallback_address_offset, fallback_address.data);
+ 
+-			return yield launch_loader (RELAUNCH, spec, bootstrap_result, old_agent.agent_ctrl, fallback_address, loader_layout,
+-				cancellable);
++			try {
++				return yield launch_loader (RELAUNCH, spec, bootstrap_result, old_agent.agent_ctrl, fallback_address, loader_layout,
++					token, cancellable);
++			} catch (GLib.Error e) {
++				// A failed handshake/RPC is not proof that a created pthread has
++				// exited. Its private launch still points at this loader/libc API.
++				bootstrap_result.resident_pinned = true;
++				if (e is IOError)
++					throw (IOError) e;
++				if (e is Error)
++					throw (Error) e;
++				throw new Error.TRANSPORT ("%s", e.message);
++			}
+ 		}
+ 
+ 		private struct LoaderLayout {
+@@ -1004,8 +1039,11 @@ namespace Frida {
+ 		}
+ 
+ 		private async RemoteAgent launch_loader (LoaderLaunch launch, InjectSpec spec, BootstrapResult bres,
+-				UnixConnection? agent_ctrl, string fallback_address, LoaderLayout loader_layout, Cancellable? cancellable)
++				UnixConnection? agent_ctrl, string fallback_address, LoaderLayout loader_layout, uint token, Cancellable? cancellable)
+ 				throws Error, IOError {
++			if (launch == RELAUNCH && token == 0)
++				throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
++
+ 			Future<RemoteAgent> future_agent =
+ 				establish_connection (launch, spec, bres, agent_ctrl, fallback_address, cancellable);
+ 
+@@ -1014,7 +1052,11 @@ namespace Frida {
+ 			regs.stack_pointer = bres.allocated_stack.stack_root;
+ 			var call_builder = new RemoteCallBuilder (loader_base, regs);
+ 			call_builder.add_argument (loader_base + loader_layout.ctx_offset);
++			call_builder.add_argument (token);
+ 			RemoteCall loader_call = call_builder.build (this);
++			// Monotonic, for both initial and recovery launches. Cancellation or
++			// transport failure cannot turn this back into "not dispatched".
++			bres.may_dispatched = true;
+ 			RemoteCallResult loader_result = yield loader_call.execute (cancellable);
+ 			if (loader_result.status != COMPLETED) {
+ 				uint64 pc = loader_result.regs.program_counter;
+@@ -1447,12 +1489,18 @@ namespace Frida {
+ 		public HelperBootstrapContext context;
+ 		public HelperLibcApi libc;
+ 		public AllocatedStack allocated_stack;
++		public bool may_dispatched = false;
++		public bool recovery_launched = false;
++		public bool resident_pinned = false;
+ 
+ 		public BootstrapResult clone () {
+ 			var res = new BootstrapResult ();
+ 			res.context = context;
+ 			res.libc = libc;
+ 			res.allocated_stack = allocated_stack;
++			res.may_dispatched = may_dispatched;
++			res.recovery_launched = recovery_launched;
++			res.resident_pinned = resident_pinned;
+ 			return res;
+ 		}
+ 	}
+@@ -1594,7 +1642,7 @@ namespace Frida {
+ 		private async void monitor () {
+ 			Error? pending_start_error = null;
+ 			try {
+-				var unload_policy = UnloadPolicy.IMMEDIATE;
++				var unload_policy = UnloadPolicy.RESIDENT;
+ 
+ 				InputStream input = frida_ctrl.get_input_stream ();
+ 				var io_priority = Priority.DEFAULT;
+@@ -1664,21 +1712,37 @@ namespace Frida {
+ 
+ 				if (bye != null)
+ 					unload_policy = bye.unload_policy;
+-
+-				if (hello != null) {
+-					string thread_path = "/proc/%u/task/%u".printf (pid, hello.thread_id);
+-					while (FileUtils.test (thread_path, EXISTS)) {
++				if (unload_policy == RESIDENT)
++					bootstrap_result.resident_pinned = true;
++
++				bool thread_exit_proven = false;
++				if (hello != null && hello.thread_id != 0) {
++					while (true) {
++						int result = tgkill (pid, hello.thread_id, (Posix.Signal) 0);
++						int probe_error = Posix.errno;
++						if (result == -1 && probe_error == Posix.ESRCH) {
++							thread_exit_proven = true;
++							break;
++						}
++						if (result == -1 && probe_error != Posix.EINTR)
++							break; // Permission/inspection failure is unknown, not exit.
+ 						var source = new TimeoutSource (50);
+ 						source.set_callback (monitor.callback);
+ 						source.attach (MainContext.get_thread_default ());
+ 						yield;
+ 					}
+ 				}
++				if (unload_policy == IMMEDIATE && !thread_exit_proven) {
++					bootstrap_result.resident_pinned = true;
++					unload_policy = RESIDENT;
++				}
+ 
+ 				on_stop (unload_policy);
+ 			} catch (GLib.Error e) {
+-				if (!(e is IOError.CANCELLED))
+-					on_stop (IMMEDIATE);
++				if (!(e is IOError.CANCELLED)) {
++					bootstrap_result.resident_pinned = true;
++					on_stop (RESIDENT);
++				}
+ 			} finally {
+ 				if (start_request != null) {
+ 					Error error = (pending_start_error != null)
+@@ -1712,7 +1776,12 @@ namespace Frida {
+ 		}
+ 
+ 		public void stop () {
+-			on_stop (IMMEDIATE);
++			if (bootstrap_result.may_dispatched || bootstrap_result.resident_pinned) {
++				bootstrap_result.resident_pinned = true;
++				on_stop (RESIDENT);
++			} else {
++				on_stop (IMMEDIATE);
++			}
+ 		}
+ 
+ 		private void on_stop (UnloadPolicy unload_policy) {
+@@ -1776,6 +1845,7 @@ namespace Frida {
+ 
+ 		void * pthread_create;
+ 		void * pthread_detach;
++		void * pthread_self;
+ 
+ 		void * dlopen;
+ 		int dlopen_flags;
+diff --git a/src/linux/frida-helper-process.vala b/src/linux/frida-helper-process.vala
+index a7daf02..addde49 100644
+--- a/src/linux/frida-helper-process.vala
++++ b/src/linux/frida-helper-process.vala
+@@ -160,15 +160,20 @@ namespace Frida {
+ 			}
+ 		}
+ 
+-		public async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError {
++		public async void recreate_injectee_thread_with_token (uint pid, uint id, uint token,
++				Cancellable? cancellable) throws Error, IOError {
+ 			var helper = obtain_for_injectee_id (id);
+ 			try {
+-				yield helper.recreate_injectee_thread (pid, id, cancellable);
++				yield helper.recreate_injectee_thread_with_token (pid, id, token, cancellable);
+ 			} catch (GLib.Error e) {
+ 				throw_dbus_error (e);
+ 			}
+ 		}
+ 
++		public async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError {
++			throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
++		}
++
+ 		private LinuxHelper obtain_for_injectee_id (uint id) throws Error, IOError {
+ 			var helper = injectee_ids[id];
+ 			if (helper == null)
+@@ -614,14 +619,19 @@ namespace Frida {
+ 			}
+ 		}
+ 
+-		public async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError {
++		public async void recreate_injectee_thread_with_token (uint pid, uint id, uint token,
++				Cancellable? cancellable) throws Error, IOError {
+ 			try {
+-				yield proxy.recreate_injectee_thread (pid, id, cancellable);
++				yield proxy.recreate_injectee_thread_with_token (pid, id, token, cancellable);
+ 			} catch (GLib.Error e) {
+ 				throw_dbus_error (e);
+ 			}
+ 		}
+ 
++		public async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError {
++			throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
++		}
++
+ 		private void on_output (uint pid, int fd, uint8[] data) {
+ 			output (pid, fd, data);
+ 		}
+diff --git a/src/linux/frida-helper-service.vala b/src/linux/frida-helper-service.vala
+index b05a7b7..6d50231 100644
+--- a/src/linux/frida-helper-service.vala
++++ b/src/linux/frida-helper-service.vala
+@@ -181,8 +181,13 @@ namespace Frida {
+ 			yield backend.demonitor_and_clone_injectee_state (id, clone_id, features, cancellable);
+ 		}
+ 
++		public async void recreate_injectee_thread_with_token (uint pid, uint id, uint token,
++				Cancellable? cancellable) throws Error, IOError {
++			yield backend.recreate_injectee_thread_with_token (pid, id, token, cancellable);
++		}
++
+ 		public async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError {
+-			yield backend.recreate_injectee_thread (pid, id, cancellable);
++			throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
+ 		}
+ 
+ 		private void on_backend_output (uint pid, int fd, uint8[] data) {
+diff --git a/src/linux/frida-helper-types.vala b/src/linux/frida-helper-types.vala
+index 86609b2..5c83b9a 100644
+--- a/src/linux/frida-helper-types.vala
++++ b/src/linux/frida-helper-types.vala
+@@ -23,6 +23,8 @@ namespace Frida {
+ 		public abstract async void demonitor_and_clone_injectee_state (uint id, uint clone_id, AgentFeatures features,
+ 			Cancellable? cancellable) throws Error, IOError;
+ 		public abstract async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError;
++		public abstract async void recreate_injectee_thread_with_token (uint pid, uint id, uint token,
++			Cancellable? cancellable) throws Error, IOError;
+ 	}
+ 
+ 	[Flags]
+@@ -69,6 +71,8 @@ namespace Frida {
+ 		public abstract async void demonitor_and_clone_injectee_state (uint id, uint clone_id, AgentFeatures features,
+ 			Cancellable? cancellable) throws GLib.Error;
+ 		public abstract async void recreate_injectee_thread (uint pid, uint id, Cancellable? cancellable) throws GLib.Error;
++		public abstract async void recreate_injectee_thread_with_token (uint pid, uint id, uint token,
++			Cancellable? cancellable) throws GLib.Error;
+ 	}
+ 
+ 	public struct PathTemplate {
+diff --git a/src/linux/helpers/bootstrapper.c b/src/linux/helpers/bootstrapper.c
+index 6833774..62f85d6 100644
+--- a/src/linux/helpers/bootstrapper.c
++++ b/src/linux/helpers/bootstrapper.c
+@@ -198,7 +198,7 @@ frida_resolve_libc_apis (const FridaProcessLayout * layout, FridaLibcApi * libc)
+   memset (libc, 0, sizeof (FridaLibcApi));
+   libc->dlopen_flags = RTLD_LAZY;
+ 
+-  ctx.total_missing = 17;
++  ctx.total_missing = 18;
+   if (layout->rtld_flavor == FRIDA_RTLD_ANDROID)
+     ctx.total_missing -= 4;
+   ctx.rtld_flavor = layout->rtld_flavor;
+@@ -212,20 +212,31 @@ frida_resolve_libc_apis (const FridaProcessLayout * layout, FridaLibcApi * libc)
+     ctx.total_missing--;
+   }
+ 
+-  if (ctx.total_missing == 2 &&
+-      libc->pthread_create == NULL &&
+-      libc->pthread_detach == NULL)
++  if (ctx.total_missing > 0 && libc->dlopen != NULL &&
++      (libc->pthread_create == NULL || libc->pthread_detach == NULL || libc->pthread_self == NULL))
+   {
+     const void * pretend_caller_addr = libc->close;
+     void * libpthread = libc->dlopen ("libpthread.so.0", libc->dlopen_flags, pretend_caller_addr);
+     if (libpthread != NULL)
+     {
+-      libc->pthread_create = libc->dlsym (libpthread, "pthread_create", pretend_caller_addr);
+-      if (libc->pthread_create != NULL)
+-        ctx.total_missing--;
+-      libc->pthread_detach = libc->dlsym (libpthread, "pthread_detach", pretend_caller_addr);
+-      if (libc->pthread_detach != NULL)
+-        ctx.total_missing--;
++      if (libc->pthread_create == NULL)
++      {
++        libc->pthread_create = libc->dlsym (libpthread, "pthread_create", pretend_caller_addr);
++        if (libc->pthread_create != NULL)
++          ctx.total_missing--;
++      }
++      if (libc->pthread_detach == NULL)
++      {
++        libc->pthread_detach = libc->dlsym (libpthread, "pthread_detach", pretend_caller_addr);
++        if (libc->pthread_detach != NULL)
++          ctx.total_missing--;
++      }
++      if (libc->pthread_self == NULL)
++      {
++        libc->pthread_self = libc->dlsym (libpthread, "pthread_self", pretend_caller_addr);
++        if (libc->pthread_self != NULL)
++          ctx.total_missing--;
++      }
+     }
+   }
+ 
+@@ -284,6 +295,7 @@ frida_collect_libc_symbol (const FridaElfExportDetails * details, void * user_da
+ 
+   FRIDA_TRY_COLLECT (pthread_create)
+   FRIDA_TRY_COLLECT (pthread_detach)
++  FRIDA_TRY_COLLECT (pthread_self)
+ 
+   if (ctx->rtld_flavor != FRIDA_RTLD_ANDROID)
+   {
+diff --git a/src/linux/helpers/inject-context.h b/src/linux/helpers/inject-context.h
+index b44f06c..12dcadc 100644
+--- a/src/linux/helpers/inject-context.h
++++ b/src/linux/helpers/inject-context.h
+@@ -86,6 +86,7 @@ struct _FridaLibcApi
+ 
+   int (* pthread_create) (pthread_t * thread, const pthread_attr_t * attr, void * (* start_routine) (void *), void * arg);
+   int (* pthread_detach) (pthread_t thread);
++  pthread_t (* pthread_self) (void);
+ 
+   void * (* dlopen) (const char * filename, int flags, const void * caller_addr);
+   int dlopen_flags;
+diff --git a/src/linux/helpers/loader.c b/src/linux/helpers/loader.c
+index 032232e..f3ed6ca 100644
+--- a/src/linux/helpers/loader.c
++++ b/src/linux/helpers/loader.c
+@@ -29,6 +29,7 @@ struct _FridaLinuxInjectorState
+ {
+   int frida_ctrlfd;
+   int agent_ctrlfd;
++  uint32_t recovery_token;
+ };
+ 
+ union _FridaControlMessage
+@@ -37,6 +38,15 @@ union _FridaControlMessage
+   uint8_t storage[CMSG_SPACE (sizeof (int))];
+ };
+ 
++/* Owned by exactly one pthread. No late launch reads mutable canonical
++ * control descriptors, fallback address, token, or worker identity. */
++typedef struct {
++  FridaLoaderContext context;
++  FridaLoaderContext * canonical;
++  uint32_t token;
++  char fallback_address[sizeof (((struct sockaddr_un *) 0)->sun_path)];
++} FridaLoaderLaunch;
++
+ static void * frida_main (void * user_data);
+ 
+ static int frida_connect (const char * address, const FridaLibcApi * libc);
+@@ -59,23 +69,44 @@ static pid_t frida_gettid (void);
+ __attribute__ ((section (".text.entrypoint")))
+ __attribute__ ((visibility ("default")))
+ void
+-frida_load (FridaLoaderContext * ctx)
++frida_load (FridaLoaderContext * ctx, uint32_t recovery_token)
+ {
+-  ctx->libc->pthread_create (&ctx->worker, NULL, frida_main, ctx);
++  const FridaLibcApi * libc = ctx->libc;
++  FridaLoaderLaunch * launch;
++  size_t i;
++
++  launch = libc->mmap (NULL, sizeof (FridaLoaderLaunch), PROT_READ | PROT_WRITE,
++      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  if (launch == MAP_FAILED)
++    return;
++
++  launch->context = *ctx;
++  launch->canonical = ctx;
++  launch->token = recovery_token;
++  for (i = 0; i + 1 < sizeof (launch->fallback_address) && ctx->fallback_address[i] != '\0'; i++)
++    launch->fallback_address[i] = ctx->fallback_address[i];
++  launch->fallback_address[i] = '\0';
++  launch->context.fallback_address = launch->fallback_address;
++
++  if (libc->pthread_create (&launch->context.worker, NULL, frida_main, launch) != 0)
++    libc->munmap (launch, sizeof (FridaLoaderLaunch));
+ }
+ 
+ static void *
+ frida_main (void * user_data)
+ {
+-  FridaLoaderContext * ctx = user_data;
++  FridaLoaderLaunch * launch = user_data;
++  FridaLoaderContext * ctx = &launch->context;
+   const FridaLibcApi * libc = ctx->libc;
++  pthread_t worker = libc->pthread_self ();
+   pid_t thread_id;
+   FridaUnloadPolicy unload_policy;
+   int ctrlfd_for_peer, ctrlfd, agent_codefd, agent_ctrlfd;
+   FridaLinuxInjectorState injector_state;
+ 
+   thread_id = frida_gettid ();
+-  unload_policy = FRIDA_UNLOAD_POLICY_IMMEDIATE;
++  /* Before an accepted resume, uncertainty must not unload a live Agent. */
++  unload_policy = launch->token != 0 ? FRIDA_UNLOAD_POLICY_RESIDENT : FRIDA_UNLOAD_POLICY_IMMEDIATE;
+   ctrlfd = -1;
+   agent_codefd = -1;
+   agent_ctrlfd = -1;
+@@ -134,6 +165,9 @@ frida_main (void * user_data)
+     ctx->agent_entrypoint_impl = libc->dlsym (ctx->agent_handle, ctx->agent_entrypoint, pretend_caller_addr);
+     if (ctx->agent_entrypoint_impl == NULL)
+       goto dlsym_failed;
++
++    launch->canonical->agent_handle = ctx->agent_handle;
++    launch->canonical->agent_entrypoint_impl = ctx->agent_entrypoint_impl;
+   }
+ 
+   agent_ctrlfd = frida_receive_fd (ctrlfd, libc);
+@@ -147,6 +181,7 @@ frida_main (void * user_data)
+ 
+   injector_state.frida_ctrlfd = ctrlfd;
+   injector_state.agent_ctrlfd = agent_ctrlfd;
++  injector_state.recovery_token = launch->token;
+ 
+   ctx->agent_entrypoint_impl (ctx->agent_data, &unload_policy, &injector_state);
+ 
+@@ -177,7 +212,7 @@ beach:
+       libc->dlclose (ctx->agent_handle);
+ 
+     if (unload_policy != FRIDA_UNLOAD_POLICY_DEFERRED)
+-      libc->pthread_detach (ctx->worker);
++      libc->pthread_detach (worker);
+ 
+     if (agent_ctrlfd != -1)
+       libc->close (agent_ctrlfd);
+@@ -191,6 +226,8 @@ beach:
+       libc->close (ctrlfd);
+     }
+ 
++    libc->munmap (launch, sizeof (FridaLoaderLaunch));
++
+     return NULL;
+   }
+ }
+diff --git a/src/linux/linjector.vala b/src/linux/linjector.vala
+index 5671438..c48040e 100644
+--- a/src/linux/linjector.vala
++++ b/src/linux/linjector.vala
+@@ -133,8 +133,13 @@ namespace Frida {
+ 			return clone_id;
+ 		}
+ 
++		internal async void recreate_thread_with_token (uint pid, uint id, uint token, Cancellable? cancellable)
++				throws Error, IOError {
++			yield helper.recreate_injectee_thread_with_token (pid, id, token, cancellable);
++		}
++
+ 		public async void recreate_thread (uint pid, uint id, Cancellable? cancellable) throws Error, IOError {
+-			yield helper.recreate_injectee_thread (pid, id, cancellable);
++			throw new Error.NOT_SUPPORTED ("Legacy thread recreation requires an explicit recovery token");
+ 		}
+ 
+ 		public bool any_still_injected () {

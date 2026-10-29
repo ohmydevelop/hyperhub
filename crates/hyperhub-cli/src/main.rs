@@ -23,9 +23,11 @@ use zeroize::Zeroizing;
 compile_error!("embedded-agent and external-runtime are mutually exclusive");
 
 mod agent_runtime;
+mod attachment;
 mod chat;
 mod clipboard;
 mod config_cli;
+mod config_persistence;
 mod config_semantics;
 mod config_tui;
 mod forward_cleanup;
@@ -51,6 +53,7 @@ struct ServeConfig {
     action: ServeAction,
     admin_password_file: Option<PathBuf>,
     password_stdin: bool,
+    successor_stdin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +92,7 @@ impl ServeOutput {
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
-            .append(true)
+            .write(true)
             .open(path)
             .map_err(|error| format!("cannot open terminal output {}: {error}", path.display()))?;
         Ok(Self(Some(file)))
@@ -108,18 +111,29 @@ impl ServeOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
+    Attachment(attachment::Command),
     Run(RunConfig),
+    #[cfg(target_os = "linux")]
+    OwnedRunWorker {
+        run: RunConfig,
+        fd: i32,
+    },
     Serve(ServeConfig),
     Start(lifecycle::StartConfig),
     Stop,
     Restart(lifecycle::StartConfig),
     Upgrade,
-    UpgradeAction { action: String, id: Option<String> },
+    UpgradeAction {
+        action: String,
+        id: Option<String>,
+    },
     ForwardWorker,
     ForwardCacheCleanup,
     ExportUpgradeBundle(PathBuf),
     InstallUpgrade(PathBuf),
-    Status { json: bool },
+    Status {
+        json: bool,
+    },
     Logs(lifecycle::LogsConfig),
     AuthClear,
     Chat(chat::ChatConfig),
@@ -159,6 +173,7 @@ fn main() {
 
 fn execute(command: Command) -> Result<i32, String> {
     match command {
+        Command::Attachment(command) => attachment::run(command),
         Command::Help => {
             print_usage();
             Ok(0)
@@ -205,11 +220,42 @@ fn execute(command: Command) -> Result<i32, String> {
         Command::Chat(config) => chat::run(config),
         Command::ConfigCli(command) => config_cli::run(command),
         Command::Skill => skill_installer::print_embedded_skill(),
-        Command::Run(run) => run_target(run),
+        Command::Run(run) => {
+            #[cfg(target_os = "linux")]
+            if !run.dry_run {
+                return attachment::spawn_worker(&run);
+            }
+            run_target(run)
+        }
+        #[cfg(target_os = "linux")]
+        Command::OwnedRunWorker { run, fd } => attachment::run_worker(run, fd),
     }
 }
 
 fn serve(run: ServeConfig) -> Result<i32, String> {
+    let mut prepared_output = None;
+    let mut successor = if run.successor_stdin {
+        let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        Some(
+            runtime.block_on(hyperhub_core::successor::receive_from_parent(|path| {
+                let keyring = password::load_runtime_keyring()?;
+                let unlocked =
+                    hyperhub_core::config_store::load_encrypted_with_keyring(path, &keyring)
+                        .map_err(|e| e.to_string())?;
+                // This closure runs before the child's state ACK. Keep this
+                // exact handle for publication, so path/open failures leave
+                // the original Core alive rather than failing after commit.
+                let output_path = run
+                    .output
+                    .as_deref()
+                    .ok_or("successor output path is missing")?;
+                prepared_output = Some(ServeOutput::open(Some(output_path))?);
+                Ok(unlocked)
+            }))?,
+        )
+    } else {
+        None
+    };
     let path = default_config_path().map_err(|error| error.to_string())?;
     if matches!(run.action, ServeAction::Import { .. }) && serve_is_running() {
         return Err("Serve 正在运行；请停止 Serve 后再导入配置".into());
@@ -279,22 +325,37 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         };
         refresh_runtime_key(&path, admin_password.as_bytes())?
     };
+    let startup_directory = hyperhub_core::attachments::configuration_attachment_directory(&path)?;
+    let startup_guard = hyperhub_core::attachments::OperationGuard::acquire(&startup_directory)?;
     let unlocked =
         load_encrypted_with_keyring(&path, &keyring).map_err(|error| error.to_string())?;
+    hyperhub_core::attachments::validate_configuration_admission(
+        &startup_directory,
+        &unlocked.config,
+        &startup_guard,
+    )?;
+    let configuration_keyring = keyring.clone();
     config_store::save_redacted_json(&path, &unlocked.config).map_err(|error| error.to_string())?;
     let debug = run.debug || unlocked.config.debug;
     let config = Arc::new(unlocked.config);
-    let mut output = ServeOutput::open(run.output.as_deref())?;
+    let mut output = match prepared_output.take() {
+        Some(output) => output,
+        None => ServeOutput::open(run.output.as_deref())?,
+    };
     let session_auth_key = unlocked.session_auth_key.clone();
     let api_key = password::acquire_api_key()?;
     let session_state_path = config_store::hyperhub_home()
         .map_err(|error| error.to_string())?
         .join("runtime/session-state.bin");
+    let approval_anchor = unlocked.approval_public_key;
+    let approval_generation = unlocked.approval_continuity.len() as u64;
+    let approval_continuity = unlocked.approval_continuity;
+    let approval_descriptor = unlocked.descriptor.clone();
     let sessions = SessionRegistry::new(unlocked.session_auth_key, unlocked.descriptor)
         .with_api_key(Zeroizing::new(api_key.as_bytes().to_vec()));
     let mut restored_sessions = None;
     let mut restored_session_state = None;
-    if session_state_path.is_file() {
+    if successor.is_none() && session_state_path.is_file() {
         match config_store::load_session_state(&session_state_path, session_auth_key.as_slice())
             .and_then(|bytes| {
                 serde_json::from_slice::<hyperhub_core::session::DurableSessionState>(&bytes)
@@ -364,6 +425,16 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         socks.runtime(),
         session_auth_key.clone(),
     )
+    .with_attachment_directory(hyperhub_core::attachments::directory()?)
+    .with_approval_anchor_generation(
+        &path,
+        &approval_descriptor,
+        approval_anchor,
+        approval_generation,
+    )?
+    .with_approval_continuity(approval_continuity)?
+    .with_configuration_store(path.clone(), configuration_keyring)?
+    .with_configuration_startup_guard(startup_guard)?
     .with_socks_listener(socks.listener_controller())
     .with_forced_debug(run.debug)
     .with_shutdown(shutdown)
@@ -386,6 +457,9 @@ fn serve(run: ServeConfig) -> Result<i32, String> {
         &std::env::current_exe().map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("cannot open release coordinator: {error}"))?;
+    if let Some(received) = successor.take() {
+        restored_session_state = Some(control.restore_successor(received)?);
+    }
     if let Some(snapshot) = restored_session_state {
         control
             .monitor_restored_sessions(&snapshot)
@@ -437,7 +511,9 @@ pub(crate) fn initialize_config_for_start(path: &Path, password: &[u8]) -> Resul
     config.apply_managed_audit_paths(path);
     config.environment = default_environment();
     config.validate().map_err(|error| error.to_string())?;
-    config_store::save_encrypted(path, &config, password).map_err(|error| error.to_string())?;
+    let keyring = ConfigKeyring::derive(password, config_store::new_descriptor())
+        .map_err(|error| error.to_string())?;
+    config_persistence::save(path, None, &config, &keyring, None, false)?;
     Ok(config)
 }
 
@@ -486,8 +562,9 @@ fn import_config(
             }
         })?;
     config.validate().map_err(|error| error.to_string())?;
-    config_store::save_encrypted(active_path, &config, local_password.as_bytes())
+    let keyring = ConfigKeyring::derive(local_password.as_bytes(), config_store::new_descriptor())
         .map_err(|error| error.to_string())?;
+    config_persistence::save(active_path, None, &config, &keyring, None, false)?;
     refresh_runtime_key(active_path, local_password.as_bytes())?;
     println!(
         "configuration imported from {} and encrypted at {}",
@@ -673,6 +750,15 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
             _ => return Err("HyperHub serve returned an invalid root protection response".into()),
         }
     }
+    let owned_attachment = attachment::prepare_owned_run(
+        backend,
+        &session_id,
+        &session_token,
+        &socks_address,
+        &tls_ca_pem,
+        agent_flags.observe,
+        sandbox.as_ref(),
+    )?;
     let environment_keys = environment
         .iter()
         .map(|variable| variable.name.clone())
@@ -728,6 +814,7 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
         return Ok(0);
     }
     env.extend(platform::backend_trust_environment(backend, &tls_ca_pem)?);
+    env.extend(attachment::owned_run_environment(&owned_attachment));
     let executable = target.to_string_lossy().into_owned();
     // 密码提示在 Windows Terminal/ConPTY 下可能遗留残缺控制台模式；
     // 在创建子进程前用提示前保存的模式强制恢复，确保目标继承正常输入状态。
@@ -766,6 +853,7 @@ fn run_target(run: RunConfig) -> Result<i32, String> {
                 ))
                 .map_err(|error| format!("cannot activate HyperHub session: {error}"))?;
             if matches!(response, ControlResponse::Ok) {
+                attachment::register_owned_run(&owned_attachment, root_pid)?;
                 session_activated.set(true);
                 Ok(true)
             } else {
@@ -819,6 +907,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     }
     match args[0].to_string_lossy().as_ref() {
         "-h" | "--help" | "help" => Ok(Command::Help),
+        action @ ("attach" | "detach" | "attachment-manager" | "owned-run-keeper") => attachment::parse(action, &args[1..]).map(Command::Attachment),
         "serve" => parse_serve(&args[1..]).map(Command::Serve),
         "start" => parse_start(&args[1..]).map(Command::Start),
         "stop" => {
@@ -869,6 +958,11 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                 Ok(Command::Doctor(Some(path.clone().into())))
             }
             _ => Err("doctor accepts only --target <exe>".into()),
+        },
+        #[cfg(target_os="linux")]
+        "owned-run-worker"=>{
+            let fd=args.get(1).and_then(|v|v.to_str()).and_then(|v|v.parse::<i32>().ok()).filter(|fd|*fd>=3).ok_or("private run worker requires an inherited status descriptor")?;
+            parse_run(&args[2..]).map(|run|Command::OwnedRunWorker{run,fd})
         },
         "run" => parse_run(&args[1..]).map(Command::Run),
         value => Err(format!(
@@ -963,6 +1057,7 @@ fn parse_serve(args: &[OsString]) -> Result<ServeConfig, String> {
     let mut debug = false;
     let mut admin_password_file = None;
     let mut password_stdin = false;
+    let mut successor_stdin = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].to_string_lossy().as_ref() {
@@ -989,9 +1084,13 @@ fn parse_serve(args: &[OsString]) -> Result<ServeConfig, String> {
                 return Err(removed_runtime_key_option(option));
             }
             "--password-stdin" => password_stdin = true,
+            "--successor-stdin" => successor_stdin = true,
             value => return Err(format!("unknown serve option '{value}'")),
         }
         index += 1;
+    }
+    if successor_stdin && (password_stdin || admin_password_file.is_some()) {
+        return Err("successor input cannot be combined with password input".into());
     }
     if password_stdin && admin_password_file.is_some() {
         return Err("--password-stdin conflicts with --admin-password-file".into());
@@ -1002,6 +1101,7 @@ fn parse_serve(args: &[OsString]) -> Result<ServeConfig, String> {
         action: ServeAction::Run,
         admin_password_file,
         password_stdin,
+        successor_stdin,
     })
 }
 
@@ -1043,6 +1143,7 @@ fn parse_config_command(args: &[OsString]) -> Result<Command, String> {
         action: ServeAction::Config,
         admin_password_file,
         password_stdin: false,
+        successor_stdin: false,
     }))
 }
 
@@ -1083,6 +1184,7 @@ fn parse_import(args: &[OsString]) -> Result<ServeConfig, String> {
         },
         admin_password_file,
         password_stdin: false,
+        successor_stdin: false,
     })
 }
 
@@ -1129,6 +1231,7 @@ fn parse_export(args: &[OsString]) -> Result<ServeConfig, String> {
         },
         admin_password_file: None,
         password_stdin: false,
+        successor_stdin: false,
     })
 }
 
@@ -1395,6 +1498,8 @@ server management:
   hyperhub serve ...                    run the gateway service directly
 
 target execution:
+  hyperhub attach <pid> [--scope process|tree] [--backend auto|ptrace|gum] create runtime approval
+  hyperhub detach <attachment-id>       request reversible detachment approval
   hyperhub run -- target [args...]  run a target inside HyperHub controls
 
 diagnostics:
@@ -1420,6 +1525,26 @@ mod tests {
     use super::*;
     fn os(value: &str) -> OsString {
         value.into()
+    }
+
+    #[test]
+    fn serve_output_creates_parent_replaces_old_content_and_keeps_each_line() {
+        let root = std::env::temp_dir().join(format!(
+            "hh-serve-output-{}-{}",
+            std::process::id(),
+            hyperhub_core::attachments::new_id()
+        ));
+        let path = root.join("nested").join("output.log");
+        let mut output = ServeOutput::open(Some(&path)).unwrap();
+        output.line("first").unwrap();
+        output.line("second").unwrap();
+        drop(output);
+        assert_eq!(std::fs::read(&path).unwrap(), b"first\nsecond\n");
+        let mut output = ServeOutput::open(Some(&path)).unwrap();
+        output.line("fresh").unwrap();
+        drop(output);
+        assert_eq!(std::fs::read(&path).unwrap(), b"fresh\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1480,6 +1605,7 @@ mod tests {
                 debug: false,
                 action: ServeAction::Run,
                 password_stdin: false,
+                successor_stdin: false,
                 ..
             })
         ));
@@ -1582,6 +1708,7 @@ mod tests {
         .is_err());
 
         let Command::ConfigCli(config_cli::Command::Approve {
+            request_id,
             password_file,
             editor,
         }) = parse_args(vec![
@@ -1595,8 +1722,21 @@ mod tests {
         else {
             panic!()
         };
+        assert_eq!(request_id, None);
         assert_eq!(password_file, Some("password.txt".into()));
         assert_eq!(editor, Some(PathBuf::from("review-editor")));
+        let id = "0123456789abcdef0123456789abcdef";
+        let Command::ConfigCli(config_cli::Command::Approve {
+            request_id,
+            password_file,
+            editor,
+        }) = parse_args(vec![os("approve"), os(id)]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(request_id.as_deref(), Some(id));
+        assert_eq!(password_file, None);
+        assert_eq!(editor, None);
         assert!(parse_args(vec![os("approve"), os("patch.json")]).is_err());
 
         let Command::Serve(import) = parse_args(vec![
@@ -1784,7 +1924,7 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(config_store::redacted_config_path(&path)).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

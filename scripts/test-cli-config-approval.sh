@@ -25,6 +25,7 @@ if "$hyperhub" status --json 2>/dev/null | grep -q '"state".*"running"'; then
 fi
 
 export HOME="$temporary/home"
+export HYPERHUB_HOME="$HOME/.hyperhub"
 export XDG_RUNTIME_DIR="$temporary/runtime"
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
 chmod 0700 "$XDG_RUNTIME_DIR"
@@ -340,7 +341,10 @@ live_transcript=skipped
 run_live_update_test() {
   "$hyperhub" start \
     >"$temporary/start.stdout" 2>"$temporary/start.stderr"
-  skill="$HOME/.agents/skills/hyperhub-cli"
+  skill="$HYPERHUB_HOME/skills/hyperhub-cli"
+  if [[ ! -d $skill ]]; then
+    skill="$HOME/.agents/skills/hyperhub-cli"
+  fi
   [[ -f $skill/SKILL.md ]]
   [[ -f $skill/agents/openai.yaml ]]
   python3 - "$skill/.hyperhub-skill.json" <<'PY'

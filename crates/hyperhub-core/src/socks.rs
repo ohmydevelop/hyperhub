@@ -157,9 +157,27 @@ impl SessionProxyAffinity {
     }
 }
 
-struct ListenerCommand {
+enum ListenerCommand {
+    Prepare {
+        address: SocketAddr,
+        response: oneshot::Sender<io::Result<PreparedSocksListener>>,
+    },
+    Commit {
+        prepared: PreparedSocksListener,
+        response: oneshot::Sender<io::Result<()>>,
+    },
+}
+
+pub(crate) struct PreparedSocksListener {
     address: SocketAddr,
-    response: oneshot::Sender<io::Result<()>>,
+    listener: Option<TcpListener>,
+    owner: Arc<RwLock<Option<SocketAddr>>>,
+}
+impl PreparedSocksListener {
+    #[cfg(test)]
+    pub(crate) fn address(&self) -> SocketAddr {
+        self.address
+    }
 }
 
 /// Controls the SOCKS5 addresses accepted by a running [`SocksService`].
@@ -178,6 +196,16 @@ impl SocksListenerController {
     }
 
     pub async fn ensure_listener(&self, address: &str) -> io::Result<()> {
+        let prepared = self.prepare_listener(address).await?;
+        self.commit_listener(prepared).await
+    }
+
+    /// The returned socket is bound but has no accept task and is not public.
+    /// Its owner drops it on a failed/cancelled configuration write.
+    pub(crate) async fn prepare_listener(
+        &self,
+        address: &str,
+    ) -> io::Result<PreparedSocksListener> {
         let address = address.parse::<SocketAddr>().map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -186,7 +214,7 @@ impl SocksListenerController {
         })?;
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ListenerCommand { address, response })
+            .send(ListenerCommand::Prepare { address, response })
             .await
             .map_err(|_| {
                 io::Error::new(
@@ -198,6 +226,31 @@ impl SocksListenerController {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "SOCKS5 listener service stopped before applying the update",
+            )
+        })?
+    }
+
+    pub(crate) async fn commit_listener(&self, prepared: PreparedSocksListener) -> io::Result<()> {
+        if !Arc::ptr_eq(&self.address, &prepared.owner) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prepared SOCKS listener belongs to another controller",
+            ));
+        }
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ListenerCommand::Commit { prepared, response })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "SOCKS5 listener service stopped before commit",
+                )
+            })?;
+        receiver.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "SOCKS5 listener commit reply was lost",
             )
         })?
     }
@@ -262,7 +315,7 @@ impl SocksService {
     }
 
     #[cfg(test)]
-    fn with_environment(
+    pub(crate) fn with_environment(
         config: Arc<Config>,
         sessions: SessionRegistry,
         environment_proxy: EnvironmentProxy,
@@ -400,23 +453,33 @@ impl SocksService {
                             "SOCKS5 listener controller stopped",
                         ));
                     };
-                    let result = if active_addresses.contains(&command.address) {
-                        Ok(())
-                    } else {
-                        match bind_listener(command.address).await {
-                            Ok(listener) => match listener.local_addr() {
-                                Ok(address) => {
-                                    active_addresses.insert(address);
-                                    self.spawn_listener(&mut listeners, listener);
-                                    let _ = self.set_bound_address(address);
-                                    Ok(())
-                                }
-                                Err(error) => Err(error),
-                            },
-                            Err(error) => Err(error),
+                    match command {
+                        ListenerCommand::Prepare { address, response } => {
+                            let result = if active_addresses.contains(&address) {
+                                Ok(PreparedSocksListener { address, listener: None, owner: self.bound_address.clone() })
+                            } else {
+                                bind_listener(address).await.and_then(|listener| {
+                                    let address = listener.local_addr()?;
+                                    Ok(PreparedSocksListener { address, listener: Some(listener), owner: self.bound_address.clone() })
+                                })
+                            };
+                            let _ = response.send(result);
                         }
-                    };
-                    let _ = command.response.send(result);
+                        ListenerCommand::Commit { prepared, response } => {
+                            let result = if !Arc::ptr_eq(&self.bound_address, &prepared.owner) {
+                                Err(io::Error::new(io::ErrorKind::InvalidInput, "prepared listener owner changed"))
+                            } else if let Some(listener) = prepared.listener {
+                                active_addresses.insert(prepared.address);
+                                self.spawn_listener(&mut listeners, listener);
+                                self.set_bound_address(prepared.address)
+                            } else if active_addresses.contains(&prepared.address) {
+                                self.set_bound_address(prepared.address)
+                            } else {
+                                Err(io::Error::new(io::ErrorKind::NotFound, "prepared existing listener is no longer available"))
+                            };
+                            let _ = response.send(result);
+                        }
+                    }
                 }
                 result = listeners.join_next() => {
                     return match result {
@@ -1515,6 +1578,44 @@ fn action_name(deny: bool, upstream: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::config::ListenerConfig;
+
+    #[tokio::test]
+    async fn prepared_listener_drop_does_not_publish_or_replace_old_listener() {
+        let mut config = Config::default();
+        config.listener.socks_listen = unused_loopback_address().await.to_string();
+        let service = SocksService::with_environment(
+            Arc::new(config),
+            SessionRegistry::default(),
+            EnvironmentProxy::default(),
+        )
+        .unwrap();
+        let controller = service.listener_controller();
+        let old_address = service.prepare_listener().await.unwrap();
+        let task = tokio::spawn(service.run());
+        let prepared = controller.prepare_listener("127.0.0.1:0").await.unwrap();
+        let reserved_address = prepared.address();
+        assert_eq!(controller.address(), Some(old_address));
+        assert!(
+            TcpListener::bind(reserved_address).await.is_err(),
+            "preparation must reserve the chosen address"
+        );
+        drop(prepared);
+        let reclaimed = TcpListener::bind(reserved_address).await.unwrap();
+        drop(reclaimed);
+        let mut old = TcpStream::connect(old_address).await.unwrap();
+        old.write_all(&[5, 1, 2]).await.unwrap();
+        let mut reply = [0; 2];
+        old.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 2]);
+        let prepared = controller.prepare_listener("127.0.0.1:0").await.unwrap();
+        let committed_address = prepared.address();
+        controller.commit_listener(prepared).await.unwrap();
+        assert_eq!(controller.address(), Some(committed_address));
+        TcpStream::connect(committed_address).await.unwrap();
+        TcpStream::connect(old_address).await.unwrap();
+        task.abort();
+        let _ = task.await;
+    }
 
     async fn unused_loopback_address() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

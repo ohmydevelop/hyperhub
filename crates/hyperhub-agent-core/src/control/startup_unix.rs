@@ -1,10 +1,10 @@
+use hyperhub_runtime::owned_ipc_fds::IpcStream;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::net::UnixStream;
+use std::os::fd::AsRawFd;
 use std::time::Instant;
 
 pub(crate) struct Stream {
-    stream: UnixStream,
+    stream: IpcStream,
     deadline: Option<Instant>,
 }
 
@@ -34,19 +34,9 @@ impl Stream {
         {
             address.sun_len = length as _;
         }
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let kind = libc::SOCK_STREAM;
-        let fd = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let stream = unsafe { UnixStream::from_raw_fd(fd) };
-        stream.set_nonblocking(true)?;
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let stream = IpcStream::socket()?;
+        stream.get()?.set_nonblocking(true)?;
+        let fd = stream.get()?.as_raw_fd();
         let connected = unsafe {
             libc::connect(
                 fd,
@@ -64,7 +54,7 @@ impl Stream {
                 return Err(error);
             }
             value.wait(libc::POLLOUT)?;
-            if let Some(error) = value.stream.take_error()? {
+            if let Some(error) = value.stream.get()?.take_error()? {
                 return Err(error);
             }
         }
@@ -91,15 +81,25 @@ impl Stream {
                         .saturating_add(1)
                         .min(i32::MAX as u128) as i32
                 }
+                None if crate::attachment::managed() => 100,
                 None => -1,
             };
             let mut descriptor = libc::pollfd {
-                fd: self.stream.as_raw_fd(),
+                fd: self.stream.get()?.as_raw_fd(),
                 events: event,
                 revents: 0,
             };
             match unsafe { libc::poll(&mut descriptor, 1, timeout) } {
                 count if count > 0 => return Ok(()),
+                0 if self.deadline.is_none() && crate::attachment::managed() => {
+                    if crate::attachment::stopping_background() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::ConnectionAborted,
+                            "attachment control retired",
+                        ));
+                    }
+                    continue;
+                }
                 0 => {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,

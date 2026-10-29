@@ -29,11 +29,17 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
     let plugin_id = plugin.id();
 
     registrar.root_store_after(plugin_id, CallbackCategory::Transform, |context, result| {
+        if !crate::attachment::enforcing() {
+            return Ok(HookDecision::Continue);
+        }
         context.store = *result;
         let store = unsafe { virtualize_root_store(*result) };
         Ok(HookDecision::Return(store))
     });
     registrar.cert_chain_before(plugin_id, CallbackCategory::Transform, |context| {
+        if !crate::attachment::enforcing() {
+            return Ok(HookDecision::Continue);
+        }
         let root_store = unsafe { hyperhub_root_store() };
         if root_store.is_null() {
             return Ok(HookDecision::Continue);
@@ -62,14 +68,18 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
     });
     registrar.cert_chain_after(plugin_id, CallbackCategory::Transform, |context, result| {
         context.result = *result;
+        let transformed = !context.collection.is_null();
         if !context.collection.is_null() {
             unsafe { CertCloseStore(context.collection, 0) };
             context.collection = null_mut();
         }
-        if context.result != 0 && !context.chain.is_null() && unsafe { !(*context.chain).is_null() }
+        if (crate::attachment::enforcing() || transformed)
+            && context.result != 0
+            && !context.chain.is_null()
+            && unsafe { !(*context.chain).is_null() }
         {
             unsafe { trust_hyperhub_root_only(*context.chain) };
-            if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+            if crate::attachment::legacy_debug() {
                 unsafe {
                     eprintln!(
                         "hyperhub-gum: CertGetCertificateChain trust=0x{:08x} hyperhub_root={}",
@@ -82,7 +92,8 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
         Ok(HookDecision::Continue)
     });
     registrar.cert_policy_after(plugin_id, CallbackCategory::Transform, |context, result| {
-        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() && !context.status.is_null() {
+        if !crate::attachment::enforcing(){return Ok(HookDecision::Continue);}
+        if crate::attachment::legacy_debug() && !context.status.is_null() {
             unsafe {
                 eprintln!(
                     "hyperhub-gum: CertVerifyCertificateChainPolicy error=0x{:08x} hyperhub_root={}",
@@ -106,12 +117,15 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
         Ok(HookDecision::Continue)
     });
     registrar.acquire_credentials_before(plugin_id, CallbackCategory::Transform, |context| {
+        if !crate::attachment::enforcing() {
+            return Ok(HookDecision::Continue);
+        }
         let root_store = unsafe { combined_root_store() };
         if context.auth_data.is_null() || root_store.is_null() || !context.package_is_schannel {
             return Ok(HookDecision::Continue);
         }
         let version = unsafe { *(context.auth_data as *const u32) };
-        if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+        if crate::attachment::legacy_debug() {
             eprintln!("hyperhub-gum: AcquireCredentialsHandle version={version}");
         }
         if version == SCHANNEL_CRED_VERSION {
@@ -130,10 +144,16 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
         Ok(HookDecision::Continue)
     });
     registrar.schannel_before(plugin_id, CallbackCategory::Observe, |context| {
+        if !crate::attachment::enforcing() && !context.compatibility {
+            return Ok(HookDecision::Continue);
+        }
         context.target = unsafe { target_for_context(context.old_context, context.target.take()) };
         Ok(HookDecision::Continue)
     });
     registrar.schannel_after(plugin_id, CallbackCategory::Control, |context, result| {
+        if !crate::attachment::enforcing() && !context.compatibility {
+            return Ok(HookDecision::Continue);
+        }
         context.result = *result;
         let active_context = if context.new_context.is_null() {
             context.old_context

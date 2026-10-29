@@ -176,7 +176,7 @@ impl PersistentFlow {
         }
     }
 
-    fn finish(&self, input: &mut impl Write, receiver: &mpsc::Receiver<String>, pid: u32) {
+    fn assert_open(&self, input: &mut impl Write, receiver: &mpsc::Receiver<String>, pid: u32) {
         writeln!(input, "stream-ping").unwrap();
         input.flush().unwrap();
         assert_eq!(
@@ -185,6 +185,10 @@ impl PersistentFlow {
         );
         assert!(!self.worker.exited(), "active old stream worker exited");
         assert!(self.cache.is_dir(), "active old stream cache was removed");
+    }
+
+    fn finish(&self, input: &mut impl Write, receiver: &mpsc::Receiver<String>, pid: u32) {
+        self.assert_open(input, receiver, pid);
         eprintln!(
             "RESTART_FLOW_SURVIVED target={pid} worker={} birth={} local={} cache={}",
             self.worker_pid,
@@ -240,7 +244,10 @@ impl Fixture {
             .stdin(Stdio::null());
         command
     }
-    fn output(&self, mut command: Command) -> Vec<u8> {
+    fn output(&self, command: Command) -> Vec<u8> {
+        self.output_expect_exit(command, 0)
+    }
+    fn output_expect_exit(&self, mut command: Command, expected_code: i32) -> Vec<u8> {
         let out = self.root.join("command.stdout");
         let err = self.root.join("command.stderr");
         command
@@ -259,9 +266,10 @@ impl Fixture {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        assert!(
-            status.success(),
-            "CLI failed {status}: {}",
+        assert_eq!(
+            status.code(),
+            Some(expected_code),
+            "CLI returned {status}, expected exit {expected_code}: {}",
             fs::read_to_string(err).unwrap()
         );
         fs::read(out).unwrap()
@@ -269,7 +277,14 @@ impl Fixture {
     fn success(&self, args: &[&str]) {
         let mut command = self.command();
         command.args(args);
-        self.output(command);
+        let output = self.output(command);
+        if args.first() == Some(&"restart") {
+            assert!(
+                String::from_utf8_lossy(&output).contains("serve replaced by successor (pid "),
+                "restart did not execute controlled child succession: {}",
+                String::from_utf8_lossy(&output)
+            );
+        }
     }
     fn status(&self) -> serde_json::Value {
         let mut command = self.command();
@@ -682,19 +697,25 @@ fn scenario(mode: &str, backend: Option<&str>) {
     let target = fixture
         .root
         .join(format!("restart-target{}", std::env::consts::EXE_SUFFIX));
-    let mut compiler = Command::new("rustc");
-    compiler
-        .arg("--edition=2021")
-        .arg(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/fixtures/restart_target.rs"),
-        )
-        .arg("-o")
-        .arg(&target);
-    fixture.output(compiler);
+    if let Some(prebuilt) = std::env::var_os("HYPERHUB_TEST_RESTART_TARGET") {
+        // Isolated execution guests can use this source fixture compiled on
+        // the build host. The Suite records its source and artifact digests.
+        fs::copy(prebuilt, &target).unwrap();
+    } else {
+        let mut compiler = Command::new("rustc");
+        compiler
+            .arg("--edition=2021")
+            .arg(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/restart_target.rs"),
+            )
+            .arg("-o")
+            .arg(&target);
+        fixture.output(compiler);
+    }
     let mut launcher = fixture.command();
     launcher.arg("run");
-    let target_mode = if matches!(mode, "outage" | "denied-outage") {
+    let target_mode = if matches!(mode, "outage" | "denied-outage" | "output-failure") {
         "child"
     } else {
         mode
@@ -850,7 +871,60 @@ fn scenario(mode: &str, backend: Option<&str>) {
             "orphan trigger was not observed"
         );
     }
-    let flow = (mode == "flow").then(|| PersistentFlow::open(&fixture, &mut input, &receiver, pid));
+    let flow = matches!(mode, "flow" | "output-failure")
+        .then(|| PersistentFlow::open(&fixture, &mut input, &receiver, pid));
+    if mode == "output-failure" {
+        let path = fixture.root.join("runtime").join("successor-output.log");
+        // A directory is deterministically unopenable as this output File on
+        // Windows and Unix, including test users with elevated permissions.
+        fs::create_dir(&path).unwrap();
+        let before = fixture.status()["pid"].as_u64().unwrap();
+        let mut command = fixture.command();
+        command.arg("restart");
+        let started = Instant::now();
+        fixture.output_expect_exit(command, 2);
+        let elapsed = started.elapsed();
+        for (source, destination) in [
+            ("command.stdout", "successor-output-failure.stdout"),
+            ("command.stderr", "successor-output-failure.stderr"),
+        ] {
+            fs::copy(fixture.root.join(source), fixture.root.join(destination)).unwrap();
+        }
+        assert!(
+            fs::read_to_string(fixture.root.join("serve.log"))
+                .unwrap()
+                .contains("cannot open terminal output"),
+            "failure did not reach the child's output preflight"
+        );
+        let after = fixture.status();
+        assert_eq!(
+            after["pid"].as_u64(),
+            Some(before),
+            "output preparation failure stopped the original Core: {after}"
+        );
+        assert!(
+            member(&after, pid),
+            "target session lost after rejected successor: {after}"
+        );
+        assert!(
+            !fixture.target.as_ref().unwrap().exited(),
+            "target exited during rejected successor preparation"
+        );
+        probe(&mut input, &receiver, pid, "allow");
+        let flow = flow.as_ref().unwrap();
+        flow.assert_open(&mut input, &receiver, pid);
+        let evidence = serde_json::json!({"scenario":"successor_output_preflight_rejection","expected_cli_exit":2,
+            "elapsed_ms":elapsed.as_millis(),"old_core_pid":before,"core_pid_after_rejection":after["pid"],"target_pid":pid,"target_alive":true,
+            "worker_pid":flow.worker_pid,"worker_birth":flow.worker_birth,"same_stream_local":flow.local,"policy_probe":"blocked=deny allowed=allow changed=allow"});
+        fs::write(
+            fixture.root.join("successor-output-failure.json"),
+            serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+        eprintln!("RESTART_OUTPUT_PREFLIGHT_METADATA {evidence}");
+        eprintln!("RESTART_OUTPUT_PREFLIGHT_REJECTED parent={before} target={pid} worker={} birth={} elapsed_ms={} same_stream=true admission_restored=true",flow.worker_pid,flow.worker_birth,elapsed.as_millis());
+        fs::remove_dir(&path).unwrap();
+    }
     fixture.success(&["restart"]);
     let restored = fixture.status();
     assert_ne!(restored["pid"].as_u64().unwrap(), initial_serve);
@@ -933,6 +1007,11 @@ fn restart_keeps_live_executor_and_command_progress() {
 #[ignore = "requires packaged CLI and native runtime; registered in platform Suites"]
 fn restart_preserves_tcp_stream_then_reclaims_old_worker_cache() {
     scenario("flow", None);
+}
+#[test]
+#[ignore = "requires packaged CLI and native runtime; registered in platform Suites"]
+fn successor_output_preflight_failure_keeps_parent_policy_and_same_tcp_stream_then_recovers() {
+    scenario("output-failure", None);
 }
 #[test]
 #[ignore = "requires packaged CLI and native runtime; registered in platform Suites"]

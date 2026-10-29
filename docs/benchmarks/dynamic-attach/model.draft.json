@@ -1,0 +1,1266 @@
+{
+  "schema_version": "1.1",
+  "target": "HyperHub dynamic attachment lifecycle",
+  "revision": "0.3.0-alpha.1 development draft before final source freeze",
+  "sources": [
+    {
+      "path": ".github/workflows/release.yml",
+      "sha256": "389664b86207d5cbd3d98bdd7f2ef828045061fa37e2c7d7d4a210eeffdc226b"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "718685ca937deb7e964290569a388dfc07576a41b8cba0576bbbbbe238b623c5"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "9a88ae7fa40d858654f67da1347cb85edfec4ba33444d9217a502acfb1dbc472"
+    },
+    {
+      "path": "crates/hyperhub-agent-core/src/attachment.rs",
+      "sha256": "61d16a998ae443c47ce934fa7a0088951463518eca94dd6fc6e05ab67c4ecd94"
+    },
+    {
+      "path": "crates/hyperhub-agent-core/src/sandbox/network.rs",
+      "sha256": "f608ca36f3277f5003e15d49ebbcb2a6a76797872308a8d143e434951f43a0d8"
+    },
+    {
+      "path": "crates/hyperhub-cli/src/attachment/owned_keeper.rs",
+      "sha256": "95cec04a6a47170052ed1480af08122c24da34d8cc02fb7f7d40be100104fc43"
+    },
+    {
+      "path": "crates/hyperhub-cli/src/attachment/terminal_replan.rs",
+      "sha256": "0e0a09250c24531a98496236b8168c8592854083556da0074d94f0a051626e0e"
+    },
+    {
+      "path": "crates/hyperhub-core/src/attachments/authority.rs",
+      "sha256": "8d23a18b0bdbb00db5f5841b3a4ba9aa026f22a55b85e091f678a6ce3532161c"
+    },
+    {
+      "path": "crates/hyperhub-core/src/attachments/capabilities.rs",
+      "sha256": "a3a58c0eb7213e76322c53345ac3e71fdeca39fcd2d9927f5eb8eeb58c2ff744"
+    },
+    {
+      "path": "crates/hyperhub-core/src/attachments/control.rs",
+      "sha256": "28eb206395043a1696c1a4c3ca49ea3f9767a11302a223a92353f40d0f6a02b2"
+    },
+    {
+      "path": "crates/hyperhub-core/src/attachments/manager.rs",
+      "sha256": "281845ff0e392c24f4b33c6a1caa22e51a311c22e61fe7c98e91b4914f01c96d"
+    },
+    {
+      "path": "crates/hyperhub-core/src/attachments/tests.rs",
+      "sha256": "8b540d0f2e8faba5a4ddae8bd9bce5da7c0b61727be0920df2b276ac78f959d1"
+    },
+    {
+      "path": "crates/hyperhub-runtime/src/attachment/proof_tests.rs",
+      "sha256": "9dc55bac261095bf81d64ef3f5512d44cc634a7d456fc901c59b350bc7ec0061"
+    },
+    {
+      "path": "docs/benchmarks/dynamic-attach/AUTHORITY-ANCHOR-DESIGN.draft.md",
+      "sha256": "d3236fb646cca0a281c397d82a0dff3e58ed7e5ef3e05cd8588fb5a6b5e6be31"
+    },
+    {
+      "path": "docs/benchmarks/dynamic-attach/DETACHED-ALIAS-DNS-DESIGN.draft.md",
+      "sha256": "7a84c028ce7d9ac859745f9332a9b3805ec17553a741bf2cc5e9e3aa9cfc835c"
+    },
+    {
+      "path": "docs/dynamic-attach.md",
+      "sha256": "34360634b6e231ab2c72c5517f9d0751833b43d740c731ba2e0799cb272ecc0a"
+    },
+    {
+      "path": "scripts/benchmark-linux-backends.sh",
+      "sha256": "8f32c183ed7550660621733798b90a26a6e86a2d0f4d0e4bbb76f109f4c01f16"
+    },
+    {
+      "path": "scripts/install.ps1",
+      "sha256": "c8c07adde5d6656eba673892280c070ce2221f8fae091ea1f1490b18923ff1ff"
+    },
+    {
+      "path": "scripts/install.sh",
+      "sha256": "81b88b2ab890e33372dcb2b6d87a92f0688d286290711a26d0db9ad265a35f62"
+    },
+    {
+      "path": "scripts/test-development-install.ps1",
+      "sha256": "e27d292c8846ff2a2dfea25f2bd1bffb2d5822d3f10702dcf3a4e8655b8f3c04"
+    },
+    {
+      "path": "scripts/test-development-release.py",
+      "sha256": "9fe5b56b9da0eb960347fc1205ea97254b27b0af60725cd09c55e5f757606730"
+    },
+    {
+      "path": "scripts/test-dynamic-attach-windows.py",
+      "sha256": "61e5381b020eea734736027809125545758a403ee0ab4c0322245b18d292a634"
+    },
+    {
+      "path": "scripts/test-dynamic-attach.py",
+      "sha256": "e5863b560950f6f9a9084d58cf83dfef4ff4a815bcde84811cf892630e2c43eb"
+    },
+    {
+      "path": "scripts/test-windows-hooks.ps1",
+      "sha256": "2527193afa883def9bfbbdb18646d66164f85c17359a54d9574d6b111e928798"
+    },
+    {
+      "path": "scripts/windows_conpty.py",
+      "sha256": "d3031c44fdcac839bb07466e726e64c9703126809739aad975bef923eeda89f1"
+    },
+    {
+      "path": "tests/fixtures/dynamic_attach_legacy_marker.rs",
+      "sha256": "a47614ab8859bbe05f39dc7115febb2378e74ff9ed830b61f9e32d19d48feee6"
+    },
+    {
+      "path": "tests/fixtures/dynamic_attach_target.c",
+      "sha256": "3b3dca010046d905e84ed4c37546c50cb5dcf9b273e0bd0b9c2a56453a883024"
+    },
+    {
+      "path": "tests/fixtures/dynamic_attach_windows.rs",
+      "sha256": "15fb63c2337e54df0f8ecb5da0e7c35b5e8df2433a74aa8b9f1aff9b36326273"
+    }
+  ],
+  "review": {
+    "kind": "independent",
+    "reviewer": "Codex attach_core subagent reviewing primary-agent draft",
+    "notes": "Independent review against native drivers, actual fixture assertions and accepted PLAN.md. All original nine obligations and six backend/origin combinations remain required. Explicit sub-boundaries expose missing FAKE-IP, fault, resource, terminal, unload and throughput coverage. Mutable source snapshot is a draft, not the release freeze; no execution or valid measurements are inferred. Required trust-root/cold-start/history-integrity and Windows MSYS/Cygwin fork boundaries are explicitly planned; no native exec equivalence is assumed."
+  },
+  "obligations": [
+    {
+      "id": "O-approval",
+      "kind": "correctness",
+      "property": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-core/src/attachments/authority.rs",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.",
+      "fault_ids": [
+        "F01",
+        "F03",
+        "F04",
+        "F06",
+        "F11",
+        "F13",
+        "F15"
+      ],
+      "trigger_dimensions": [
+        "identity",
+        "state",
+        "time",
+        "version",
+        "commit"
+      ],
+      "allowed_outcomes": [
+        "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-approval-proposal-linux-ptrace",
+          "description": "Linux ptrace attach and detach proposals have no policy side effects before approval."
+        },
+        {
+          "id": "B-approval-proposal-linux-gum",
+          "description": "Linux Gum attach and detach proposals have no policy side effects before approval."
+        },
+        {
+          "id": "B-approval-proposal-windows-gum",
+          "description": "Windows Gum attach and detach proposals have no policy side effects before approval."
+        },
+        {
+          "id": "B-approval-signed-bindings",
+          "description": "Reject altered process identity, scope, policy, capabilities, executor, Bootstrap, Host identity and recovery bindings."
+        },
+        {
+          "id": "B-approval-fresh-single-use",
+          "description": "Reject future, exactly expired and expired grants; consume each nonce once for its OS claimant."
+        },
+        {
+          "id": "B-approval-api-only",
+          "description": "Runtime envelope/API authority cannot derive the administrator signing key or claim implicit external run ownership."
+        },
+        {
+          "id": "B-approval-rotation-envelopes",
+          "description": "Password/config-generation changes immediately invalidate old signers, preserve consumed audit and retain encrypted recovery readability."
+        },
+        {
+          "id": "B-approval-host-peer-linux",
+          "description": "Linux Host OS peer authentication rejects wrong server PID before credentials/proofs are sent."
+        },
+        {
+          "id": "B-approval-host-peer-windows",
+          "description": "Windows named-pipe OS peer authentication rejects wrong server PID before credentials/proofs are sent."
+        },
+        {
+          "id": "B-approval-capability-preflight",
+          "description": "Refuse configured TLS/SSH interception unsupported by existing contexts without weakening configuration."
+        },
+        {
+          "id": "B-approval-core-pinned-root",
+          "description": "Core verification uses an enrolled in-memory approval key; ordinary verifier-file replacement cannot register or change the root."
+        },
+        {
+          "id": "B-approval-host-pinned-root",
+          "description": "Every Host pins its initial approval root; no command or ordinary file may lazily choose a different first root."
+        },
+        {
+          "id": "B-approval-cold-unenrolled",
+          "description": "API-only cold startup stays Unenrolled for external lifecycle mutation while ordinary Serve/policy/run startup remains usable."
+        },
+        {
+          "id": "B-approval-trusted-enrollment",
+          "description": "First real administrator approve completes challenge-bound registration via authenticated trusted CLI code, then the exact original request without another password prompt."
+        },
+        {
+          "id": "B-approval-rotation-chain",
+          "description": "Password changes require contiguous instance/generation-bound old-key-signed rotation records; missing/reordered/backward or untrusted chains never replace a pinned root."
+        },
+        {
+          "id": "B-approval-accepted-history-integrity",
+          "description": "Consumed/completion history must be rooted in trusted accepted-operation state; an ordinary writable ledger key snapshot cannot alone authorize continuation."
+        },
+        {
+          "id": "B-approval-terminal-slot-renewal",
+          "description": "A Draining/resident slot that becomes terminal during human review receives fresh request/attachment/session/token epochs without changing target/scope/backend/policy or repeating approval; clients follow the actual returned id."
+        }
+      ]
+    },
+    {
+      "id": "O-tree",
+      "kind": "correctness",
+      "property": "Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-agent-core/src/attachment.rs",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit.",
+      "fault_ids": [
+        "F01",
+        "F04",
+        "F05",
+        "F13"
+      ],
+      "trigger_dimensions": [
+        "identity",
+        "concurrency",
+        "state"
+      ],
+      "allowed_outcomes": [
+        "Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-tree-linux-ptrace-tree",
+          "description": "Linux ptrace tree: deny root and preexisting/fork/exec descendants."
+        },
+        {
+          "id": "B-tree-linux-gum-tree",
+          "description": "Linux Gum tree: deny root and preexisting/fork/exec descendants."
+        },
+        {
+          "id": "B-tree-linux-ptrace-process",
+          "description": "Linux ptrace process: deny target, permit separate existing/future descendants."
+        },
+        {
+          "id": "B-tree-linux-gum-process",
+          "description": "Linux Gum process: deny target, permit separate existing/future descendants."
+        },
+        {
+          "id": "B-tree-windows-existing",
+          "description": "Hold a deterministic existing child alive before Windows attach; it must be denied after tree commit."
+        },
+        {
+          "id": "B-tree-windows-future",
+          "description": "Windows approved tree denies post-commit child exec and at least ten fresh native child reads."
+        },
+        {
+          "id": "B-tree-windows-creation-boundary",
+          "description": "Measure children alive or in-flight across the actual Windows commit boundary; no reset may hide post-commit allowed work."
+        },
+        {
+          "id": "B-tree-threads-boundary",
+          "description": "Already running target threads and concurrent thread creation cannot escape at attach/detach boundaries on every backend."
+        },
+        {
+          "id": "B-tree-rootexit-linux-ptrace",
+          "description": "Owned Linux ptrace run returns root exit 37 promptly while its survivor remains managed and can be detached."
+        },
+        {
+          "id": "B-tree-rootexit-linux-gum",
+          "description": "Owned Linux Gum run returns root exit 37 promptly while its survivor remains managed and can be detached."
+        },
+        {
+          "id": "B-tree-rootexit-windows",
+          "description": "Windows keeper preserves descendant enforcement and detach after original root exit."
+        },
+        {
+          "id": "B-tree-windows-msys-fork",
+          "description": "Native Windows lifecycle and approved tree cover MSYS/Cygwin fork/clone shared-memory rebuild and metadata/Host identity rebinding; native Rust exec fixtures do not cover this ABI boundary."
+        },
+        {
+          "id": "B-tree-detach-epoch-inheritance",
+          "description": "fork/clone/rebuild descendants preserve the accepted detach cutoff and cannot replay an older/equal-time Attach to reactivate policy."
+        }
+      ]
+    },
+    {
+      "id": "O-continuity",
+      "kind": "correctness",
+      "property": "Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "tests/fixtures/dynamic_attach_target.c",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.",
+      "fault_ids": [
+        "F01",
+        "F04",
+        "F05",
+        "F06",
+        "F09",
+        "F14"
+      ],
+      "trigger_dimensions": [
+        "state",
+        "concurrency",
+        "environment",
+        "dependency"
+      ],
+      "allowed_outcomes": [
+        "Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-continuity-linux-ptrace-io",
+          "description": "Linux ptrace preserves existing/new TCP payload, blocked read result and preopened/nonblocking socket flags."
+        },
+        {
+          "id": "B-continuity-linux-gum-io",
+          "description": "Linux Gum preserves existing/new TCP payload, blocked read result and preopened/nonblocking socket flags."
+        },
+        {
+          "id": "B-continuity-windows-io",
+          "description": "Windows Gum preserves existing/new TCP payload and blocked original ReadFile result."
+        },
+        {
+          "id": "B-continuity-linux-ptrace-identity",
+          "description": "Linux ptrace preserves PID/cwd/stdio/env, explicit exec/spawn environment and original exit status."
+        },
+        {
+          "id": "B-continuity-linux-gum-identity",
+          "description": "Linux Gum preserves PID/cwd/stdio/env, explicit exec/spawn environment and original exit status."
+        },
+        {
+          "id": "B-continuity-windows-identity",
+          "description": "Windows Gum preserves PID/cwd/stdio/env and original exit status."
+        },
+        {
+          "id": "B-continuity-linux-ptrace-terminal",
+          "description": "Linux ptrace target with controlling PTY preserves termios and foreground terminal identity."
+        },
+        {
+          "id": "B-continuity-linux-gum-terminal",
+          "description": "Linux Gum target with controlling PTY preserves termios and foreground terminal identity."
+        },
+        {
+          "id": "B-continuity-windows-terminal",
+          "description": "Native Windows target terminal modes, foreground console and keyboard semantics survive lifecycle changes; an approval ConPTY alone is insufficient."
+        },
+        {
+          "id": "B-continuity-owned-wait",
+          "description": "Each backend run launcher keeps waiting after detach and returns original root status independently of persistent manager lifetime."
+        },
+        {
+          "id": "B-continuity-owned-ready-failure",
+          "description": "After authenticated Host READY, failed keeper creation/claim/control I/O never kills the target; retire only the exact created helper, preserve native recovery context and truthful owner."
+        }
+      ]
+    },
+    {
+      "id": "O-drain",
+      "kind": "correctness",
+      "property": "Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-agent-core/src/attachment.rs",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.",
+      "fault_ids": [
+        "F02",
+        "F04",
+        "F05",
+        "F07",
+        "F09",
+        "F13"
+      ],
+      "trigger_dimensions": [
+        "state",
+        "concurrency",
+        "resource",
+        "recovery"
+      ],
+      "allowed_outcomes": [
+        "Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-drain-linux-ptrace-blocked",
+          "description": "Linux ptrace detach preserves an outstanding original blocked read and nonblocking flags."
+        },
+        {
+          "id": "B-drain-linux-gum-blocked",
+          "description": "Linux Gum detach preserves an outstanding original blocked read and nonblocking flags."
+        },
+        {
+          "id": "B-drain-windows-blocked-trust",
+          "description": "Windows Gum remains loaded during blocked ReadFile and retained modified Schannel credential; unload only after explicit release."
+        },
+        {
+          "id": "B-drain-linux-ptrace-physical",
+          "description": "Independent OS TracerPid checks prove every covered live member is untraced before public Detached."
+        },
+        {
+          "id": "B-drain-linux-gum-physical",
+          "description": "Independent module/callback/cache evidence distinguishes Linux Gum resident compatibility from proven unload."
+        },
+        {
+          "id": "B-drain-windows-physical",
+          "description": "Independent native module enumeration proves all eligible live members are unloaded before public Detached; token/session revocation completes."
+        },
+        {
+          "id": "B-drain-completion-protocol",
+          "description": "Only exact physical-absence marker/pending phases and an accepted signed consumed operation can revoke session; rotation and lost ACK preserve idempotent completion."
+        }
+      ]
+    },
+    {
+      "id": "O-fake",
+      "kind": "correctness",
+      "property": "Previously cached FAKE-IP aliases remain usable across detach and reattach. Do not reassign an address to another destination while application caches may retain it.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-agent-core/src/sandbox/network.rs",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "Previously cached FAKE-IP aliases remain usable across detach and reattach. Do not reassign an address to another destination while application caches may retain it.",
+      "fault_ids": [
+        "F04",
+        "F07",
+        "F13"
+      ],
+      "trigger_dimensions": [
+        "state",
+        "identity",
+        "recovery"
+      ],
+      "allowed_outcomes": [
+        "Previously cached FAKE-IP aliases remain usable across detach and reattach. Do not reassign an address to another destination while application caches may retain it."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Previously cached FAKE-IP aliases remain usable across detach and reattach. Do not reassign an address to another destination while application caches may retain it.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-fake-linux-ptrace",
+          "description": "ObservedExternal cached addresses on linux-ptrace use the unchanged original native connect after Detach and match a genuine unmanaged same-sockaddr baseline, with no old gateway policy."
+        },
+        {
+          "id": "B-fake-linux-gum",
+          "description": "ObservedExternal cached addresses on linux-gum use the unchanged original native connect after Detach and match a genuine unmanaged same-sockaddr baseline, with no old gateway policy."
+        },
+        {
+          "id": "B-fake-windows-gum",
+          "description": "Cache a real HyperHub FAKE-IP before detach, connect through that exact cached alias after detach/reattach, and prove an additional destination never reuses it."
+        },
+        {
+          "id": "B-fake-linux-ptrace-nonreuse",
+          "description": "Allocate/observe another destination on linux-ptrace and prove an application-cached old alias is never reassigned across detach epochs or DNS TTL expiry."
+        },
+        {
+          "id": "B-fake-linux-gum-nonreuse",
+          "description": "Allocate/observe another destination on linux-gum and prove an application-cached old alias is never reassigned across detach epochs or DNS TTL expiry."
+        },
+        {
+          "id": "B-fake-linux-ptrace-issued",
+          "description": "Actual HyperHub-issued aliases on linux-ptrace preserve their hostname and use the target SDK original resolver/connect after Detach, without Core/Socks dependency."
+        },
+        {
+          "id": "B-fake-linux-gum-issued",
+          "description": "Actual HyperHub-issued aliases on linux-gum preserve their hostname and use the target SDK original resolver/connect after Detach, without Core/Socks dependency."
+        }
+      ]
+    },
+    {
+      "id": "O-recovery",
+      "kind": "correctness",
+      "property": "Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "crates/hyperhub-core/src/attachments/manager.rs",
+          "first": 1,
+          "last": 31
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+      "fault_ids": [
+        "F06",
+        "F09",
+        "F10",
+        "F11",
+        "F12",
+        "F16"
+      ],
+      "trigger_dimensions": [
+        "dependency",
+        "commit",
+        "recovery",
+        "state"
+      ],
+      "allowed_outcomes": [
+        "Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-recovery-manager-linux-ptrace",
+          "description": "Kill only the disposable authenticated ptrace manager, prove target survives and enforcement loss is truthful; fresh approval safely reseizes with no duplicate tracer."
+        },
+        {
+          "id": "B-recovery-manager-linux-gum",
+          "description": "Kill only the disposable Gum manager, prove target/allowed traffic survives; fresh approval reconnects exact compatible Host with no new injection."
+        },
+        {
+          "id": "B-recovery-manager-windows",
+          "description": "Kill only the authenticated disposable Windows manager; fresh approval reconnects exact resident Host and one native module."
+        },
+        {
+          "id": "B-recovery-serve-linux-ptrace",
+          "description": "Restart/lose Serve during active ptrace tree; cached policy, allowed streams and subsequent approved lifecycle remain valid."
+        },
+        {
+          "id": "B-recovery-serve-linux-gum",
+          "description": "Restart/lose Serve during active Gum tree; cached policy, allowed streams and subsequent approved lifecycle remain valid."
+        },
+        {
+          "id": "B-recovery-serve-windows",
+          "description": "Restart/lose Serve during active Windows tree; cached policy, allowed streams and subsequent approved lifecycle remain valid."
+        },
+        {
+          "id": "B-recovery-deadroot-cleanup-linux-ptrace",
+          "description": "After original root and manager exit, approve cleanup by id and detach live ptrace descendants without requiring dead-root inspection."
+        },
+        {
+          "id": "B-recovery-deadroot-cleanup-linux-gum",
+          "description": "After original root and manager exit, approve cleanup by id and reconnect/detach exact live Gum descendants without injection."
+        },
+        {
+          "id": "B-recovery-deadroot-cleanup-windows",
+          "description": "After original root and manager exit, approve cleanup by id and detach exact live Windows descendants."
+        },
+        {
+          "id": "B-recovery-tighten-before-reactivate",
+          "description": "Tighten a real deny policy while detached; the first covered operation after fresh approved reactivation must use the new policy synchronously."
+        },
+        {
+          "id": "B-recovery-committed-cleanup-protocol",
+          "description": "After completed revocation plus ACK loss and manager death, fresh approved Detach may perform exact historical-receipt cleanup without creating members; wrong identity/token/target and Attach are denied."
+        },
+        {
+          "id": "B-recovery-dirty-ptrace-refusal",
+          "description": "After ptrace manager loss with unproven virtual descriptor state, refuse unsafe recovery explicitly, keep target alive and do not silently seize or claim protection."
+        }
+      ]
+    },
+    {
+      "id": "O-resources",
+      "kind": "correctness",
+      "property": "At least 100 cycles and two hours of mixed activity per backend preserve semantics without continued native module, thread, FD or handle count growth after warmup.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "scripts/test-dynamic-attach.py",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "At least 100 cycles and two hours of mixed activity per backend preserve semantics without continued native module, thread, FD or handle count growth after warmup.",
+      "fault_ids": [
+        "F07",
+        "F08",
+        "F16"
+      ],
+      "trigger_dimensions": [
+        "resource",
+        "capacity",
+        "state",
+        "time"
+      ],
+      "allowed_outcomes": [
+        "At least 100 cycles and two hours of mixed activity per backend preserve semantics without continued native module, thread, FD or handle count growth after warmup."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "At least 100 cycles and two hours of mixed activity per backend preserve semantics without continued native module, thread, FD or handle count growth after warmup.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-resources-linux-ptrace",
+          "description": "Complete >=100 successful cycles AND >=7200 seconds of target mixed activity after readiness on linux-ptrace; after warmup track native modules, threads and FDs/handles without continued growth."
+        },
+        {
+          "id": "B-resources-linux-gum",
+          "description": "Complete >=100 successful cycles AND >=7200 seconds of target mixed activity after readiness on linux-gum; after warmup track native modules, threads and FDs/handles without continued growth."
+        },
+        {
+          "id": "B-resources-windows-gum",
+          "description": "Complete >=100 successful cycles AND >=7200 seconds of target mixed activity after readiness on windows-gum; after warmup track native modules, threads and FDs/handles without continued growth."
+        }
+      ]
+    },
+    {
+      "id": "O-release",
+      "kind": "correctness",
+      "property": "Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "critical",
+      "applicability": "required",
+      "rationale": "Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.",
+      "fault_ids": [
+        "F03",
+        "F13",
+        "F14",
+        "F15",
+        "F16"
+      ],
+      "trigger_dimensions": [
+        "environment",
+        "version",
+        "commit"
+      ],
+      "allowed_outcomes": [
+        "Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-release-linux-install",
+          "description": "Linux explicit-tag installer preserves stable sentinel and shortcut and uses development version directory."
+        },
+        {
+          "id": "B-release-windows-install",
+          "description": "Windows explicit-tag installer preserves stable executable, shortcut and user PATH."
+        },
+        {
+          "id": "B-release-private-cli",
+          "description": "Built prerelease CLI selects private default HOME/Skill and manual updates without touching stable paths."
+        },
+        {
+          "id": "B-release-public-artifacts",
+          "description": "Exact commit native platform CI and full soak pass; published prerelease is not latest; download all six artifacts and verify manifest/version/architecture/SHA and real operations."
+        }
+      ]
+    },
+    {
+      "id": "O-measure",
+      "kind": "performance",
+      "property": "Compare each platform declared workload within unmanaged, same-backend run, Active and Detached phases; Linux uses 32 snapshot/socket pairs and Windows uses 50 snapshot commands. Keep raw latency and valid-throughput timing separate from approval duration and do not compare different workload units as one cross-platform result.",
+      "basis": {
+        "kind": "contract",
+        "reference": "docs/dynamic-attach.md and accepted PLAN.md contract"
+      },
+      "source_refs": [
+        {
+          "path": "docs/dynamic-attach.md",
+          "first": 1,
+          "last": 84
+        },
+        {
+          "path": "scripts/test-dynamic-attach.py",
+          "first": 1,
+          "last": 80
+        }
+      ],
+      "risk": "normal",
+      "applicability": "required",
+      "rationale": "Compare identical validated snapshot/socket work in unmanaged, same-backend run, Active and Detached windows. Separate raw command latency and valid throughput from approval duration. No universal performance threshold.",
+      "fault_ids": [
+        "F02",
+        "F08",
+        "F16"
+      ],
+      "trigger_dimensions": [
+        "time",
+        "resource",
+        "environment"
+      ],
+      "allowed_outcomes": [
+        "Compare each platform declared workload within unmanaged, same-backend run, Active and Detached phases; Linux uses 32 snapshot/socket pairs and Windows uses 50 snapshot commands. Keep raw latency and valid-throughput timing separate from approval duration and do not compare different workload units as one cross-platform result."
+      ],
+      "basis_evidence": [
+        {
+          "source_type": "project_contract",
+          "reference": "Accepted dynamic attachment plan",
+          "version": "0.3.0-alpha.1 development contract",
+          "locator": "docs/dynamic-attach.md",
+          "verified_scope": "Compare identical validated snapshot/socket work in unmanaged, same-backend run, Active and Detached windows. Separate raw command latency and valid throughput from approval duration. No universal performance threshold.",
+          "role": "acceptance",
+          "adoption_reference": null
+        }
+      ],
+      "boundaries": [
+        {
+          "id": "B-measure-linux-ptrace-attach",
+          "description": "Within linux-ptrace-attach compare validated local fixed-window work with native and same-backend run baselines; save raw samples and exact valid counts/window elapsed for latency and throughput."
+        },
+        {
+          "id": "B-measure-linux-ptrace-run",
+          "description": "Within linux-ptrace-run compare validated local fixed-window work with native and same-backend run baselines; save raw samples and exact valid counts/window elapsed for latency and throughput."
+        },
+        {
+          "id": "B-measure-linux-gum-attach",
+          "description": "Within linux-gum-attach compare validated local fixed-window work with native and same-backend run baselines; save raw samples and exact valid counts/window elapsed for latency and throughput."
+        },
+        {
+          "id": "B-measure-linux-gum-run",
+          "description": "Within linux-gum-run compare validated local fixed-window work with native and same-backend run baselines; save raw samples and exact valid counts/window elapsed for latency and throughput."
+        },
+        {
+          "id": "B-measure-windows-gum-attach-latency",
+          "description": "Within windows-gum-attach-latency preserve 50 validated snapshot command latency samples and phase labels; this is not the Linux mixed 64-command workload."
+        },
+        {
+          "id": "B-measure-windows-gum-run-latency",
+          "description": "Within windows-gum-run-latency preserve 50 validated snapshot command latency samples and phase labels; this is not the Linux mixed 64-command workload."
+        },
+        {
+          "id": "B-measure-windows-gum-attach-throughput",
+          "description": "Measure actual fixed-window elapsed and 50 validated same-fixture snapshot commands on windows-gum-attach; report commands/s separately from Linux mixed-command throughput."
+        },
+        {
+          "id": "B-measure-windows-gum-run-throughput",
+          "description": "Measure actual fixed-window elapsed and 50 validated same-fixture snapshot commands on windows-gum-run; report commands/s separately from Linux mixed-command throughput."
+        }
+      ]
+    }
+  ],
+  "factors": [
+    {
+      "id": "backend",
+      "values": [
+        "linux-ptrace",
+        "linux-gum",
+        "windows-gum"
+      ]
+    },
+    {
+      "id": "origin",
+      "values": [
+        "attach",
+        "run"
+      ]
+    }
+  ],
+  "constraints": [],
+  "interactions": [
+    {
+      "id": "I-backend-origin",
+      "factors": [
+        "backend",
+        "origin"
+      ],
+      "strength": 2,
+      "rationale": "Both approved external attachment and owned run have distinct ownership paths.",
+      "obligation_ids": [
+        "O-measure"
+      ]
+    }
+  ],
+  "assurance": {
+    "scope": {
+      "requested_level": "component",
+      "delivered_level": "component",
+      "goal": "Validate dynamic attachment and observable local-fixture overhead.",
+      "rationale": "Feature scope; not all HyperHub protocols or production workload distributions."
+    },
+    "workloads": [
+      {
+        "id": "W-attachment",
+        "goal": "Approved attach, detach, reattach and fault recovery for local process trees.",
+        "role": "primary",
+        "applicability": "required",
+        "rationale": "Directly requested feature.",
+        "obligation_ids": [
+          "O-approval",
+          "O-tree",
+          "O-continuity",
+          "O-drain",
+          "O-fake",
+          "O-recovery",
+          "O-resources",
+          "O-release",
+          "O-measure"
+        ],
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ]
+      }
+    ]
+  },
+  "quality_review": {
+    "catalog_version": "1.0",
+    "catalog_digest": "6213ed21d151dabcd89b020d2e38a9388f7de8c832099fe78446c563dc3b1f4f",
+    "categories": [
+      {
+        "id": "F01",
+        "applicability": "required",
+        "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.; Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit.; Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-approval",
+          "O-tree",
+          "O-continuity"
+        ]
+      },
+      {
+        "id": "F02",
+        "applicability": "required",
+        "rationale": "Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.; Compare identical validated snapshot/socket work in unmanaged, same-backend run, Active and Detached windows. Separate raw command latency and valid throughput from approval duration. No universal performance threshold.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-drain",
+          "O-measure"
+        ]
+      },
+      {
+        "id": "F03",
+        "applicability": "required",
+        "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.; Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-approval",
+          "O-release"
+        ]
+      },
+      {
+        "id": "F04",
+        "applicability": "required",
+        "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.; Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit.; Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.; Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.; Previously cached FAKE-IP aliases remain usable across detach and reattach. Do not reassign an address to another destination while application caches may retain it.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-approval",
+          "O-tree",
+          "O-continuity",
+          "O-drain",
+          "O-fake"
+        ]
+      },
+      {
+        "id": "F05",
+        "applicability": "required",
+        "rationale": "Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit.; Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.; Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-tree",
+          "O-continuity",
+          "O-drain"
+        ]
+      },
+      {
+        "id": "F06",
+        "applicability": "required",
+        "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.; Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.; Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-approval",
+          "O-continuity",
+          "O-recovery"
+        ]
+      },
+      {
+        "id": "F07",
+        "applicability": "required",
+        "rationale": "Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.; Previously cached FAKE-IP aliases remain usable across detach and reattach. Do not reassign an address to another destination while application caches may retain it.; At least 100 cycles and two hours of mixed activity per backend preserve semantics without continued native module, thread, FD or handle count growth after warmup.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-drain",
+          "O-fake",
+          "O-resources"
+        ]
+      },
+      {
+        "id": "F08",
+        "applicability": "required",
+        "rationale": "At least 100 cycles and two hours of mixed activity per backend preserve semantics without continued native module, thread, FD or handle count growth after warmup.; Compare identical validated snapshot/socket work in unmanaged, same-backend run, Active and Detached windows. Separate raw command latency and valid throughput from approval duration. No universal performance threshold.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-resources",
+          "O-measure"
+        ]
+      },
+      {
+        "id": "F09",
+        "applicability": "required",
+        "rationale": "Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.; Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.; Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-continuity",
+          "O-drain",
+          "O-recovery"
+        ]
+      },
+      {
+        "id": "F10",
+        "applicability": "required",
+        "rationale": "Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-recovery"
+        ]
+      },
+      {
+        "id": "F11",
+        "applicability": "required",
+        "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.; Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-approval",
+          "O-recovery"
+        ]
+      },
+      {
+        "id": "F12",
+        "applicability": "required",
+        "rationale": "Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-recovery"
+        ]
+      },
+      {
+        "id": "F13",
+        "applicability": "required",
+        "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.; Tree scope covers current threads, existing descendants and future descendants; process scope leaves other processes unmanaged. Living descendants remain managed after root exit.; Approved detach stops new enforcement. Keep compatibility code while calls, async operations, trust contexts, callbacks or cached addresses need it. Detached requires independent physical-unload proof.; Previously cached FAKE-IP aliases remain usable across detach and reattach. Do not reassign an address to another destination while application caches may retain it.; Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-approval",
+          "O-tree",
+          "O-drain",
+          "O-fake",
+          "O-release"
+        ]
+      },
+      {
+        "id": "F14",
+        "applicability": "required",
+        "rationale": "Preserve allowed payloads, existing TCP, blocking original calls, socket flags, explicit child environments, PID, cwd, stdio, terminal state and original root exit status.; Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-continuity",
+          "O-release"
+        ]
+      },
+      {
+        "id": "F15",
+        "applicability": "required",
+        "rationale": "Only fresh human approval bound to exact process incarnation, instance, scope, backend, policy and bootstrap may mutate an external target. Proposal alone has no effect.; Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-approval",
+          "O-release"
+        ]
+      },
+      {
+        "id": "F16",
+        "applicability": "required",
+        "rationale": "Serve and manager loss preserve allowed business activity and report enforcement loss. Fresh approved recovery reconnects compatible residue or safely seizes an untraced target; never stack injection.; At least 100 cycles and two hours of mixed activity per backend preserve semantics without continued native module, thread, FD or handle count growth after warmup.; Isolate development binaries, Home, Skill and updates. Explicit prerelease tags do not replace stable defaults. Publish only after exact-commit platform CI and soak success.; Compare identical validated snapshot/socket work in unmanaged, same-backend run, Active and Detached windows. Separate raw command latency and valid throughput from approval duration. No universal performance threshold.",
+        "source_refs": [
+          {
+            "path": "docs/dynamic-attach.md",
+            "first": 1,
+            "last": 84
+          }
+        ],
+        "obligation_ids": [
+          "O-recovery",
+          "O-resources",
+          "O-release",
+          "O-measure"
+        ]
+      }
+    ]
+  }
+}

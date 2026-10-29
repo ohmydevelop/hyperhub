@@ -1,0 +1,227 @@
+diff --git a/gio/gdbusconnection.c b/gio/gdbusconnection.c
+--- a/gio/gdbusconnection.c
++++ b/gio/gdbusconnection.c
+@@ -359,9 +359,9 @@
+   /* Last serial used. Protected by @lock. */
+   guint32 last_serial;
+ 
+-  /* The object used to send/receive messages.
+-   * Read-only after initable_init(), so it may be read if you either
+-   * hold @init_lock or check for initialization first.
++  /* The object used to send/receive messages. Protected by @lock after
++   * initialization; dispose steals it after setting FLAG_CLOSED. A caller
++   * that releases @lock before using it must take its own worker reference.
+    */
+   GDBusWorker *worker;
+ 
+@@ -596,6 +596,8 @@
+ 
+ static GHashTable *alive_connections = NULL;
+ 
++static gboolean set_closed_unlocked (GDBusConnection *connection);
++
+ static void
+ g_dbus_connection_dispose (GObject *object)
+ {
+@@ -603,6 +605,11 @@
+ 
+   G_LOCK (message_bus_lock);
+   CONNECTION_LOCK (connection);
++  /* Stop accepting work before releasing the worker. Queued dispatch and
++   * asynchronous method completions can still hold this connection alive.
++   * Do not schedule a closed signal here: dispose may run on the last unref.
++   */
++  set_closed_unlocked (connection);
+   if (connection->worker != NULL)
+     {
+       _g_dbus_worker_stop (connection->worker);
+@@ -1142,8 +1149,10 @@
+   if (!check_initialized (connection))
+     return;
+ 
+-  g_assert (connection->worker != NULL);
+-  _g_dbus_worker_unfreeze (connection->worker);
++  CONNECTION_LOCK (connection);
++  if (!(g_atomic_int_get (&connection->atomic_flags) & FLAG_CLOSED))
++    _g_dbus_worker_unfreeze (connection->worker);
++  CONNECTION_UNLOCK (connection);
+ }
+ 
+ /**
+@@ -1318,29 +1327,26 @@
+                               GError          **error)
+ {
+   gboolean ret;
++  GDBusWorker *worker;
+ 
+   g_return_val_if_fail (G_IS_DBUS_CONNECTION (connection), FALSE);
+   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+ 
+-  ret = FALSE;
+-
+-  /* This is only a best-effort attempt to see whether the connection is
+-   * closed, so it doesn't need the lock. If the connection closes just
+-   * after this check, but before scheduling the flush operation, the
+-   * result will be more or less the same as if the connection closed while
+-   * the flush operation was pending - it'll fail with either CLOSED or
+-   * CANCELLED.
++  CONNECTION_LOCK (connection);
++  if (!check_unclosed (connection, 0, error))
++    {
++      CONNECTION_UNLOCK (connection);
++      return FALSE;
++    }
++  worker = _g_dbus_worker_ref (connection->worker);
++  CONNECTION_UNLOCK (connection);
++
++  /* Flushing may block on callbacks that need the connection lock. Keep the
++   * worker alive independently if another thread disposes the connection.
+    */
+-  if (!check_unclosed (connection, 0, error))
+-    goto out;
+-
+-  g_assert (connection->worker != NULL);
+-
+-  ret = _g_dbus_worker_flush_sync (connection->worker,
+-                                   cancellable,
+-                                   error);
+-
+- out:
++  ret = _g_dbus_worker_flush_sync (worker, cancellable, error);
++  _g_dbus_worker_unref (worker);
++
+   return ret;
+ }
+ 
+@@ -1454,6 +1460,7 @@
+                          gpointer             user_data)
+ {
+   GTask *task;
++  GError *error = NULL;
+ 
+   g_return_if_fail (G_IS_DBUS_CONNECTION (connection));
+ 
+@@ -1461,11 +1468,14 @@
+   if (!check_initialized (connection))
+     return;
+ 
+-  g_assert (connection->worker != NULL);
+-
+   task = g_task_new (connection, cancellable, callback, user_data);
+   g_task_set_source_tag (task, g_dbus_connection_close);
+-  _g_dbus_worker_close (connection->worker, task);
++  CONNECTION_LOCK (connection);
++  if (check_unclosed (connection, 0, &error))
++    _g_dbus_worker_close (connection->worker, task);
++  else
++    g_task_return_error (task, error);
++  CONNECTION_UNLOCK (connection);
+   g_object_unref (task);
+ }
+ 
+@@ -2389,7 +2399,7 @@
+   return message;
+ }
+ 
+-/* called with connection lock held, in GDBusWorker thread */
++/* Called from any thread with the connection lock held. */
+ static gboolean
+ cancel_method_on_close (gpointer key, gpointer value, gpointer user_data)
+ {
+@@ -2412,6 +2422,25 @@
+   return TRUE;
+ }
+ 
++/* Called from any thread with the connection lock held. Returns TRUE only
++ * for the first transition. Pending calls must complete even when disposal
++ * suppresses further worker callbacks.
++ */
++static gboolean
++set_closed_unlocked (GDBusConnection *connection)
++{
++  guint old_atomic_flags;
++
++  CONNECTION_ENSURE_LOCK (connection);
++
++  old_atomic_flags = g_atomic_int_or (&connection->atomic_flags, FLAG_CLOSED);
++  if (old_atomic_flags & FLAG_CLOSED)
++    return FALSE;
++
++  g_hash_table_foreach_remove (connection->map_method_serial_to_task, cancel_method_on_close, NULL);
++  return TRUE;
++}
++
+ /* Called in GDBusWorker's thread - we must not block - without lock held */
+ static void
+ on_worker_closed (GDBusWorker *worker,
+@@ -2421,7 +2450,6 @@
+ {
+   GDBusConnection *connection;
+   gboolean alive;
+-  guint old_atomic_flags;
+ 
+   G_LOCK (message_bus_lock);
+   alive = g_hash_table_contains (alive_connections, user_data);
+@@ -2437,17 +2465,8 @@
+   //g_debug ("in on_worker_closed: %s", error->message);
+ 
+   CONNECTION_LOCK (connection);
+-  /* Even though this is atomic, we do it inside the lock to avoid breaking
+-   * assumptions in remove_match_rule(). We'd need the lock in a moment
+-   * anyway, so, no loss.
+-   */
+-  old_atomic_flags = g_atomic_int_or (&connection->atomic_flags, FLAG_CLOSED);
+-
+-  if (!(old_atomic_flags & FLAG_CLOSED))
+-    {
+-      g_hash_table_foreach_remove (connection->map_method_serial_to_task, cancel_method_on_close, NULL);
+-      schedule_closed_unlocked (connection, remote_peer_vanished, error);
+-    }
++  if (set_closed_unlocked (connection))
++    schedule_closed_unlocked (connection, remote_peer_vanished, error);
+   CONNECTION_UNLOCK (connection);
+ 
+   g_object_unref (connection);
+diff --git a/gio/gdbusprivate.c b/gio/gdbusprivate.c
+--- a/gio/gdbusprivate.c
++++ b/gio/gdbusprivate.c
+@@ -462,8 +462,6 @@
+   gboolean                            close_expected;
+ };
+ 
+-static void _g_dbus_worker_unref (GDBusWorker *worker);
+-
+ static GSList * gdbus_workers = NULL;
+ G_LOCK_DEFINE_STATIC (gdbus_workers);
+ static GCond gdbus_workers_cond;
+@@ -505,14 +503,14 @@
+ 
+ /* ---------------------------------------------------------------------------------------------------- */
+ 
+-static GDBusWorker *
++GDBusWorker *
+ _g_dbus_worker_ref (GDBusWorker *worker)
+ {
+   g_atomic_int_inc (&worker->ref_count);
+   return worker;
+ }
+ 
+-static void
++void
+ _g_dbus_worker_unref (GDBusWorker *worker)
+ {
+   if (g_atomic_int_dec_and_test (&worker->ref_count))
+diff --git a/gio/gdbusprivate.h b/gio/gdbusprivate.h
+--- a/gio/gdbusprivate.h
++++ b/gio/gdbusprivate.h
+@@ -54,6 +54,10 @@
+                                           GDBusWorkerMessageAboutToBeSentCallback message_about_to_be_sent_callback,
+                                           GDBusWorkerDisconnectedCallback     disconnected_callback,
+                                           gpointer                            user_data);
++
++/* can be called from any thread */
++GDBusWorker *_g_dbus_worker_ref          (GDBusWorker    *worker);
++void         _g_dbus_worker_unref        (GDBusWorker    *worker);
+ 
+ /* can be called from any thread - steals blob */
+ void         _g_dbus_worker_send_message (GDBusWorker    *worker,

@@ -31,7 +31,7 @@ if [[ "$install_path" == / || "$install_path" == */ ]]; then
   exit 2
 fi
 
-for command in bash cargo rustc cc clang tar xz sha256sum install; do
+for command in bash cargo rustc cc clang python3 tar xz sha256sum install; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "required Linux build command is missing: $command" >&2
     exit 2
@@ -42,7 +42,7 @@ archive="$remote_root/source.tar"
 gum_archive="$remote_root/frida-gum.tar.xz"
 core_archive="$remote_root/frida-core.tar.xz"
 build_root="$remote_root/build"
-for input in "$archive" "$gum_archive" "$core_archive"; do
+for input in "$archive"; do
   [[ -f "$input" ]] || {
     echo "remote build input is missing: $input" >&2
     exit 2
@@ -51,12 +51,25 @@ done
 
 mkdir -p -- "$build_root"
 tar -xf "$archive" -C "$build_root"
-devkit_root="$remote_root/devkits"
-mkdir -p "$devkit_root/gum" "$devkit_root/core"
-tar -xJf "$gum_archive" -C "$devkit_root/gum"
-tar -xJf "$core_archive" -C "$devkit_root/core"
-export HYPERHUB_FRIDA_GUM_ROOT="$devkit_root/gum"
-export HYPERHUB_FRIDA_CORE_ROOT="$devkit_root/core"
+[[ -f "$build_root/scripts/frida-native-deps.py" && -f "$build_root/third_party/frida/manifest.json" ]] || {
+  echo 'selected source revision lacks the pinned patched Linux Frida source recipe' >&2
+  exit 2
+}
+if [[ -f "$gum_archive" || -f "$core_archive" ]]; then
+  [[ -f "$gum_archive" && -f "$core_archive" ]] || {
+    echo 'remote custom Frida SDK input requires both Core/Gum archives' >&2
+    exit 2
+  }
+  devkit_root="$remote_root/devkits"
+  mkdir -p "$devkit_root/gum" "$devkit_root/core"
+  tar -xJf "$gum_archive" -C "$devkit_root/gum"
+  tar -xJf "$core_archive" -C "$devkit_root/core"
+  export HYPERHUB_FRIDA_GUM_ROOT="$devkit_root/gum"
+  export HYPERHUB_FRIDA_CORE_ROOT="$devkit_root/core"
+else
+  # The source-only path builds the fixed recipe on the remote x86_64 host.
+  unset HYPERHUB_FRIDA_GUM_ROOT HYPERHUB_FRIDA_CORE_ROOT
+fi
 
 cd "$build_root"
 chmod +x scripts/*.sh

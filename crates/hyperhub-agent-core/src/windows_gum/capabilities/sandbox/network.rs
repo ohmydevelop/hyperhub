@@ -53,41 +53,55 @@ impl FirewallPlugin {
         let report_failures = dropped_events.clone();
         let worker_snapshot = snapshot.clone();
         let worker_version = current_version.clone();
+        let worker = crate::attachment::resident_background_enter();
         let audit = match std::thread::Builder::new()
             .name("hyperhub-firewall-runtime".into())
             .spawn(move || {
-                let mut reported_drops = 0;
-                let mut last_refresh = Instant::now() - FIREWALL_REFRESH_INTERVAL;
-                loop {
-                    let timeout = FIREWALL_REFRESH_INTERVAL.saturating_sub(last_refresh.elapsed());
-                    match receiver.recv_timeout(timeout) {
-                        Ok(event) => {
-                            if crate::report_firewall_audit(&event).is_err() {
-                                report_failures.fetch_add(1, Ordering::Relaxed);
+                crate::engine_call::background(|| {
+                    let _worker = worker;
+                    let mut reported_drops = 0;
+                    let mut last_refresh = Instant::now() - FIREWALL_REFRESH_INTERVAL;
+                    loop {
+                        let dormant = crate::attachment::stopping_background();
+                        let timeout = if dormant {
+                            Duration::from_millis(100)
+                        } else {
+                            FIREWALL_REFRESH_INTERVAL
+                                .saturating_sub(last_refresh.elapsed())
+                                .min(Duration::from_millis(100))
+                        };
+                        match receiver.recv_timeout(timeout) {
+                            Ok(event) => {
+                                if crate::attachment::stopping_background()
+                                    || crate::report_firewall_audit(&event).is_err()
+                                {
+                                    report_failures.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
+                            Err(RecvTimeoutError::Timeout) => {}
+                            Err(RecvTimeoutError::Disconnected) => break,
                         }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
-                    if last_refresh.elapsed() >= FIREWALL_REFRESH_INTERVAL {
-                        let version = worker_version.load(Ordering::Acquire);
-                        if let Ok(refresh) = crate::refresh_firewall(version) {
-                            apply_refresh(&worker_snapshot, &worker_version, refresh);
+                        if crate::attachment::stopping_background() {
+                            continue;
                         }
-                        last_refresh = Instant::now();
+                        if last_refresh.elapsed() >= FIREWALL_REFRESH_INTERVAL {
+                            let version = worker_version.load(Ordering::Acquire);
+                            if let Ok(refresh) = crate::refresh_firewall(version) {
+                                apply_refresh(&worker_snapshot, &worker_version, refresh);
+                            }
+                            last_refresh = Instant::now();
+                        }
+                        let dropped = report_failures.load(Ordering::Relaxed);
+                        if dropped != reported_drops && crate::attachment::legacy_debug() {
+                            eprintln!("hyperhub-agent: firewall audit dropped_or_failed={dropped}");
+                            reported_drops = dropped;
+                        }
                     }
-                    let dropped = report_failures.load(Ordering::Relaxed);
-                    if dropped != reported_drops
-                        && std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some()
-                    {
-                        eprintln!("hyperhub-agent: firewall audit dropped_or_failed={dropped}");
-                        reported_drops = dropped;
-                    }
-                }
+                })
             }) {
             Ok(_) => Some(sender),
             Err(error) => {
-                if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+                if crate::attachment::legacy_debug() {
                     eprintln!("hyperhub-agent: cannot start firewall runtime worker: {error}");
                 }
                 None
@@ -101,10 +115,17 @@ impl FirewallPlugin {
         }
     }
 
+    fn current_snapshot(&self) -> Option<Arc<crate::FirewallSnapshot>> {
+        if crate::attachment::managed() {
+            crate::firewall_snapshot()
+        } else {
+            self.snapshot.load_full()
+        }
+    }
+    #[cfg(test)]
     fn failure_mode(&self) -> HookFailureMode {
         if self
-            .snapshot
-            .load_full()
+            .current_snapshot()
             .as_deref()
             .is_some_and(|snapshot| snapshot.error_action == crate::FirewallAction::Deny)
         {
@@ -113,24 +134,6 @@ impl FirewallPlugin {
             HookFailureMode::FailOpen
         }
     }
-
-    fn failure_decision(&self) -> FirewallDecision {
-        let action = self
-            .snapshot
-            .load_full()
-            .as_deref()
-            .map_or(crate::FirewallAction::Pass, |snapshot| {
-                snapshot.error_action
-            });
-        match action {
-            crate::FirewallAction::Pass => FirewallDecision::ErrorPass,
-            crate::FirewallAction::Deny => FirewallDecision::Deny {
-                rule_id: None,
-                source: crate::FirewallDecisionSource::Error,
-            },
-        }
-    }
-
     fn error_decision(&self, action: crate::FirewallAction) -> FirewallDecision {
         match action {
             crate::FirewallAction::Pass => FirewallDecision::ErrorPass,
@@ -141,22 +144,50 @@ impl FirewallPlugin {
         }
     }
 
-    fn evaluate_dns_safely(&self, hostname: &str) -> FirewallDecision {
-        catch_unwind(AssertUnwindSafe(|| self.evaluate_dns(hostname)))
-            .unwrap_or_else(|_| self.failure_decision())
-    }
-
-    fn evaluate_connect_safely(
+    fn with_reader(
         &self,
+        snapshot: Option<&crate::FirewallSnapshot>,
+        call: impl FnOnce() -> FirewallDecision,
+    ) -> FirewallDecision {
+        catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|_| {
+            self.error_decision(
+                snapshot.map_or(crate::FirewallAction::Pass, |value| value.error_action),
+            )
+        })
+    }
+    fn evaluate_dns_reader(
+        &self,
+        snapshot: Option<&crate::FirewallSnapshot>,
+        hostname: &str,
+    ) -> FirewallDecision {
+        self.with_reader(snapshot, || self.evaluate_dns_snapshot(snapshot, hostname))
+    }
+    fn evaluate_connect_reader(
+        &self,
+        snapshot: Option<&crate::FirewallSnapshot>,
         target: Option<&crate::FirewallConnectTarget>,
     ) -> FirewallDecision {
-        catch_unwind(AssertUnwindSafe(|| self.evaluate_connect(target)))
-            .unwrap_or_else(|_| self.failure_decision())
+        self.with_reader(snapshot, || {
+            self.evaluate_connect_snapshot(snapshot, target)
+        })
     }
-
+    #[cfg(test)]
     fn evaluate_dns(&self, hostname: &str) -> FirewallDecision {
-        let snapshot = self.snapshot.load_full();
-        let Some(snapshot) = snapshot.as_deref() else {
+        self.evaluate_dns_snapshot(self.current_snapshot().as_deref(), hostname)
+    }
+    #[cfg(test)]
+    fn evaluate_connect(&self, target: Option<&crate::FirewallConnectTarget>) -> FirewallDecision {
+        self.evaluate_connect_snapshot(self.current_snapshot().as_deref(), target)
+    }
+    fn evaluate_dns_snapshot(
+        &self,
+        snapshot: Option<&crate::FirewallSnapshot>,
+        hostname: &str,
+    ) -> FirewallDecision {
+        if !crate::attachment::enforcing() {
+            return FirewallDecision::Pass;
+        }
+        let Some(snapshot) = snapshot else {
             return FirewallDecision::Pass;
         };
         match crate::firewall_dns_decision(snapshot, hostname) {
@@ -176,9 +207,15 @@ impl FirewallPlugin {
             Err(_) => self.error_decision(snapshot.error_action),
         }
     }
-    fn evaluate_connect(&self, target: Option<&crate::FirewallConnectTarget>) -> FirewallDecision {
-        let snapshot = self.snapshot.load_full();
-        let Some(snapshot) = snapshot.as_deref() else {
+    fn evaluate_connect_snapshot(
+        &self,
+        snapshot: Option<&crate::FirewallSnapshot>,
+        target: Option<&crate::FirewallConnectTarget>,
+    ) -> FirewallDecision {
+        if !crate::attachment::enforcing() {
+            return FirewallDecision::Pass;
+        }
+        let Some(snapshot) = snapshot else {
             return FirewallDecision::Pass;
         };
         let Some(target) = target else {
@@ -191,7 +228,7 @@ impl FirewallPlugin {
             action_decision(action, rule_id, source)
         }
     }
-
+    #[cfg(test)]
     fn report_decision(
         &self,
         decision: FirewallDecision,
@@ -199,6 +236,21 @@ impl FirewallPlugin {
         hostname: Option<String>,
         ip: Option<IpAddr>,
         port: Option<u16>,
+    ) -> bool {
+        let version = self.current_snapshot().as_deref().map_or_else(
+            || self.current_version.load(Ordering::Acquire),
+            |snapshot| snapshot.version,
+        );
+        self.report_decision_at_version(decision, stage, hostname, ip, port, version)
+    }
+    fn report_decision_at_version(
+        &self,
+        decision: FirewallDecision,
+        stage: crate::FirewallAuditStage,
+        hostname: Option<String>,
+        ip: Option<IpAddr>,
+        port: Option<u16>,
+        snapshot_version: u64,
     ) -> bool {
         let (decision_action, rule_id, source) = match decision {
             FirewallDecision::Pass => return false,
@@ -211,10 +263,6 @@ impl FirewallPlugin {
                 (crate::FirewallAction::Deny, rule_id, source)
             }
         };
-        let snapshot_version = self.snapshot.load_full().as_deref().map_or_else(
-            || self.current_version.load(Ordering::Acquire),
-            |snapshot| snapshot.version,
-        );
         let event = crate::FirewallAuditEvent {
             decision: decision_action,
             rule_id,
@@ -272,16 +320,21 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
         CallbackCategory::Control,
         HookFailureMode::FailOpen,
         move |context| {
-            if dns_plugin.failure_mode() == HookFailureMode::FailClosed {
+            let snapshot = dns_plugin.current_snapshot();
+            if snapshot
+                .as_deref()
+                .is_some_and(|snapshot| snapshot.error_action == crate::FirewallAction::Deny)
+            {
                 context.denied_error = Some(WSAHOST_NOT_FOUND);
             }
-            let decision = dns_plugin.evaluate_dns_safely(&context.hostname);
-            if dns_plugin.report_decision(
+            let decision = dns_plugin.evaluate_dns_reader(snapshot.as_deref(), &context.hostname);
+            if dns_plugin.report_decision_at_version(
                 decision,
                 crate::FirewallAuditStage::Dns,
                 Some(context.hostname.clone()),
                 None,
                 None,
+                snapshot.as_deref().map_or(0, |snapshot| snapshot.version),
             ) {
                 return Ok(context.deny(WSAHOST_NOT_FOUND));
             }
@@ -296,17 +349,23 @@ pub(crate) fn register(registrar: &mut PluginRegistrar) -> Result<(), HookError>
         CallbackCategory::Control,
         HookFailureMode::FailOpen,
         move |context| {
-            if connect_plugin.failure_mode() == HookFailureMode::FailClosed {
+            let snapshot = connect_plugin.current_snapshot();
+            if snapshot
+                .as_deref()
+                .is_some_and(|snapshot| snapshot.error_action == crate::FirewallAction::Deny)
+            {
                 context.denied_error = Some(WSAEACCES);
             }
-            let decision = connect_plugin.evaluate_connect_safely(context.source());
+            let decision =
+                connect_plugin.evaluate_connect_reader(snapshot.as_deref(), context.source());
             let target = context.source().cloned();
-            if connect_plugin.report_decision(
+            if connect_plugin.report_decision_at_version(
                 decision,
                 crate::FirewallAuditStage::Connect,
                 target.as_ref().and_then(|target| target.hostname.clone()),
                 target.as_ref().map(|target| target.ip),
                 target.as_ref().map(|target| target.port),
+                snapshot.as_deref().map_or(0, |snapshot| snapshot.version),
             ) {
                 return Ok(context.deny(WSAEACCES));
             }
@@ -672,5 +731,44 @@ mod tests {
             None,
         ));
         assert_eq!(plugin.dropped_events.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn a_policy_reader_keeps_its_failure_action_and_audit_version_after_publication() {
+        let (audit, receiver) = sync_channel(1);
+        let mut initial = snapshot(Some(crate::FirewallAction::Pass));
+        initial.version = 41;
+        let configured = FirewallPlugin {
+            snapshot: Arc::new(Snapshot::from(Some(Arc::new(initial)))),
+            current_version: Arc::new(AtomicU64::new(41)),
+            audit: Some(audit),
+            dropped_events: Arc::new(AtomicU64::new(0)),
+        };
+        let reader = configured.current_snapshot().unwrap();
+        let mut next = snapshot(Some(crate::FirewallAction::Deny));
+        next.version = 42;
+        configured.snapshot.store(Some(Arc::new(next)));
+        let fallback = configured.with_reader(Some(&reader), || {
+            panic!("intentional policy callback failure")
+        });
+        assert_eq!(fallback, FirewallDecision::ErrorPass);
+        assert!(!configured.report_decision_at_version(
+            fallback,
+            crate::FirewallAuditStage::Dns,
+            Some("fixture.test".into()),
+            None,
+            None,
+            reader.version
+        ));
+        let event = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(event.snapshot_version, 41);
+        assert_eq!(event.decision, crate::FirewallAction::Pass);
+        assert_eq!(configured.failure_mode(), HookFailureMode::FailClosed);
+        assert!(matches!(
+            configured.evaluate_connect(None),
+            FirewallDecision::Deny {
+                source: crate::FirewallDecisionSource::Error,
+                ..
+            }
+        ));
     }
 }

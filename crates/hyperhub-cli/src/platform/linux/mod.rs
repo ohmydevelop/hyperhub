@@ -12,3 +12,11 @@ pub use launcher::{
 };
 pub use pty::run_internal;
 mod engine_control;
+
+mod attachment;
+mod attachment_permissions;
+pub use attachment::{
+    detach_attachment, inspect_attachment_target, reattach_attachment, run_attachment_manager,
+    run_attachment_recovery,
+};
+pub use attachment_permissions::validate_attachment_backend;

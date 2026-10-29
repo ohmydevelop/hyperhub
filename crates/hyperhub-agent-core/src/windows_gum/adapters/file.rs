@@ -162,17 +162,24 @@ struct SectionBasicInformation {
 }
 type NtQuerySectionFn =
     unsafe extern "system" fn(HANDLE, u32, *mut c_void, usize, *mut usize) -> i32;
+static SECTION_QUERY: OnceLock<Option<NtQuerySectionFn>> = OnceLock::new();
+pub(in crate::windows_gum) fn warm_memory_queries() -> bool {
+    SECTION_QUERY
+        .get_or_init(|| unsafe {
+            crate::windows_gum::gum::find_export("ntdll.dll", "NtQuerySection")
+                .map(|pointer| std::mem::transmute::<*mut c_void, NtQuerySectionFn>(pointer))
+        })
+        .is_some()
+}
 
 // NtQuerySection's authoritative allocation attributes distinguish pagefile
 // memory from data/image files. No numeric handle is cached as exempt.
 // https://learn.microsoft.com/windows/win32/devnotes/ntquerysection
 unsafe fn anonymous_section(section: HANDLE) -> bool {
     let _last_error = crate::engine_call::WindowsLastErrorGuard::capture();
-    static QUERY: OnceLock<Option<NtQuerySectionFn>> = OnceLock::new();
-    let Some(query) = *QUERY.get_or_init(|| {
-        crate::windows_gum::gum::find_export("ntdll.dll", "NtQuerySection")
-            .map(|pointer| std::mem::transmute::<*mut c_void, NtQuerySectionFn>(pointer))
-    }) else {
+    // Resolved before hooks are published. Native allocator callbacks must
+    // never enter the loader or initialize a shared OnceLock here.
+    let Some(query) = SECTION_QUERY.get().copied().flatten() else {
         return false;
     };
     let mut info = SectionBasicInformation::default();
@@ -399,6 +406,24 @@ unsafe fn dispatch(
     handle: usize,
     original_call: impl FnOnce() -> i32,
 ) -> i32 {
+    if INSIDE_HOOK.with(Cell::get) || crate::engine_call::host_background() {
+        return original_call();
+    }
+    dispatch_reader(
+        &crate::file_policy_reader(),
+        op,
+        path,
+        handle,
+        original_call,
+    )
+}
+unsafe fn dispatch_reader(
+    reader: &crate::FilePolicyReader,
+    op: FileOperation,
+    path: Option<String>,
+    handle: usize,
+    original_call: impl FnOnce() -> i32,
+) -> i32 {
     if INSIDE_HOOK.with(Cell::get) {
         return original_call();
     }
@@ -406,6 +431,7 @@ unsafe fn dispatch(
         return original_call();
     };
     let mut c = FileOperationContext {
+        reader: reader.clone(),
         operation: op,
         path,
         _handle: handle,
@@ -462,16 +488,34 @@ unsafe fn dispatch_operations(
     handle: usize,
     original_call: impl FnOnce() -> i32,
 ) -> i32 {
+    if INSIDE_HOOK.with(Cell::get) || crate::engine_call::host_background() {
+        return original_call();
+    }
+    dispatch_operations_reader(
+        &crate::file_policy_reader(),
+        operations,
+        path,
+        handle,
+        original_call,
+    )
+}
+unsafe fn dispatch_operations_reader(
+    reader: &crate::FilePolicyReader,
+    operations: &[FileOperation],
+    path: Option<String>,
+    handle: usize,
+    original_call: impl FnOnce() -> i32,
+) -> i32 {
     let Some((last, leading)) = operations.split_last() else {
         return original_call();
     };
     for operation in leading {
-        let result = dispatch(*operation, path.clone(), handle, || 0);
+        let result = dispatch_reader(reader, *operation, path.clone(), handle, || 0);
         if result == STATUS_ACCESS_DENIED {
             return result;
         }
     }
-    dispatch(*last, path, handle, original_call)
+    dispatch_reader(reader, *last, path, handle, original_call)
 }
 #[no_mangle]
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_file(
@@ -487,6 +531,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_file(
     ea: *const c_void,
     ealen: u32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(f) = original!(ORIGINAL_NT_CREATE_FILE, NtCreateFileFn) else {
         return STATUS_ACCESS_DENIED;
     };
@@ -511,6 +556,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_open_file(
     share: u32,
     opts: u32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(f) = original!(ORIGINAL_NT_OPEN_FILE, NtOpenFileFn) else {
         return STATUS_ACCESS_DENIED;
     };
@@ -529,6 +575,7 @@ macro_rules! io_hook {
             off: *const i64,
             key: *const u32,
         ) -> i32 {
+            let _attachment_call = crate::attachment::enter();
             let Some(f) = original!($slot, NtIoFn) else {
                 return STATUS_ACCESS_DENIED;
             };
@@ -556,18 +603,21 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
     len: u32,
     class: u32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(f) = original!(ORIGINAL_NT_SET_INFORMATION_FILE, NtSetInformationFileFn) else {
         return STATUS_ACCESS_DENIED;
     };
-    if INSIDE_HOOK.with(Cell::get) {
+    if INSIDE_HOOK.with(Cell::get) || crate::engine_call::host_background() {
         return f(h, ios, info, len, class);
     }
+    let reader = crate::file_policy_reader();
     let path = match file_io_target(h) {
         FileIoTarget::Kernel => return f(h, ios, info, len, class),
         FileIoTarget::Policy(path) => path,
     };
     if is_link_information(class) {
-        let source = dispatch_operations(
+        let source = dispatch_operations_reader(
+            &reader,
             &[
                 FileOperation::Read,
                 FileOperation::Write,
@@ -582,7 +632,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
         }
         // FileLinkInformation and FileLinkInformationEx use the same root/name
         // layout as their rename counterparts on the supported 64-bit targets.
-        return dispatch(
+        return dispatch_reader(
+            &reader,
             FileOperation::Create,
             rename_target_path(info, len),
             0,
@@ -590,7 +641,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
         );
     }
     let op = if matches!(class, 10 | 56 | 65 | 66) {
-        let source = dispatch_operations(
+        let source = dispatch_operations_reader(
+            &reader,
             &[
                 FileOperation::Read,
                 FileOperation::Write,
@@ -603,7 +655,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
         if source == STATUS_ACCESS_DENIED {
             return source;
         }
-        return dispatch_operations(
+        return dispatch_operations_reader(
+            &reader,
             &[FileOperation::Create, FileOperation::Rename],
             rename_target_path(info, len),
             0,
@@ -614,11 +667,14 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_set_information_fil
     } else {
         FileOperation::Write
     };
-    dispatch(op, path, h as usize, || f(h, ios, info, len, class))
+    dispatch_reader(&reader, op, path, h as usize, || {
+        f(h, ios, info, len, class)
+    })
 }
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_delete_file(
     o: *const ObjectAttributes,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(f) = original!(ORIGINAL_NT_DELETE_FILE, NtDeleteFileFn) else {
         return STATUS_ACCESS_DENIED;
     };
@@ -633,9 +689,13 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_create_section(
     attrs: u32,
     file: HANDLE,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter_allocator();
     let Some(f) = original!(ORIGINAL_NT_CREATE_SECTION, NtCreateSectionFn) else {
         return STATUS_ACCESS_DENIED;
     };
+    if file.is_null() || crate::engine_call::host_background() {
+        return f(out, a, o, size, protect, attrs, file);
+    }
     let operations = operations_for_protection(protect);
     create_section(out, file, &operations, || {
         f(out, a, o, size, protect, attrs, file)
@@ -653,9 +713,15 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_map_view_of_section
     alloc: u32,
     protect: u32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter_allocator();
     let Some(f) = original!(ORIGINAL_NT_MAP_VIEW_OF_SECTION, NtMapViewFn) else {
         return STATUS_ACCESS_DENIED;
     };
+    if anonymous_section(sec) || crate::engine_call::host_background() {
+        return f(
+            sec, proc, base, zero, commit, off, size, inherit, alloc, protect,
+        );
+    }
     let operations = operations_for_protection(protect);
     map_section(sec, &operations, || {
         f(
@@ -672,15 +738,20 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_duplicate_object(
     attrs: u32,
     opts: u32,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(f) = original!(ORIGINAL_NT_DUPLICATE_OBJECT, NtDuplicateObjectFn) else {
         return STATUS_ACCESS_DENIED;
     };
     duplicate_object(sp, sh, tp, out, opts, || f(sp, sh, tp, out, a, attrs, opts))
 }
 pub(in crate::windows_gum) unsafe extern "system" fn hook_nt_close(h: HANDLE) -> i32 {
+    let _attachment_call = crate::attachment::enter_allocator();
     let Some(f) = original!(ORIGINAL_NT_CLOSE, NtCloseFn) else {
         return STATUS_ACCESS_DENIED;
     };
+    if anonymous_section(h) {
+        return f(h);
+    }
     close_object(h, f(h))
 }
 
@@ -1144,6 +1215,7 @@ mod tests {
         }
     }
     unsafe fn native_section(file: HANDLE) -> NativeSection {
+        assert!(warm_memory_queries());
         let create: NtCreateSectionFn = std::mem::transmute(
             crate::windows_gum::gum::find_export("ntdll.dll", "NtCreateSection").unwrap(),
         );
@@ -1434,5 +1506,13 @@ mod tests {
             operations_for_access(0x80, Some(FILE_OVERWRITE_IF), 0),
             vec![FileOperation::Create, FileOperation::Write]
         );
+    }
+}
+
+/// Discard path labels only after no native wrapper can retain a map borrow.
+/// The application's actual file/section handles remain owned by the caller.
+pub(in crate::windows_gum) fn release_handle_metadata() {
+    if let Ok(mut map) = handles().lock() {
+        *map = HashMap::new();
     }
 }

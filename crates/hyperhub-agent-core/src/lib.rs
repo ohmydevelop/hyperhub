@@ -6,12 +6,18 @@ mod hook_runtime;
 mod integrity;
 
 mod abi;
+mod alias_namespace;
+pub(crate) mod attachment;
 mod control;
 mod engine_call;
 mod gateway;
+mod host_command_registry;
 #[cfg(all(windows, feature = "gum-agent"))]
 mod lifecycle;
+pub(crate) mod native_alias_snapshot;
+mod native_dns;
 mod platform;
+mod root_image;
 mod runtime;
 mod sandbox;
 mod snapshot;
@@ -246,9 +252,18 @@ mod tests {
     #[test]
     fn builds_domain_socks_handshake() {
         let mut core = configured_core();
-        core.record_dns("github.com".into(), &[192, 0, 2, 1])
+        core.gateway
+            .issue_alias(
+                "198.18.8.1".parse().unwrap(),
+                "github.com".into(),
+                vec![NativeDnsAddress {
+                    ip: "192.0.2.1".parse().unwrap(),
+                    scope_id: 0,
+                    flowinfo: 0,
+                }],
+            )
             .unwrap();
-        let plan = core.prepare_connect(42, 2, &[192, 0, 2, 1], 22).unwrap();
+        let plan = core.prepare_connect(42, 2, &[198, 18, 8, 1], 22).unwrap();
         assert_eq!(plan.connection_id, 7);
         assert_eq!(core.handshake(42, 0).unwrap(), [5, 1, 2]);
         assert!(String::from_utf8(core.handshake(42, 1).unwrap())
@@ -269,20 +284,29 @@ mod tests {
     }
 
     #[test]
-    fn dns_identity_survives_protocol_and_native_family_values() {
+    fn observed_dns_never_authorizes_hostname_routing_for_any_family_value() {
         let mut core = configured_core();
         let ipv4 = [192, 0, 2, 1];
         let ipv6 = "2001:db8::1"
             .parse::<std::net::Ipv6Addr>()
             .unwrap()
             .octets();
-        for (address, families) in [(&ipv4[..], &[4, 2][..]), (&ipv6[..], &[6, 10, 23][..])] {
+        let foreign_pool = [198, 18, 8, 2];
+        let mapped_foreign_pool = std::net::Ipv4Addr::from(foreign_pool)
+            .to_ipv6_mapped()
+            .octets();
+        for (address, families) in [
+            (&ipv4[..], &[4, 2][..]),
+            (&foreign_pool[..], &[4, 2][..]),
+            (&ipv6[..], &[6, 10, 23][..]),
+            (&mapped_foreign_pool[..], &[6, 10, 23][..]),
+        ] {
             core.record_dns("example.test".into(), address).unwrap();
             for family in families {
                 core.prepare_connect(42, *family, address, 443).unwrap();
                 assert!(matches!(
                     &core.gateway.sockets[&42].target,
-                    TargetAddress::Domain(hostname) if hostname == "example.test"
+                    TargetAddress::Ip(ip) if *ip == parse_ip(address).unwrap()
                 ));
             }
         }

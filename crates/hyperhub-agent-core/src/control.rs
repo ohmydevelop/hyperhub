@@ -28,11 +28,19 @@ impl<T: Read + Write> ControlStream for T {}
 pub(crate) enum AgentControlRequest<'a> {
     #[cfg(all(windows, feature = "gum-agent"))]
     BootstrapChild,
+    RegisterAliasHost {
+        identity: Option<serde_json::Value>,
+        bootstrap: &'a hyperhub_runtime::attachment::Bootstrap,
+        sequence: u64,
+        head: [u8; 32],
+        root_image_challenge: Option<[u8; 32]>,
+    },
     ResolveName {
         session_id: &'a str,
         token: &'a str,
         hostname: &'a str,
         family: u8,
+        native_fallback: Option<&'a hyperhub_runtime::attachment::NativeFallback>,
     },
     GetEngineBootstrap {
         session_id: &'a str,
@@ -157,6 +165,14 @@ pub(crate) enum AgentControlRequest<'a> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AgentControlResponse {
+    AliasHostRegistration {
+        #[serde(default)]
+        root_image: Option<hyperhub_runtime::attachment::SignedRootImage>,
+        ready: bool,
+        snapshot: Option<hyperhub_runtime::attachment::SignedSessionAliasSnapshot>,
+        #[serde(default)]
+        proof: Option<hyperhub_runtime::attachment::ApprovalProof>,
+    },
     EngineBootstrap {
         bootstrap: hyperhub_engine::bootstrap::Bootstrap,
     },
@@ -174,6 +190,10 @@ pub(crate) enum AgentControlResponse {
     },
     ResolvedName {
         address: String,
+        #[serde(default)]
+        issued_sequence: Option<u64>,
+        #[serde(default)]
+        issued_head: Option<[u8; 32]>,
         #[serde(rename = "ttl_secs")]
         _ttl_secs: u32,
     },
@@ -385,7 +405,7 @@ pub(crate) fn open_control(endpoint: &str) -> Result<Box<dyn ControlStream>, i32
     }
     #[cfg(unix)]
     {
-        std::os::unix::net::UnixStream::connect(endpoint)
+        hyperhub_runtime::owned_ipc_fds::IpcStream::connect(endpoint)
             .map(|stream| Box::new(stream) as Box<dyn ControlStream>)
             .map_err(|_| HH_ERR_PROTOCOL)
     }
@@ -471,18 +491,69 @@ pub(crate) fn resolve_fake_control(
     token: &str,
     hostname: &str,
     family: u8,
-) -> Result<IpAddr, i32> {
+    native_fallback: Option<&hyperhub_runtime::attachment::NativeFallback>,
+) -> Result<(IpAddr, Option<u64>, Option<[u8; 32]>), i32> {
     let request = AgentControlRequest::ResolveName {
         session_id,
         token,
         hostname,
         family,
+        native_fallback,
     };
     match exchange_control(endpoint, &request)? {
-        AgentControlResponse::ResolvedName { address, .. } => {
-            address.parse().map_err(|_| HH_ERR_PROTOCOL)
-        }
+        AgentControlResponse::ResolvedName {
+            address,
+            issued_sequence,
+            issued_head,
+            ..
+        } => Ok((
+            address.parse().map_err(|_| HH_ERR_PROTOCOL)?,
+            issued_sequence,
+            issued_head,
+        )),
         _ => Err(HH_ERR_PROTOCOL),
+    }
+}
+
+pub(crate) struct AliasHostRegistration {
+    pub root_image: Option<hyperhub_runtime::attachment::SignedRootImage>,
+    pub ready: bool,
+    pub snapshot: Option<hyperhub_runtime::attachment::SignedSessionAliasSnapshot>,
+    pub proof: Option<hyperhub_runtime::attachment::ApprovalProof>,
+}
+pub(crate) fn register_alias_host_control(
+    bootstrap: &hyperhub_runtime::attachment::Bootstrap,
+    sequence: u64,
+    head: [u8; 32],
+    deadline: &StartupDeadline,
+    root_image_challenge: Option<[u8; 32]>,
+) -> Result<AliasHostRegistration, String> {
+    let request = AgentControlRequest::RegisterAliasHost {
+        identity: None,
+        bootstrap,
+        sequence,
+        head,
+        root_image_challenge,
+    };
+    match deadline
+        .exchange(&bootstrap.control_endpoint, &request)
+        .map_err(|code| format!("alias registration transport: {code}"))?
+    {
+        AgentControlResponse::AliasHostRegistration {
+            ready,
+            snapshot,
+            proof,
+            root_image,
+        } => Ok(AliasHostRegistration {
+            root_image,
+            ready,
+            snapshot,
+            proof,
+        }),
+        AgentControlResponse::Error { _message: message } => {
+            Err(format!("alias registration rejected: {message}"))
+        }
+        _ => Err("unexpected alias registration response".into()),
     }
 }
 
@@ -552,7 +623,7 @@ pub(crate) fn fetch_trust_control(
 
 #[allow(dead_code)]
 fn debug_bootstrap_failure(message: &str) {
-    if std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
+    if !crate::attachment::managed() && std::env::var_os("HYPERHUB_AGENT_DEBUG").is_some() {
         eprintln!("hyperhub-agent: {message}");
     }
 }
@@ -729,12 +800,17 @@ pub(crate) fn register_unix_process(
 
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn subscribe_sandbox() {
+    let attachment_worker = crate::attachment::background_enter();
     let _ = std::thread::Builder::new()
         .name("hyperhub-sandbox-subscription".into())
-        .spawn(|| {
+        .spawn(move || {
+            let _attachment_worker = attachment_worker;
             crate::engine_call::background(|| {
                 let mut backoff = reconnect::Backoff::default();
                 loop {
+                    if crate::attachment::stopping_background() {
+                        return;
+                    }
                     let values = crate::state().lock().ok().map(|c| {
                         (
                             c.session.control_endpoint.clone(),
@@ -752,7 +828,10 @@ pub(crate) fn subscribe_sandbox() {
                     };
                     let result = (|| -> Result<(), i32> {
                         let payload = serde_json::to_vec(&request).map_err(|_| HH_ERR_PROTOCOL)?;
-                        let mut stream = open_control(&endpoint)?;
+                        let mut stream = StartupDeadline::new()
+                            .connect(&endpoint)
+                            .map_err(|_| HH_ERR_PROTOCOL)?;
+                        stream.clear_deadline().map_err(|_| HH_ERR_PROTOCOL)?;
                         stream
                             .write_all(&(payload.len() as u32).to_be_bytes())
                             .and_then(|_| stream.write_all(&payload))
@@ -787,7 +866,7 @@ pub(crate) fn subscribe_sandbox() {
                         }
                     })();
                     if result.is_err() {
-                        std::thread::sleep(backoff.disconnected());
+                        reconnect::pause(backoff.disconnected());
                     }
                 }
             })
@@ -795,14 +874,19 @@ pub(crate) fn subscribe_sandbox() {
 }
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 fn subscribe_engine(deadline: StartupDeadline) -> Result<(), i32> {
+    let attachment_worker = crate::attachment::background_enter();
     let (ready_send, ready_recv) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("hyperhub-engine-control".into())
         .spawn(move || {
+            let _attachment_worker = attachment_worker;
             crate::engine_call::background(|| {
                 let mut ready_send = Some(ready_send);
                 let mut backoff = reconnect::Backoff::default();
                 loop {
+                    if crate::attachment::stopping_background() {
+                        return;
+                    }
                     let values = crate::state().lock().ok().map(|c| {
                         (
                             c.session.control_endpoint.clone(),
@@ -864,7 +948,7 @@ fn subscribe_engine(deadline: StartupDeadline) -> Result<(), i32> {
                         let _ = sender.send(result);
                         return;
                     }
-                    std::thread::sleep(backoff.disconnected());
+                    reconnect::pause(backoff.disconnected());
                 }
             });
         })
@@ -895,6 +979,7 @@ pub(crate) fn initialize_engine_control(deadline: StartupDeadline) -> Result<(),
         };
         let host = engine.snapshot().map_err(|_| HH_ERR_PROTOCOL)?.host;
         let pid = std::process::id();
+        let root_pid = pid;
         let nonce = rand::random();
         let response = deadline.exchange(
             &endpoint,
@@ -902,7 +987,7 @@ pub(crate) fn initialize_engine_control(deadline: StartupDeadline) -> Result<(),
                 session_id: &session_id,
                 token: &token,
                 pid,
-                root_pid: pid,
+                root_pid,
                 nonce,
                 host: host.clone(),
                 native_base_sha256: hyperhub_engine::NATIVE_BASE_SHA256,
@@ -915,7 +1000,7 @@ pub(crate) fn initialize_engine_control(deadline: StartupDeadline) -> Result<(),
             &token,
             &nonce,
             pid,
-            pid,
+            root_pid,
             &host,
             hyperhub_engine::NATIVE_BASE_SHA256,
         ) {

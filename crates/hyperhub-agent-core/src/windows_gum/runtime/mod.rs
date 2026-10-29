@@ -1,6 +1,6 @@
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use windows_sys::Win32::Security::Cryptography::HCERTSTORE;
 
@@ -75,7 +75,7 @@ pub(in crate::windows_gum) struct AgentHookRuntimeManifest {
 }
 
 static PLUGIN_RUNTIME: AtomicPtr<PluginRuntime> = AtomicPtr::new(null_mut());
-static AGENT_HOOK_MANIFEST: OnceLock<AgentHookRuntimeManifest> = OnceLock::new();
+static AGENT_HOOK_MANIFEST: AtomicPtr<AgentHookRuntimeManifest> = AtomicPtr::new(null_mut());
 
 pub(in crate::windows_gum) fn initialize_builtin_plugins() -> Result<(), HookError> {
     let mut registrar = PluginRegistrar::new();
@@ -112,19 +112,32 @@ pub(in crate::windows_gum) fn publish_runtime_manifest(
     report: &manager::HookInstallReport,
 ) -> Result<(), HookError> {
     let plugin_manifest = runtime().manifest();
-    AGENT_HOOK_MANIFEST
-        .set(AgentHookRuntimeManifest {
-            native_hooks: report.hooks.clone(),
-            plugins: plugin_manifest.plugins,
-            semantic_hooks: plugin_manifest.hooks,
-        })
-        .map_err(|_| HookError::new("hook runtime manifest was already published"))
+    let manifest = Box::into_raw(Box::new(AgentHookRuntimeManifest {
+        native_hooks: report.hooks.clone(),
+        plugins: plugin_manifest.plugins,
+        semantic_hooks: plugin_manifest.hooks,
+    }));
+    if AGENT_HOOK_MANIFEST
+        .compare_exchange(null_mut(), manifest, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        unsafe {
+            drop(Box::from_raw(manifest));
+        }
+        return Err(HookError::new(
+            "hook runtime manifest was already published",
+        ));
+    }
+    Ok(())
 }
 
 pub(in crate::windows_gum) fn runtime_manifest() -> &'static AgentHookRuntimeManifest {
-    AGENT_HOOK_MANIFEST
-        .get()
-        .expect("hook runtime manifest must be published after hook installation")
+    let pointer = AGENT_HOOK_MANIFEST.load(Ordering::Acquire);
+    assert!(
+        !pointer.is_null(),
+        "hook runtime manifest must be published after hook installation"
+    );
+    unsafe { &*pointer }
 }
 
 pub(in crate::windows_gum) fn runtime() -> &'static PluginRuntime {
@@ -242,5 +255,22 @@ mod tests {
         assert!(native_process_hooks
             .iter()
             .all(|hook| hook.semantic_hook == "process.create"));
+    }
+}
+
+/// Caller has restored Hook entrypoints and observed no active callback.
+pub(in crate::windows_gum) unsafe fn retire_plugins() {
+    let pointer = PLUGIN_RUNTIME.swap(null_mut(), Ordering::AcqRel);
+    if !pointer.is_null() {
+        drop(Box::from_raw(pointer));
+    }
+}
+
+/// Final loader release follows the manager's thread-PC barrier, after no
+/// native callbacks or Host threads can retain references to these manifests.
+pub(in crate::windows_gum) unsafe fn release_manifest_storage() {
+    let pointer = AGENT_HOOK_MANIFEST.swap(null_mut(), Ordering::AcqRel);
+    if !pointer.is_null() {
+        drop(Box::from_raw(pointer));
     }
 }

@@ -280,10 +280,27 @@ fn native_upgrade_preserves_host_state_and_pins_all_socket_handshake_phases() {
     let pid = std::process::id();
     let name = std::ffi::CString::new("Original.Example.").unwrap();
     let ip = [198, 18, 0, 9];
-    assert_eq!(
-        unsafe { hh_agent_record_dns(name.as_ptr(), 2, ip.as_ptr(), ip.len()) },
-        HH_OK
-    );
+    // This test exercises a proved issued name across Engine generations.
+    // Native DNS observations alone no longer authorize hostname routing.
+    {
+        let mut core = state().lock().unwrap();
+        let normalized = hyperhub_engine::normalize(
+            &crate::engine_call::calling(&core.engine).unwrap(),
+            name.to_str().unwrap(),
+        )
+        .unwrap();
+        core.gateway
+            .issue_alias(
+                std::net::Ipv4Addr::from(ip).into(),
+                normalized,
+                vec![crate::NativeDnsAddress {
+                    ip: std::net::Ipv4Addr::LOCALHOST.into(),
+                    scope_id: 0,
+                    flowinfo: 0,
+                }],
+            )
+            .unwrap();
+    }
     assert_eq!(hh_agent_note_nonblocking(42, 1), HH_OK);
     assert_eq!(connect(42, &ip, 443).connection_id, 7);
     assert_eq!(hh_agent_note_io(42, 88), HH_OK);

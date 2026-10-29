@@ -103,6 +103,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_cert_open_system_store
     provider: usize,
     subsystem: *const u8,
 ) -> HCERTSTORE {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_CERT_OPEN_SYSTEM_STORE_A, CertOpenSystemStoreAFn)
     else {
         return null_mut();
@@ -134,6 +135,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_cert_open_system_store
     provider: usize,
     subsystem: *const u16,
 ) -> HCERTSTORE {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_CERT_OPEN_SYSTEM_STORE_W, CertOpenSystemStoreWFn)
     else {
         return null_mut();
@@ -171,6 +173,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_cert_get_chain(
     reserved: *const c_void,
     chain: *mut *mut CERT_CHAIN_CONTEXT,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_CERT_GET_CHAIN, CertGetChainFn) else {
         return 0;
     };
@@ -250,6 +253,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_cert_verify_policy(
     parameters: *const CERT_CHAIN_POLICY_PARA,
     status: *mut CERT_CHAIN_POLICY_STATUS,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_CERT_VERIFY_POLICY, CertVerifyPolicyFn) else {
         return 0;
     };
@@ -318,6 +322,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_acquire_credentials_a(
     credential: *mut SecHandle,
     expiry: *mut i64,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_ACQUIRE_CREDENTIALS_A, AcquireCredentialsAFn) else {
         return -1;
     };
@@ -342,7 +347,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_acquire_credentials_a(
                 auth_data,
                 configured: CredentialAuthData::Original,
             };
-            runtime().acquire_credentials.dispatch(
+            let result = runtime().acquire_credentials.dispatch(
                 &mut context,
                 |context| {
                     original(
@@ -358,7 +363,11 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_acquire_credentials_a(
                     )
                 },
                 |_, _, _| -1,
-            )
+            );
+            if result == SEC_E_OK && !matches!(context.configured, CredentialAuthData::Original) {
+                super::super::capabilities::gateway::remember_credential(credential);
+            }
+            result
         },
     )
 }
@@ -376,6 +385,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_acquire_credentials_w(
     credential: *mut SecHandle,
     expiry: *mut i64,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(ORIGINAL_ACQUIRE_CREDENTIALS_W, AcquireCredentialsWFn) else {
         return -1;
     };
@@ -400,7 +410,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_acquire_credentials_w(
                 auth_data,
                 configured: CredentialAuthData::Original,
             };
-            runtime().acquire_credentials.dispatch(
+            let result = runtime().acquire_credentials.dispatch(
                 &mut context,
                 |context| {
                     original(
@@ -416,7 +426,11 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_acquire_credentials_w(
                     )
                 },
                 |_, _, _| -1,
-            )
+            );
+            if result == SEC_E_OK && !matches!(context.configured, CredentialAuthData::Original) {
+                super::super::capabilities::gateway::remember_credential(credential);
+            }
+            result
         },
     )
 }
@@ -465,6 +479,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_initialize_security_co
     context_attributes: *mut u32,
     expiry: *mut i64,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(
         ORIGINAL_INITIALIZE_SECURITY_CONTEXT_A,
         InitializeSecurityContextAFn
@@ -491,6 +506,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_initialize_security_co
         return SEC_E_CERT_UNKNOWN;
     };
     let mut context = SchannelContext {
+        compatibility: super::super::capabilities::gateway::owns_credential(credential)
+            || super::super::capabilities::gateway::owns_context(old_context),
         old_context,
         new_context,
         target: supplied_target_a(target_name),
@@ -537,6 +554,7 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_initialize_security_co
     context_attributes: *mut u32,
     expiry: *mut i64,
 ) -> i32 {
+    let _attachment_call = crate::attachment::enter();
     let Some(original) = original!(
         ORIGINAL_INITIALIZE_SECURITY_CONTEXT_W,
         InitializeSecurityContextWFn
@@ -563,6 +581,8 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_initialize_security_co
         return SEC_E_CERT_UNKNOWN;
     };
     let mut context = SchannelContext {
+        compatibility: super::super::capabilities::gateway::owns_credential(credential)
+            || super::super::capabilities::gateway::owns_context(old_context),
         old_context,
         new_context,
         target: supplied_target_w(target_name),
@@ -592,4 +612,53 @@ pub(in crate::windows_gum) unsafe extern "system" fn hook_initialize_security_co
         },
         |_, _, _| SEC_E_CERT_UNKNOWN,
     )
+}
+
+type ReleaseSecurityHandleFn = unsafe extern "system" fn(*mut SecHandle) -> i32;
+pub(in crate::windows_gum) static ORIGINAL_FREE_CREDENTIALS: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) static ORIGINAL_DELETE_SECURITY_CONTEXT: AtomicPtr<c_void> =
+    AtomicPtr::new(null_mut());
+pub(in crate::windows_gum) unsafe extern "system" fn hook_free_credentials(
+    handle: *mut SecHandle,
+) -> i32 {
+    let _call = crate::attachment::enter();
+    let Some(original) = original!(ORIGINAL_FREE_CREDENTIALS, ReleaseSecurityHandleFn) else {
+        return -1;
+    };
+    let mut saved = if handle.is_null() {
+        None
+    } else {
+        Some(*handle)
+    };
+    let result = original(handle);
+    let _error = crate::engine_call::WindowsLastErrorGuard::capture();
+    if result == SEC_E_OK {
+        if let Some(saved) = saved.as_mut() {
+            super::super::capabilities::gateway::forget_credential(saved);
+        }
+    }
+    result
+}
+pub(in crate::windows_gum) unsafe extern "system" fn hook_delete_security_context(
+    handle: *mut SecHandle,
+) -> i32 {
+    let _call = crate::attachment::enter();
+    let Some(original) = original!(ORIGINAL_DELETE_SECURITY_CONTEXT, ReleaseSecurityHandleFn)
+    else {
+        return -1;
+    };
+    let mut saved = if handle.is_null() {
+        None
+    } else {
+        Some(*handle)
+    };
+    let result = original(handle);
+    let _error = crate::engine_call::WindowsLastErrorGuard::capture();
+    if result == SEC_E_OK {
+        if let Some(saved) = saved.as_mut() {
+            super::super::capabilities::gateway::forget_context(saved);
+        }
+    }
+    result
 }

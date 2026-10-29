@@ -1,8 +1,10 @@
-use super::{take_error, unref, Command, FridaCore, FRIDA_CORE_VERSION};
+use super::{take_error, unref, CleanupKey, Command, FridaCore, FRIDA_CORE_VERSION};
+use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Process(pub(super) i32);
@@ -30,7 +32,8 @@ pub(super) struct Context {
     pub(super) manager: NonNull<frida_sys::_FridaDeviceManager>,
     pub(super) device: NonNull<frida_sys::_FridaDevice>,
     pub(super) injector: NonNull<frida_sys::_FridaInjector>,
-    pub(super) child_sessions: Vec<NonNull<frida_sys::_FridaSession>>,
+    pub(super) child_sessions: Vec<(Process, NonNull<frida_sys::_FridaSession>)>,
+    pub(super) unowned_fork_listener_abort: HashSet<Process>,
 }
 
 impl Context {
@@ -92,6 +95,7 @@ impl Context {
                 device,
                 injector,
                 child_sessions: Vec::new(),
+                unowned_fork_listener_abort: HashSet::new(),
             })
         }
     }
@@ -120,7 +124,7 @@ impl Drop for Context {
         unsafe {
             self.child_sessions
                 .drain(..)
-                .for_each(|session| unref(session.as_ptr().cast()));
+                .for_each(|(_, session)| unref(session.as_ptr().cast()));
             close_injector(self.injector);
             unref(self.device.as_ptr().cast());
             close_manager(self.manager);
@@ -211,13 +215,20 @@ impl Context {
         }
     }
 
-    pub(super) fn resume(&mut self, process: Process) -> Result<(), String> {
+    pub(super) fn resume(
+        &mut self,
+        process: Process,
+        cancellation: Option<&super::Cancellable>,
+    ) -> Result<(), String> {
         unsafe {
+            let cancellable = cancellation
+                .map(super::Cancellable::as_ptr)
+                .unwrap_or(std::ptr::null_mut());
             let mut error = std::ptr::null_mut();
             frida_sys::frida_device_resume_sync(
                 self.device.as_ptr(),
                 process.pid() as u32,
-                std::ptr::null_mut(),
+                cancellable,
                 &mut error,
             );
             if error.is_null() {
@@ -249,7 +260,36 @@ impl FridaCore {
     }
 
     pub fn resume(&self, process: Process) -> Result<(), String> {
-        self.request(|reply| Command::Resume { process, reply })
+        self.request(|reply| Command::Resume {
+            process,
+            cancellation: None,
+            reply,
+        })
+    }
+
+    pub fn resume_with_timeout(
+        &self,
+        process: Process,
+        timeout: std::time::Duration,
+    ) -> Result<(), super::FridaRequestError> {
+        let cancellation = Arc::new(super::Cancellable::new()?);
+        let command_cancellation = cancellation.clone();
+        let timeout_cancellation = cancellation.clone();
+        self.request_with_timeout(
+            timeout,
+            move || timeout_cancellation.cancel(),
+            move |reply| Command::Resume {
+                process,
+                cancellation: Some(command_cancellation),
+                reply,
+            },
+        )
+    }
+
+    pub fn resume_cleanup(&self, process: Process) -> Result<(), String> {
+        self.cleanup_request(CleanupKey::Resume(process.pid()), |reply| {
+            Command::CleanupResume { process, reply }
+        })
     }
 }
 

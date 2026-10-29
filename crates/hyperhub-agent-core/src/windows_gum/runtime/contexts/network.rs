@@ -7,6 +7,7 @@ pub(in crate::windows_gum) struct DnsContext {
     pub(in crate::windows_gum) hostname: String,
     pub(in crate::windows_gum) family: i32,
     pub(in crate::windows_gum) replacement: Option<(String, i32)>,
+    pub(in crate::windows_gum) synthesize: bool,
     pub(in crate::windows_gum) denied_error: Option<i32>,
 }
 
@@ -29,6 +30,9 @@ pub(in crate::windows_gum) struct ConnectContext {
     source_family: Option<i32>,
     destination_family: Option<i32>,
     proxy_redirected: bool,
+    native_redirected: bool,
+    pub(in crate::windows_gum) native_scope: u32,
+    pub(in crate::windows_gum) native_flow: u32,
     source: Option<crate::FirewallConnectTarget>,
     destination: Option<crate::FirewallConnectTarget>,
     pub(in crate::windows_gum) ensure_handshake_blocking: bool,
@@ -50,6 +54,9 @@ impl ConnectContext {
             source_family,
             destination_family: source_family,
             proxy_redirected: false,
+            native_redirected: false,
+            native_scope: 0,
+            native_flow: 0,
             destination: source.clone(),
             source,
             ensure_handshake_blocking: false,
@@ -79,6 +86,23 @@ impl ConnectContext {
         self.destination_family = Some(family);
         self.destination = Some(target);
         self.proxy_redirected = true;
+    }
+
+    pub(in crate::windows_gum) fn redirect_to_native(
+        &mut self,
+        family: i32,
+        target: crate::FirewallConnectTarget,
+        scope: u32,
+        flow: u32,
+    ) {
+        self.destination_family = Some(family);
+        self.destination = Some(target);
+        self.native_redirected = true;
+        self.native_scope = scope;
+        self.native_flow = flow;
+    }
+    pub(in crate::windows_gum) fn is_redirected(&self) -> bool {
+        self.proxy_redirected || self.native_redirected
     }
 
     pub(in crate::windows_gum) fn is_proxy_redirected(&self) -> bool {

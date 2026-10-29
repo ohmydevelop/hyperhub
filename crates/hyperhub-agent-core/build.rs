@@ -1,6 +1,18 @@
+#[path = "../../build_support/native_dependencies.rs"]
+#[allow(dead_code)] // Engine generates the shared fingerprint; Agent validates its link inputs.
+mod native_dependencies;
+
 fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_GUM_AGENT");
-    println!("cargo:rerun-if-env-changed=HYPERHUB_FRIDA_GUM_ROOT");
+    println!("cargo:rerun-if-changed=../../build_support/native_dependencies.rs");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS");
+    let dependencies = native_dependencies::NativeDependencies::from_environment(&os)
+        .expect("cannot resolve native Agent SDK inputs");
+    if std::env::var_os("CARGO_FEATURE_GUM_AGENT").is_some() {
+        dependencies
+            .require_native(&os)
+            .expect("Gum Agent cannot use an SDK-free Engine identity");
+    }
 
     if std::env::var_os("CARGO_FEATURE_GUM_AGENT").is_some()
         && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")

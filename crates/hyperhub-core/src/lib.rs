@@ -1,8 +1,10 @@
+pub mod attachments;
 pub mod audit;
 pub mod certificate;
 mod client_proxy;
 pub mod config;
 pub mod config_document;
+pub mod config_persistence;
 pub mod config_store;
 pub mod connector;
 pub mod control;
@@ -33,3 +35,7 @@ mod websocket;
 
 pub use config::{Config, ConfigError};
 pub use policy::{ConnectionContext, Destination, PolicySnapshot, ProcessInfo, Protocol};
+
+mod serve_lease;
+
+pub mod successor;

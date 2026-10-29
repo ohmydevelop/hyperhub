@@ -10,3 +10,8 @@ pub(in crate::windows_gum) fn register(registrar: &mut PluginRegistrar) -> Resul
     network_redirect::register(registrar)?;
     ca_trust::register(registrar)
 }
+
+pub(in crate::windows_gum) use trust_service::{
+    compatibility_resources, forget_context, forget_credential, owns_context, owns_credential,
+    release_trust_storage, remember_credential,
+};

@@ -131,6 +131,20 @@ static DESCRIPTORS: &[Descriptor] = &[
         native::posix_spawnp as *mut c_void,
         true,
     ),
+    replace(
+        42,
+        "fexecve",
+        "process.create",
+        native::fexecve as *mut c_void,
+        true,
+    ),
+    replace(
+        43,
+        "execveat",
+        "process.create",
+        native::execveat as *mut c_void,
+        false,
+    ),
     replace(23, "mmap", "file.map", native::mmap as *mut c_void, true),
     replace(
         24,
@@ -289,6 +303,7 @@ enum InstalledHook {
 static INSTALLED: OnceLock<HookInstallReport> = OnceLock::new();
 
 pub fn install() -> Result<&'static HookInstallReport, String> {
+    super::initialize_mapping_probe()?;
     if let Some(report) = INSTALLED.get() {
         return Ok(report);
     }
@@ -313,6 +328,11 @@ pub fn install() -> Result<&'static HookInstallReport, String> {
         gum::begin(interceptor);
         let mut installed = Vec::<InstalledHook>::new();
         for group in groups {
+            if crate::attachment::startup::check().is_err() {
+                rollback(interceptor, &installed);
+                gum::end(interceptor);
+                return Err("attachment initialization cancelled before Hook commit".into());
+            }
             let install_result = match group.mode {
                 HookMode::Replace(replacement) => {
                     gum::replace(interceptor, group.target, replacement).and_then(|original| {
@@ -327,8 +347,13 @@ pub fn install() -> Result<&'static HookInstallReport, String> {
                     native::variadic_on_leave,
                     kind as *mut c_void,
                 ) {
-                    Ok(listener) => gum::attach(interceptor, group.target, listener)
-                        .map(|_| InstalledHook::Listener(listener)),
+                    Ok(listener) => match gum::attach(interceptor, group.target, listener) {
+                        Ok(()) => Ok(InstalledHook::Listener(listener)),
+                        Err(code) => {
+                            gum::release_listener(listener);
+                            Err(code)
+                        }
+                    },
                     Err(_) => Err(-5),
                 },
             };
@@ -347,6 +372,16 @@ pub fn install() -> Result<&'static HookInstallReport, String> {
                 }
             }
         }
+        // All native originals must be fully initialized before wrappers become
+        // visible to another application thread that could immediately fork.
+        native::warm_originals();
+        let gate = crate::attachment::state_gate();
+        if gate.is_err() || crate::attachment::startup::check().is_err() {
+            rollback(interceptor, &installed);
+            gum::end(interceptor);
+            return Err("attachment initialization cancelled before Hook commit".into());
+        }
+        let _gate = gate.unwrap();
         gum::end(interceptor);
         INSTALLED
             .set(report)
@@ -359,7 +394,10 @@ unsafe fn rollback(interceptor: *mut gum::GumInterceptor, installed: &[Installed
     for hook in installed.iter().rev() {
         match hook {
             InstalledHook::Replacement(target) => gum::revert(interceptor, *target),
-            InstalledHook::Listener(listener) => gum::detach(interceptor, *listener),
+            InstalledHook::Listener(listener) => {
+                gum::detach(interceptor, *listener);
+                gum::release_listener(*listener);
+            }
         }
     }
 }
@@ -407,7 +445,12 @@ mod tests {
                 descriptor.symbol
             );
         }
-        assert_eq!(DESCRIPTORS.len(), 41);
+        assert_eq!(DESCRIPTORS.len(), 43);
+        for (symbol, required) in [("fexecve", true), ("execveat", false)] {
+            let descriptor = DESCRIPTORS.iter().find(|d| d.symbol == symbol).unwrap();
+            assert_eq!(descriptor.semantic_hook, "process.create");
+            assert_eq!(descriptor.required, required);
+        }
         assert!(
             !DESCRIPTORS
                 .iter()
@@ -443,5 +486,44 @@ mod tests {
         assert_eq!(manifest.first().map(|entry| entry.1), Some("getaddrinfo"));
         assert_eq!(manifest.last().map(|entry| entry.1), Some("_Exit"));
         assert_eq!(manifest[2].2, "socket.connect");
+    }
+}
+
+/// Native listener and original-trampoline addresses are pinned by this Agent's
+/// process-lifetime fork integration. Do not equate logical detachment with
+/// their retirement; the caller must retain the mapped module.
+pub(crate) fn uninstall_owned() -> Result<(), String> {
+    if INSTALLED.get().is_some() {
+        Err("native_hook_trampolines_require_resident_module".into())
+    } else {
+        Ok(())
+    }
+}
+
+// Called only before first Core confirmation of a new image, while its kernel
+// exec startup gate holds application code. Never use on an inherited fork or
+// an already active image: Core and SDK own different interceptor layers.
+pub(super) fn remove_exec_hook() -> Result<(), String> {
+    unsafe {
+        let interceptor = gum::initialize()?;
+        let target = gum::find_export("execve").ok_or("execve export disappeared")?;
+        gum::revert(interceptor, target);
+        if !gum::flush(interceptor) {
+            return Err("owned exec callbacks are still active".into());
+        }
+        Ok(())
+    }
+}
+pub(super) fn reinstall_exec_hook() -> Result<(), String> {
+    unsafe {
+        let interceptor = gum::initialize()?;
+        let target = gum::find_export("execve").ok_or("execve export disappeared")?;
+        let original = gum::replace(interceptor, target, native::execve as *mut c_void)
+            .map_err(|code| format!("exec reinstall failed: {code}"))?;
+        gum::set_original("execve", original)?;
+        if !gum::flush(interceptor) {
+            return Err("owned exec replacement is not quiescent".into());
+        }
+        Ok(())
     }
 }

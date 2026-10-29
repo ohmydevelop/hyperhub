@@ -130,6 +130,9 @@ pub(crate) struct FirewallAuditEvent {
 
 #[cfg(all(any(windows, target_os = "linux"), feature = "gum-agent"))]
 pub(crate) fn firewall_snapshot() -> Option<Arc<FirewallSnapshot>> {
+    if !crate::attachment::enforcing() {
+        return None;
+    }
     state().lock().ok()?.sandbox.firewall.clone()
 }
 
@@ -141,7 +144,7 @@ pub(crate) fn firewall_connect_target(
 ) -> Option<FirewallConnectTarget> {
     let ip = parse_ip(address).ok()?;
     let core = state().lock().ok()?;
-    let hostname = core.gateway.dns.get(&ip).cloned();
+    let hostname = core.gateway.issued_hostname(ip);
     let bypass = core.gateway.proxy == Some(SocketAddr::new(ip, port));
     Some(FirewallConnectTarget {
         hostname,

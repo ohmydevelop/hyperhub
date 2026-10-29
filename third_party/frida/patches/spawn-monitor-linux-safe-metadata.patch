@@ -1,0 +1,220 @@
+diff --git a/lib/payload/spawn-monitor-glue.c b/lib/payload/spawn-monitor-glue.c
+index 6841aa5..a79bee8 100644
+--- a/lib/payload/spawn-monitor-glue.c
++++ b/lib/payload/spawn-monitor-glue.c
+@@ -1,5 +1,168 @@
+ #include "frida-payload.h"
+ 
++#if defined (HAVE_LINUX) && !defined (HAVE_ANDROID)
++
++# include <errno.h>
++# include <stdint.h>
++# include <string.h>
++# include <linux/unistd.h>
++# include <sys/syscall.h>
++# include <sys/uio.h>
++# include <unistd.h>
++
++/* Older SDK kernel headers predate this syscall; these are the Linux ABI
++ * numbers also used by Gum's Linux memory reader. */
++# if defined (SYS_process_vm_readv)
++#  define FRIDA_SYS_PROCESS_VM_READV SYS_process_vm_readv
++# elif defined (HAVE_I386) && GLIB_SIZEOF_VOID_P == 8
++#  define FRIDA_SYS_PROCESS_VM_READV 310
++# elif defined (HAVE_I386) && GLIB_SIZEOF_VOID_P == 4
++#  define FRIDA_SYS_PROCESS_VM_READV 347
++# elif defined (HAVE_ARM64)
++#  define FRIDA_SYS_PROCESS_VM_READV 270
++# elif defined (HAVE_ARM) && defined (__NR_SYSCALL_BASE)
++#  define FRIDA_SYS_PROCESS_VM_READV (__NR_SYSCALL_BASE + 376)
++# elif defined (HAVE_ARM) && defined (__ARM_EABI__)
++#  define FRIDA_SYS_PROCESS_VM_READV 376
++# endif
++
++/* These are observation budgets, not execve argument validation limits. */
++# define FRIDA_EXEC_STRING_BUDGET (1024 * 1024)
++# define FRIDA_EXEC_VECTOR_BUDGET (8 * 1024 * 1024)
++# define FRIDA_EXEC_VECTOR_LIMIT 65536
++
++static gssize frida_read_self (uintptr_t address, gpointer buffer, gsize size);
++static gchar * frida_try_read_string (uintptr_t address, gsize * budget);
++
++gchar *
++_frida_spawn_monitor_try_read_string (void * address)
++{
++  gint saved_errno = errno;
++  gsize budget = FRIDA_EXEC_STRING_BUDGET;
++  gchar * result = frida_try_read_string ((uintptr_t) address, &budget);
++  errno = saved_errno;
++  return result;
++}
++
++gchar **
++_frida_spawn_monitor_try_read_strv (void * address,
++                                  gint * length)
++{
++  gint saved_errno = errno;
++  GPtrArray * elements;
++  uintptr_t cursor = (uintptr_t) address;
++  gsize budget = FRIDA_EXEC_VECTOR_BUDGET;
++  guint i;
++  gchar ** result = NULL;
++
++  *length = 0;
++  if (address == NULL)
++    goto beach;
++
++  elements = g_ptr_array_new_with_free_func (g_free);
++  for (i = 0; i != FRIDA_EXEC_VECTOR_LIMIT; i++)
++  {
++    uintptr_t element;
++    gchar * value;
++
++    if (budget < sizeof (element) ||
++        frida_read_self (cursor, &element, sizeof (element)) != (gssize) sizeof (element))
++      goto failure;
++    budget -= sizeof (element);
++
++    if (element == 0)
++    {
++      *length = elements->len;
++      g_ptr_array_add (elements, NULL);
++      result = (gchar **) g_ptr_array_free (elements, FALSE);
++      goto beach;
++    }
++
++    value = frida_try_read_string (element, &budget);
++    if (value == NULL)
++      goto failure;
++    g_ptr_array_add (elements, value);
++
++    if (cursor > UINTPTR_MAX - sizeof (element))
++      goto failure;
++    cursor += sizeof (element);
++  }
++
++failure:
++  g_ptr_array_unref (elements);
++beach:
++  errno = saved_errno;
++  return result;
++}
++
++static gchar *
++frida_try_read_string (uintptr_t address,
++                       gsize * budget)
++{
++  GByteArray * bytes;
++  gsize page_size;
++  gchar * result = NULL;
++
++  if (address == 0)
++    return NULL;
++
++  bytes = g_byte_array_new ();
++  page_size = gum_query_page_size ();
++  while (*budget != 0 && bytes->len < FRIDA_EXEC_STRING_BUDGET)
++  {
++    guint8 chunk[4096];
++    gsize size = MIN (sizeof (chunk), page_size - (address % page_size));
++    gssize n;
++    guint8 * terminator;
++
++    size = MIN (size, *budget);
++    size = MIN (size, FRIDA_EXEC_STRING_BUDGET - bytes->len);
++    n = frida_read_self (address, chunk, size);
++    if (n <= 0)
++      break;
++
++    terminator = memchr (chunk, 0, n);
++    if (terminator != NULL)
++    {
++      gsize consumed = terminator - chunk + 1;
++      g_byte_array_append (bytes, chunk, consumed);
++      *budget -= consumed;
++      result = (gchar *) g_byte_array_free (bytes, FALSE);
++      return result;
++    }
++
++    g_byte_array_append (bytes, chunk, n);
++    *budget -= n;
++    if (n != (gssize) size || address > UINTPTR_MAX - n)
++      break;
++    address += n;
++  }
++
++  g_byte_array_unref (bytes);
++  return NULL;
++}
++
++static gssize
++frida_read_self (uintptr_t address,
++                 gpointer buffer,
++                 gsize size)
++{
++  struct iovec local = { buffer, size };
++  struct iovec remote = { (void *) address, size };
++
++  if (address > UINTPTR_MAX - size)
++    return -1;
++
++  /* No maps-check + memcpy fallback: another thread may unmap the range. */
++# ifdef FRIDA_SYS_PROCESS_VM_READV
++  return syscall (FRIDA_SYS_PROCESS_VM_READV, getpid (), &local, 1, &remote, 1, 0);
++# else
++  return -1;
++# endif
++}
++
++#endif
++
+ #ifdef HAVE_WINDOWS
+ 
+ # define VC_EXTRALEAN
+diff --git a/lib/payload/spawn-monitor.vala b/lib/payload/spawn-monitor.vala
+index 64c9270..e709902 100644
+--- a/lib/payload/spawn-monitor.vala
++++ b/lib/payload/spawn-monitor.vala
+@@ -404,9 +404,15 @@ namespace Frida {
+ 
+ 			var parent_pid = invocation.pid;
+ 			var info = HostChildInfo (invocation.pid, parent_pid, ChildOrigin.EXEC);
++#if LINUX && !ANDROID
++			var path = _try_read_string (context.get_nth_argument (0));
++			var argv = _try_read_strv (context.get_nth_argument (1));
++			var envp = _try_read_strv (context.get_nth_argument (2));
++#else
+ 			unowned string? path = (string?) context.get_nth_argument (0);
+ 			var argv = parse_strv ((string **) context.get_nth_argument (1));
+ 			var envp = parse_strv ((string **) context.get_nth_argument (2));
++#endif
+ 			fill_child_info_path_argv_and_envp (ref info, path, argv, envp);
+ 
+ 			on_exec_imminent (&info);
+@@ -420,6 +426,10 @@ namespace Frida {
+ 		private struct Invocation {
+ 			public uint pid;
+ 		}
++#if LINUX && !ANDROID
++		private extern static string? _try_read_string (void * address);
++		private extern static string[]? _try_read_strv (void * address);
++#endif
+ #endif
+ 
+ #if !WINDOWS
+@@ -438,6 +448,7 @@ namespace Frida {
+ 			}
+ 		}
+ 
++#if !LINUX || ANDROID
+ 		private unowned string[]? parse_strv (string ** strv) {
+ 			if (strv == null)
+ 				return null;
+@@ -445,6 +456,7 @@ namespace Frida {
+ 			unowned string[] elements = (string[]) strv;
+ 			return elements[0:strv_length (elements)];
+ 		}
++#endif
+ #endif
+ 
+ 		private void notify_operation_completed (OperationStatus * status) {

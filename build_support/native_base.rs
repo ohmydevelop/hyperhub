@@ -6,6 +6,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[path = "native_dependencies.rs"]
+pub mod native_dependencies;
+
 pub const MARKER_PREFIX: &str = "hyperhub-native-base-v1:";
 
 fn test_only(item: &syn::Item) -> bool {
@@ -100,8 +103,25 @@ fn collect(directory: &Path, os: &str, paths: &mut Vec<PathBuf>) -> io::Result<(
     Ok(())
 }
 pub fn fingerprint(root: &Path, target: &str, os: &str) -> io::Result<String> {
+    let dependencies = native_dependencies::NativeDependencies::from_environment(os)?;
+    fingerprint_with_dependencies(root, target, os, &dependencies)
+}
+
+/// Explicit inputs let regressions verify the complete Base without mutating
+/// process-global environment variables while other tests run.
+pub fn fingerprint_with_dependencies(
+    root: &Path,
+    target: &str,
+    os: &str,
+    dependencies: &native_dependencies::NativeDependencies,
+) -> io::Result<String> {
     let mut paths = Vec::new();
     collect(&root.join("crates/hyperhub-agent-core/src"), os, &mut paths)?;
+    collect(
+        &root.join("crates/hyperhub-runtime/src/attachment"),
+        os,
+        &mut paths,
+    )?;
     collect(
         &root.join("crates/hyperhub-cli/src/platform"),
         os,
@@ -113,8 +133,10 @@ pub fn fingerprint(root: &Path, target: &str, os: &str) -> io::Result<String> {
             && !(os != "windows" && text.ends_with("/platform/windows.rs"))
     });
     for file in [
+        "build_support/native_dependencies.rs",
         "crates/hyperhub-agent-core/build.rs",
         "crates/hyperhub-runtime/src/abi.rs",
+        "crates/hyperhub-runtime/src/attachment.rs",
         "crates/hyperhub-runtime/src/artifact.rs",
         "crates/hyperhub-runtime/src/generation.rs",
         "crates/hyperhub-runtime/src/native.rs",
@@ -127,7 +149,16 @@ pub fn fingerprint(root: &Path, target: &str, os: &str) -> io::Result<String> {
     ] {
         paths.push(root.join(file));
     }
-    hash_paths(root, target, MARKER_PREFIX, paths)
+    let sources = hash_paths(root, target, MARKER_PREFIX, paths)?;
+    let mut digest = Sha256::new();
+    digest.update(b"hyperhub-resident-base-with-native-dependencies-v1\0");
+    digest.update(sources.as_bytes());
+    digest.update(dependencies.fingerprint(target)?);
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// Shared ingress/authority modules are deliberately conservative: changes to
@@ -136,6 +167,7 @@ pub fn fingerprint(root: &Path, target: &str, os: &str) -> io::Result<String> {
 pub fn serve_fingerprint(root: &Path, target: &str, os: &str) -> io::Result<String> {
     let mut paths = Vec::new();
     for directory in [
+        "crates/hyperhub-core/src/attachments",
         "crates/hyperhub-core/src/upgrade",
         "crates/hyperhub-core/src/release",
         "crates/hyperhub-core/src/forward/manager",
@@ -156,6 +188,7 @@ pub fn serve_fingerprint(root: &Path, target: &str, os: &str) -> io::Result<Stri
         "runtime.rs",
         "config.rs",
         "config_store.rs",
+        "release_channel.rs",
         "audit.rs",
         "trust.rs",
         "client_proxy.rs",
