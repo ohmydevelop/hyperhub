@@ -1,14 +1,24 @@
 ## 发布 v0.2.16（2026-11-02）
 
-状态：版本元数据及主 agent 自检完成，准备提交并跟踪精确提交 CI。已实时确认最新正式版本为 v0.2.15，本轮按用户要求发布 v0.2.16。workspace、锁文件中五个本地包及发布工作流默认版本已同步；locked metadata、格式、diff 和本地全工作区全目标测试通过（615 项通过，25 项平台专属或手动 Suite 用例按声明忽略），五项升级提示集成回归通过。测试日志：target/diagnostics/release-016-workspace.log。
+状态：完成。v0.2.16 已正式发布并确认 latest 指向本版，包含升级成功庆祝提示。中文发布说明已发布并精确读回，六个附件的大小及 SHA-256 摘要保持不变。
 
-步骤：
-1. 同步 workspace、锁文件内五个本地包及发布工作流默认版本；验证版本一致性、格式和相关测试，按 committing-changes Skill 提交并立即推送。
-2. 跟踪精确发布提交的三项 CI 全部成功，再创建并推送 v0.2.16 标签；等待三平台构建与正式发布完成。
-3. 下载全部正式附件，校验 GitHub 摘要、SHA256SUMS、包内 manifest、版本、目标架构及安装脚本源码；在私有目录验证公开 Linux CLI、升级提示相关行为和安装脚本，确认 latest 指向。
-4. 发布简明中文说明并读回，更新本计划的最终证据，提交记录并立即推送。
+发布地址：https://github.com/ohmydevelop/hyperhub/releases/tag/v0.2.16
 
-约束：保留用户未跟踪的 Pasted image.png；不修改真实用户配置、凭证、本机安装或运行中的受管程序。使用现有发布流程，不重写已有标签或远端历史。Windows 原生行为以 CI 为准，PowerShell 安装脚本和 ARM64 硬件 Hook、macOS 未实机验证时如实记录。
+发布准备提交与带注释标签 v0.2.16 固定在 1f7dcc9cc56548fce714f3da287fb6e632d4b18d；workspace、锁文件中五个本地包及发布工作流默认版本均为 0.2.16。本地 locked metadata、格式、diff 和全工作区全目标测试通过（615 项通过，25 项平台专属或手动 Suite 用例按声明忽略），五项升级提示集成回归通过。测试日志：target/diagnostics/release-016-workspace.log。
+
+最终 CI：https://github.com/ohmydevelop/hyperhub/actions/runs/41418063703。已核对 headSha 为上述发布提交，Linux targets、Windows 和 Ubuntu 三项任务全部成功；标签在三项成功后才创建并推送。
+
+正式发布：https://github.com/ohmydevelop/hyperhub/actions/runs/41420537099。三个平台构建与发布任务全部成功，发布包覆盖 Linux x86_64、Linux ARM64、Windows x64。标签、发布运行及 CI 的源提交均一致。
+
+实际公开附件：target/diagnostics/release-016-public。六个附件的 GitHub 官方摘要及大小、三包 SHA256SUMS、包内 MANIFEST、版本、架构、Base/Engine/Worker 摘要、README 和安装脚本源码全部通过。实际下载的 Linux CLI 完成 help、doctor、skill、bundle export、控制通道完成提示、签名安装回执与庆祝提示、双实例隔离、配置审批及热更新检查；公开 install.sh 使用真实 GitHub 版本下载地址在私有目录安装，确认输出 🎉 且安装后 CLI 摘要匹配。私有环境已清理，原有本机安装摘要保持不变。
+
+验收证据：target/diagnostics/release-016-acceptance/verified.json、release-016-acceptance.log、release-016-notes-verified.json。验收工具：target/diagnostics/verify-release-016.py 与 release-016-acceptance.py。发布说明说明了旧版 CLI 发起首次升级沿用旧提示，本版发起的后续升级才使用新提示；新版安装脚本完成时即可看到庆祝提示。
+
+首次 CI 41415042558 的 Linux targets 任务 125176725801 在平台 Suite 阶段退出 101；编译、全工作区测试、Gum 单元和配置审批集成都已通过，但内部 cargo 日志未上传，无法确认具体失败测试或根因。原始日志保留在 target/diagnostics/release-016-linux-targets-job.log，不把它描述为已确认的偶发或已修复故障。该运行的三个任务均结束后，总状态仍为 in_progress，重跑接口拒绝；取消接口同时称运行已完成，取消和重跑均未实际执行。改为对同一提交使用 workflow_dispatch 新建上述最终 CI，完整通过后才发布；没有改动产品或测试绕过首次失败。
+
+收尾：仅提交本段验收记录并立即推送；使用 [skip ci]，发布标签继续固定在已通过完整 CI 的版本提交。
+
+验证边界：Windows 原生构建与行为由 CI 验证；ARM64 完成交叉构建及 QEMU bundle export，未做硬件 Hook 验证。PowerShell 安装脚本仅静态检查，macOS 未实机验证。用户未跟踪的 Pasted image.png、真实配置、凭证、本机安装和运行中的受管程序保持不变。
 
 ---
 
