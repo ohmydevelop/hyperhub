@@ -1,6 +1,10 @@
 ## 升级完成庆祝提示（2026-11-02）
 
-状态：实现和主 agent 自检完成，准备提交并跟踪 CI。CLI 全目标测试通过（204 项通过，11 项既有平台 Suite 用例按声明忽略）；Windows GNU 全目标交叉编译检查、格式、diff 及 Shell 语法检查通过。新增五项 CLI 集成回归全部通过，Linux 安装脚本使用本地归档验证成功及非零退出两条路径。Windows 原生与 PowerShell 实际执行待远端 CI 或对应环境验证，macOS 未实机验证。
+状态：完成。功能提交 c4b69851e26c4628844c5ecea079ef384b3d190b 已推送，CI 41409906800 的 Linux、Windows 和 Linux targets 三项任务全部成功。原生 Windows 日志确认新增五项 CLI 集成回归全部通过；Windows 嵌入式构建与 Hook Suite、Linux 实例隔离与 Gum Agent、跨架构平台 Suite 均通过。
+
+本地验证：CLI 全目标测试通过（204 项通过，11 项既有平台 Suite 用例按声明忽略）；Windows GNU 全目标交叉编译检查、格式、diff 及 Shell 语法检查通过。Linux 安装脚本使用本地归档验证成功及非零退出两条路径。PowerShell 安装脚本仅静态检查，macOS 未实机验证。收尾提交仅记录验证证据，使用 [skip ci]，功能代码保持已验证版本。
+
+CI：https://github.com/ohmydevelop/hyperhub/actions/runs/41409906800
 
 范围：为 CLI 升级和安装脚本增加简短、明确的 🎉 完成提示；保留现有后台升级、签名安装回执与 JSON 查询接口，不改升级协议或真实用户安装。
 
