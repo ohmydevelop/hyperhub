@@ -114,12 +114,21 @@ enum Command {
     Stop,
     Restart(lifecycle::StartConfig),
     Upgrade,
-    UpgradeAction { action: String, id: Option<String> },
+    UpgradeAction {
+        action: String,
+        id: Option<String>,
+    },
     ForwardWorker,
     ForwardCacheCleanup,
     ExportUpgradeBundle(PathBuf),
-    InstallUpgrade(PathBuf),
-    Status { json: bool },
+    InstallUpgrade {
+        job: PathBuf,
+        notify_version: Option<String>,
+    },
+    WatchUpgrade(String),
+    Status {
+        json: bool,
+    },
     Logs(lifecycle::LogsConfig),
     AuthClear,
     Chat(chat::ChatConfig),
@@ -198,7 +207,11 @@ fn execute(command: Command) -> Result<i32, String> {
                 .map_err(|error| error.to_string())
         }
         Command::ExportUpgradeBundle(directory) => upgrade::export_bundle(&directory),
-        Command::InstallUpgrade(job) => upgrade::run_install_helper(&job),
+        Command::InstallUpgrade {
+            job,
+            notify_version,
+        } => upgrade::run_install_helper(&job, notify_version.as_deref()),
+        Command::WatchUpgrade(id) => upgrade::watch_completion(&id),
         Command::Status { json } => lifecycle::status(json),
         Command::Logs(config) => lifecycle::logs(config),
         Command::AuthClear => clear_password_authorization(),
@@ -839,8 +852,13 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
             _ => Err("export-upgrade-bundle is an internal command".into()),
         },
         "upgrade-install-helper" => match &args[1..] {
-            [job] => Ok(Command::InstallUpgrade(job.into())),
+            [job] => Ok(Command::InstallUpgrade { job: job.into(), notify_version: None }),
+            [job, flag, version] if flag == "--notify-version" => Ok(Command::InstallUpgrade { job: job.into(), notify_version: Some(version.to_string_lossy().into_owned()) }),
             _ => Err("upgrade-install-helper is an internal command".into()),
+        },
+        "upgrade-watch-helper" => match &args[1..] {
+            [id] => Ok(Command::WatchUpgrade(id.to_string_lossy().into_owned())),
+            _ => Err("upgrade-watch-helper is an internal command".into()),
         },
         "status" => parse_status(&args[1..]),
         "logs" => parse_logs(&args[1..]).map(Command::Logs),

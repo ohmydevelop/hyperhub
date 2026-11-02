@@ -9,6 +9,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod bundle;
+mod notification;
+
+pub(crate) use notification::watch_completion;
 
 pub(crate) fn export_bundle(directory: &Path) -> Result<i32, String> {
     let manifest = bundle::export(directory).map_err(|error| error.to_string())?;
@@ -221,6 +224,20 @@ fn perform_upgrade(
     let expected_target_sha256 = hyperhub_core::release::installer::digest(&current)
         .map_err(|error| error.to_string())?
         .0;
+    let notify = io::stdout().is_terminal();
+    // Prepare the observer before submitting an upgrade. It must run from a
+    // separate image so it cannot keep the Windows installation target locked.
+    let observer = if running && notify {
+        match copy_upgrade_helper(&current, &root, "notifier") {
+            Ok(helper) => Some(helper),
+            Err(error) => {
+                eprintln!("hyperhub: cannot prepare upgrade notification: {error}; use hyperhub upgrade status {id} to inspect completion");
+                None
+            }
+        }
+    } else {
+        None
+    };
     if running {
         let request = hyperhub_core::release::Request {
             id: id.clone(),
@@ -259,7 +276,19 @@ fn perform_upgrade(
                 if record.phase == hyperhub_core::release::Phase::RequiresRestart {
                     return Err("resident Base requires an explicit restart; no managed process was restarted".into());
                 }
-                println!("Upgrade accepted: {id}. Resident Serve will finish it after this CLI exits. Use hyperhub status --json to inspect progress.");
+                println!("Upgrade accepted: {id}. Resident Serve will finish it after this CLI exits. Use hyperhub upgrade status {id} to inspect progress.");
+                if let Some(observer) = observer {
+                    println!("This terminal will show the result when the update finishes.");
+                    io::stdout().flush().map_err(|error| error.to_string())?;
+                    if let Err(error) = Command::new(observer)
+                        .arg("upgrade-watch-helper")
+                        .arg(&id)
+                        .stdin(Stdio::null())
+                        .spawn()
+                    {
+                        eprintln!("hyperhub: cannot follow upgrade completion: {error}; use hyperhub upgrade status {id}");
+                    }
+                }
             }
             hyperhub_core::session::ControlResponse::Error { message } => return Err(message),
             _ => return Err("resident Serve returned an unexpected upgrade response".into()),
@@ -283,30 +312,40 @@ fn perform_upgrade(
         .map_err(|error| error.to_string())?;
         let job_path = root.join("install.json");
         job.write(&job_path).map_err(|error| error.to_string())?;
-        let helper = root.join(format!("installer{}", std::env::consts::EXE_SUFFIX));
-        fs::copy(
-            std::env::current_exe().map_err(|error| error.to_string())?,
-            &helper,
-        )
-        .map_err(|error| error.to_string())?;
-        set_executable(&helper)?;
-        Command::new(helper)
-            .arg("upgrade-install-helper")
-            .arg(&job_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("cannot start installation helper: {error}"))?;
+        let helper = copy_upgrade_helper(
+            &std::env::current_exe().map_err(|error| error.to_string())?,
+            &root,
+            "installer",
+        )?;
         println!(
             "Installation accepted: {id}. Helper acknowledgement: {}",
             job_path.with_extension("ack.json").display()
         );
+        let mut command = Command::new(helper);
+        command.arg("upgrade-install-helper").arg(&job_path);
+        if notify {
+            println!("This terminal will show the result when the update finishes.");
+            command.arg("--notify-version").arg(&info.version);
+        } else {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        command
+            .stdin(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("cannot start installation helper: {error}"))?;
     }
     Ok(())
 }
 
-pub(crate) fn run_install_helper(path: &Path) -> Result<i32, String> {
+fn copy_upgrade_helper(current: &Path, root: &Path, name: &str) -> Result<PathBuf, String> {
+    let helper = root.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(current, &helper).map_err(|error| error.to_string())?;
+    set_executable(&helper)?;
+    Ok(helper)
+}
+
+pub(crate) fn run_install_helper(path: &Path, notify_version: Option<&str>) -> Result<i32, String> {
     use hyperhub_core::release::installer::{
         self, Acknowledgement, SignedAcknowledgement, SignedJob,
     };
@@ -350,6 +389,9 @@ pub(crate) fn run_install_helper(path: &Path) -> Result<i32, String> {
                 "installed HyperHub could not start Serve: {status}"
             ));
         }
+    }
+    if let Some(version) = notify_version {
+        notification::print_success(version);
     }
     Ok(0)
 }

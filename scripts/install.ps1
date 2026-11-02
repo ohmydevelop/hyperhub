@@ -42,8 +42,11 @@ try {
     Write-Host "Added to user PATH: $installDir"
   }
   & $target --help | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Installed HyperHub could not run (exit code $LASTEXITCODE)" }
   Write-Host "hyperhub installed to $target"
   Write-Host "shortcut installed to $shortcut"
+  $celebration = [char]::ConvertFromUtf32(0x1F389)
+  Write-Host "`n$celebration HyperHub installed successfully! Enjoy using HyperHub."
 } finally {
   Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
 }

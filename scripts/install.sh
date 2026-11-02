@@ -84,3 +84,5 @@ case ":$PATH:" in
   *":$install_dir:"*) ;;
   *) echo "add this directory to PATH if needed: $install_dir" ;;
 esac
+
+printf '\n🎉 HyperHub installed successfully! Enjoy using HyperHub.\n'
