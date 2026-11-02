@@ -1,3 +1,17 @@
+## 发布 v0.2.16（2026-11-02）
+
+状态：版本元数据及主 agent 自检完成，准备提交并跟踪精确提交 CI。已实时确认最新正式版本为 v0.2.15，本轮按用户要求发布 v0.2.16。workspace、锁文件中五个本地包及发布工作流默认版本已同步；locked metadata、格式、diff 和本地全工作区全目标测试通过（615 项通过，25 项平台专属或手动 Suite 用例按声明忽略），五项升级提示集成回归通过。测试日志：target/diagnostics/release-016-workspace.log。
+
+步骤：
+1. 同步 workspace、锁文件内五个本地包及发布工作流默认版本；验证版本一致性、格式和相关测试，按 committing-changes Skill 提交并立即推送。
+2. 跟踪精确发布提交的三项 CI 全部成功，再创建并推送 v0.2.16 标签；等待三平台构建与正式发布完成。
+3. 下载全部正式附件，校验 GitHub 摘要、SHA256SUMS、包内 manifest、版本、目标架构及安装脚本源码；在私有目录验证公开 Linux CLI、升级提示相关行为和安装脚本，确认 latest 指向。
+4. 发布简明中文说明并读回，更新本计划的最终证据，提交记录并立即推送。
+
+约束：保留用户未跟踪的 Pasted image.png；不修改真实用户配置、凭证、本机安装或运行中的受管程序。使用现有发布流程，不重写已有标签或远端历史。Windows 原生行为以 CI 为准，PowerShell 安装脚本和 ARM64 硬件 Hook、macOS 未实机验证时如实记录。
+
+---
+
 ## 升级完成庆祝提示（2026-11-02）
 
 状态：完成。功能提交 c4b69851e26c4628844c5ecea079ef384b3d190b 已推送，CI 41409906800 的 Linux、Windows 和 Linux targets 三项任务全部成功。原生 Windows 日志确认新增五项 CLI 集成回归全部通过；Windows 嵌入式构建与 Hook Suite、Linux 实例隔离与 Gum Agent、跨架构平台 Suite 均通过。
