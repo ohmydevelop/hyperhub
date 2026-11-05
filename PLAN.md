@@ -1,12 +1,16 @@
 ## SSH 空闲断线与双向保活（2026-11-06）
 
-状态：实现、本地集中验证和主 agent 自检完成，准备提交并跟踪 CI。用户反馈 SSH 客户端空闲后直接断开，并明确要求正常连接不应因客户端使用方式或空闲而被切断。SSH MITM 接入侧原用 russh 0.62.6 默认 600 秒 inactivity_timeout，上游侧原已禁用空闲超时，但两侧 keepalive_interval 均为 None；现已在两侧关闭空闲回收并启用 30 秒保活及有限的未响应阈值。现有实例检查时没有活动连接，日志未给出断线原因，不能将源码对照等同于用户现场已恢复。
+状态：源码修复和跨平台验证完成，提交 1fe8f5c905e5edb272fd00b9e18456e6509c5c06 已推送到 main。精确提交 CI 41999115142 的 Ubuntu、Windows 和 Linux targets 三项任务全部成功。本轮未发布新版本、未更新或重启用户真实 Serve。SSH MITM 两侧均已关闭空闲回收，并独立启用 30 秒保活及有限的未响应阈值。
 
-证据：target/diagnostics/ssh-idle-before.log 中三个 Core 定向回归实际失败；ssh-idle-after.log 中修复后定向回归通过，新增透传控制也已实现。独立源码客户端经已发布 v0.2.16 worker 时失败（ssh-idle-external-before.log），经当前源码 worker 时无主动探活/主动探活两类客户端的 PTY shell、exec、subsystem 均在 65 秒无应用数据后通过（ssh-idle-external-after.log）。外部程序已接入现有 forward_workers 测试及两平台 Suite。范围与 oracle 由主 agent 自检；本轮是可靠性回归，不生成性能 benchmark 或性能通过结论。
+原因与对照：接入侧原用 russh 0.62.6 默认 600 秒 inactivity_timeout，上游侧原已禁用空闲超时，但两侧 keepalive_interval 均为 None。ssh-idle-before.log 中三个 Core 回归实际失败；修复后四项通过，包括加密透传控制。ssh-idle-external-before-all.log 确认已发布 v0.2.16 worker 对客户端有/无主动保活两种场景均失败；修复后的同一源码样例均在 65 秒无应用数据后恢复 PTY shell、exec 和 subsystem 的精确数据交换。用户未给出现场断线时长，检查时无活动连接，因此不把代码复现描述为用户现场已经恢复。
 
-本地集中结果：四项 Core 空闲/保活/失联/透传测试通过；完整 forwarding worker Suite 13 项通过（ssh-idle-forward-workers.log），工作区全目标 619 项通过、26 项按声明忽略（ssh-idle-workspace.log）；Windows GNU 全目标交叉检查通过（ssh-idle-windows-check.log）。补充旧 worker 对照 ssh-idle-external-before-all.log 确认客户端有/无主动保活均失败。格式、diff 和 Bash 语法检查通过。原生 Windows 由提交后的 CI 验证，macOS 未实机验证。
+本地集中结果：四项 Core 空闲/保活/失联/透传测试通过；完整 forwarding worker Suite 13 项通过（ssh-idle-forward-workers.log），工作区全目标 619 项通过、26 项按声明忽略（ssh-idle-workspace.log）；Windows GNU 全目标交叉检查通过（ssh-idle-windows-check.log）。格式、diff 和 Bash 语法检查通过。样例 tests/fixtures/ssh_idle_probe.rs 已注册到 Linux/Windows 统一 Suite；范围与 oracle 由主 agent 自检，本轮不作性能达标声明。
 
-步骤：
+CI：https://github.com/ohmydevelop/hyperhub/actions/runs/41999115142，已核对 headSha 与源码提交一致。Windows 日志明确显示四项定向测试通过、两种外部客户端各自打印 SSH_IDLE_PASS，完整 worker Suite 13 项通过。Linux 平台 Suite 也成功完成。证据：target/diagnostics/ssh-idle-windows-ci.log、ssh-idle-linux-ci.log、ssh-idle-source-evidence.json。macOS 未实机验证。
+
+推送历史：首次 HTTPS 推送因凭证助手缺失且 gh token 无效失败。严格 GitHub SSH 主机校验拒绝连接，未关闭验证。用户恢复登录后，已通过命令范围内的 gh credential helper 成功推送，未由 agent 修改全局认证配置。收尾仅提交验证记录并立即推送，使用 [skip ci]，源码保持上述已验证提交。
+
+已完成步骤：
 1. 审查 SSH 双会话生命周期与现有测试；统一两侧的无空闲回收及协议保活设置，保持主机密钥、认证、审计、取消语义和短时主机密钥探测的超时边界。
 2. 按 benchmark Skill 的可靠性流程复用现有原生框架，固化空闲会话、两端保活、失联收尾与通道类型的直接回归；外部客户端可执行行为复现注册现有统一 Suite，避免一次性 Benchmark。
 3. 在可控时钟或短周期协议下验证修复前失败、修复后通过；运行 Core/工作区及对应平台检查，记录未能验证的环境。
