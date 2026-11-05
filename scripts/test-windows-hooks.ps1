@@ -41,6 +41,8 @@ try {
   cargo test --locked -p hyperhub --test file_alias_live -- --ignored --nocapture --test-threads=1
   if ($LASTEXITCODE -ne 0) { throw 'Windows file namespace alias regression failed.' }
   $env:HH_FORWARD_WORKER_FIXTURE = $HyperHub
+  cargo build --locked -p hyperhub-core --example ssh_idle_probe
+  if ($LASTEXITCODE -ne 0) { throw 'Windows SSH idle source fixture build failed.' }
   cargo test --locked -p hyperhub-core --test forward_workers -- --ignored --nocapture
   if ($LASTEXITCODE -ne 0) { throw 'Windows forwarding worker upgrade failed.' }
   cargo test --locked -p hyperhub-core --lib durable_release_recovery_status_installation_and_missing_host_boundaries -- --ignored --nocapture

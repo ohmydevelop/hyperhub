@@ -32,6 +32,8 @@ use tokio_util::sync::CancellationToken;
 
 const SSH_EVENT_BUFFER_SIZE: usize = 64;
 const SSH_CHANNEL_BUFFER_SIZE: usize = 64;
+const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const SSH_KEEPALIVE_MAX: usize = 3;
 const SSH_AUDIT_BUFFER_SIZE: usize = 256;
 const SSH_TRANSCRIPT_BUFFER_SIZE: usize = 32;
 const SSH_TRANSCRIPT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1390,15 +1392,22 @@ pub async fn run_ssh_mitm(
     let server_config = Arc::new(server::Config {
         keys: vec![(*server_key).clone()],
         auth_rejection_time: Duration::from_secs(1),
+        // A healthy idle shell is not an abandoned connection. Each of the
+        // two independent SSH transports probes its own peer instead.
+        inactivity_timeout: None,
+        keepalive_interval: Some(SSH_KEEPALIVE_INTERVAL),
+        keepalive_max: SSH_KEEPALIVE_MAX,
         event_buffer_size: SSH_EVENT_BUFFER_SIZE,
         channel_buffer_size: SSH_CHANNEL_BUFFER_SIZE,
         nodelay: true,
         ..Default::default()
     });
     let client_config = Arc::new(client::Config {
-        // 空闲会话不是故障。连接活性由 SSH/TCP 错误决定，不能把正常停留在 shell
-        // 提示符的用户误判为“卡死”。
+        // Client keepalives terminate at the MITM, so the upstream connection
+        // needs its own probes even when the client sends ServerAlive packets.
         inactivity_timeout: None,
+        keepalive_interval: Some(SSH_KEEPALIVE_INTERVAL),
+        keepalive_max: SSH_KEEPALIVE_MAX,
         channel_buffer_size: SSH_CHANNEL_BUFFER_SIZE,
         nodelay: true,
         ..Default::default()
@@ -1451,6 +1460,9 @@ pub async fn run_ssh_mitm(
     drop(audit_worker);
     result
 }
+
+#[cfg(test)]
+mod keepalive_tests;
 
 #[cfg(test)]
 mod tests {

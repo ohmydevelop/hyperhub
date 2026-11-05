@@ -339,6 +339,8 @@ record_check backend.engine_upgrade "authenticated native Engine switch preserve
 record_check backend.engine_fork_runtime "native module cache lock and old leases survive fork and reclaim after rollback"
 (
   cd "$root"
+  cargo build -p hyperhub-core --example ssh_idle_probe --locked \
+    >"$result_dir/ssh-idle-fixture-build.log" 2>&1
   HH_FORWARD_WORKER_FIXTURE="$standalone_hyperhub" \
     cargo test -p hyperhub-core --test forward_workers --locked -- --ignored --nocapture \
     >"$result_dir/forward-workers.log" 2>&1
@@ -346,7 +348,7 @@ record_check backend.engine_fork_runtime "native module cache lock and old lease
     cargo test -p hyperhub-core --lib --locked durable_release_recovery_status_installation_and_missing_host_boundaries -- --ignored --nocapture \
     >"$result_dir/release-recovery.log" 2>&1
 )
-record_check backend.forward_workers "real worker processes preserve resident identities and old streams across generation changes"
+record_check backend.forward_workers "real workers retain resident identities and old streams; external SSH clients retain idle PTY, exec and subsystem channels with independent upstream probes"
 (
   cd "$root"
   for release_backend in ptrace gum; do

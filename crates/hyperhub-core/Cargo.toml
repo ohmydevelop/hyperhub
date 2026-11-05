@@ -58,3 +58,10 @@ windows-sys = { version = "0.61", features = [
 [[example]]
 name = "forward_worker_probe"
 path = "../../tests/fixtures/forward_worker_probe.rs"
+
+[[example]]
+name = "ssh_idle_probe"
+path = "../../tests/fixtures/ssh_idle_probe.rs"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
