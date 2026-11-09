@@ -4,15 +4,16 @@
 [![Release](https://img.shields.io/github/v/release/ohmydevelop/hyperhub)](https://github.com/ohmydevelop/hyperhub/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**面向任意程序的本地进程级安全网关。**
+**本地进程级安全网关。**
 
-为 curl、SSH、AI Agent 等程序统一管理访问权限与凭证，无需修改应用。支持 Linux 和 Windows，目前处于开发阶段。
+无需修改应用，为托管程序提供访问控制、凭证托管和安全审计。支持 Linux 和 Windows，目前处于开发阶段。
 
 ## 核心亮点
 
-- **进程级防护**：管理托管程序及其子进程的网络、文件和进程访问。
-- **凭证与审计**：集中管理凭证，记录关键安全行为。
-- **AI 辅助配置**：用自然语言配置安全策略，变更由你审批。
+- **访问控制**：按进程管理网络连接、文件访问和子进程创建。
+- **凭证托管**：集中管理凭证，按访问策略注入。
+- **安全审计**：记录关键安全事件，便于追踪和排查。
+- **AI 辅助配置**：通过 Skill 用自然语言配置策略，由你审批变更。
 
 ## 安装
 
@@ -34,12 +35,12 @@ irm https://github.com/ohmydevelop/hyperhub/releases/latest/download/install.ps1
 hyperhub start
 ```
 
-## 使用
+## 配置与使用
 
-在支持 Skill 的 AI Agent 中输入，让 AI 引导配置和使用：
+在支持 Skill 的 AI 助手中输入：
 
 ```text
-请使用 $hyperhub-cli 查看当前配置，并帮我配置需要的安全策略。
+请使用 $hyperhub-cli，帮我配置访问策略并运行需要托管的程序。
 ```
 
-更多说明：[CLI 与 Agent 使用](docs/cli-llm-workflow.md) · [平台与保护范围](docs/hook-intent-matrix.md)
+更多说明：[使用指南](docs/cli-llm-workflow.md) · [平台与保护范围](docs/hook-intent-matrix.md)
